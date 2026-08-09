@@ -7,10 +7,10 @@ arquitetura e, nas próximas etapas, do codec e dos vetores de conformidade.
 
 ## Estado atual
 
-O BTP v1 está em fase de especificação. A fundação e as responsabilidades dos
-componentes estão documentadas, mas o wire format ainda **não está congelado**
-e não existe codec pronto para uso. Os detalhes serão definidos de forma
-sequencial pelos tópicos em [`topicos/`](topicos/).
+O BTP v1 está em fase de especificação. A fundação, as responsabilidades dos
+componentes e o [wire format do envelope](docs/BTP_V1.md) estão documentados.
+Os payloads dos canais e o codec ainda serão definidos de forma sequencial
+pelos tópicos em [`topicos/`](topicos/).
 
 Não existe nem será criado suporte ao protocolo legado. Até a publicação de
 uma versão identificada, nenhum consumidor deve tratar o conteúdo atual como
@@ -50,6 +50,7 @@ bally_protocol/
 |-- PLANO_GERAL.txt
 |-- docs/
 |   |-- ARCHITECTURE.md
+|   |-- BTP_V1.md
 |   |-- VERSIONING.md
 |   `-- decisions/
 `-- topicos/

@@ -10,7 +10,7 @@ em conjunto:
 - os vetores de conformidade daquela revisão.
 
 Enquanto o contrato estiver em elaboração, as versões são `0.y.z` e podem
-mudar de forma incompatível. O primeiro wire format congelado será `v1.0.0`.
+mudar de forma incompatível. O primeiro wire format publicado será `v1.0.0`.
 
 ## SemVer aplicado ao BTP
 
@@ -26,9 +26,9 @@ novos vetores e release.
 
 ## Identificação no wire e na biblioteca
 
-O wire format carregará versão suficiente para rejeitar incompatibilidades e
-negociar extensões. A posição e a codificação desse campo serão definidas no
-tópico de wire format.
+O wire format carrega a versão no campo definido em
+[`BTP_V1.md`](BTP_V1.md), suficiente para rejeitar incompatibilidades e
+negociar extensões explicitamente.
 
 A biblioteca deve expor sua versão e o intervalo de versões de protocolo que
 suporta. A versão do artefato segue a release do repositório, mesmo quando uma

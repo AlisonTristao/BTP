@@ -131,8 +131,10 @@ representação de memória de uma `struct`, pois padding, alinhamento, ABI e
 endianness variam entre plataformas.
 
 ESP-NOW e USB Serial são transportes, não versões alternativas da semântica do
-BTP. A serial protocolada usará frames BTP delimitados por COBS; detalhes de
-framing, fragmentação, CRC e offsets serão definidos nos tópicos próprios.
+BTP. O envelope, o CRC, os limites e as invariantes de fragmentação estão em
+[`BTP_V1.md`](BTP_V1.md). A serial protocolada usará frames BTP delimitados por
+COBS; as regras operacionais de cada transporte e de reassembly pertencem aos
+tópicos próprios.
 
 ## Compatibilidade
 
@@ -144,13 +146,12 @@ Especificação, implementação compartilhada e vetores de conformidade existem
 somente neste repositório. Consulte a [política de
 versionamento](VERSIONING.md) e o [registro de decisões](decisions/README.md).
 
-## Decisões ainda não congeladas
+## Estado das decisões do contrato
 
-Esta fundação não define o layout do wire. Permanecem para os próximos tópicos:
+O layout, os campos, o CRC e os limites do envelope estão congelados em
+[`BTP_V1.md`](BTP_V1.md). Permanecem para os próximos tópicos:
 
-- campos, offsets e limites do envelope BTP v1;
-- algoritmo, cobertura e representação do CRC;
 - tipos de schema, arrays e regras exatas de `PACKED_LE`;
 - mensagens de comando, manifesto, sessão e terminal;
-- regras de transporte, COBS, fragmentação e reassembly;
+- regras operacionais de transporte, COBS e reassembly;
 - formato de distribuição da futura biblioteca compartilhada.

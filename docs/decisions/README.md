@@ -15,6 +15,7 @@ Estados permitidos: `Proposta`, `Aceita`, `Substituída` e `Rejeitada`.
 | [0004 - Gateway, catálogo e apresentação](0004-gateway-catalogo-e-apresentacao.md) | Aceita | 13 e responsabilidades de dongle/TraceView |
 | [0005 - Transportes, entrega e integridade](0005-transportes-entrega-e-integridade.md) | Aceita | 14 a 18 |
 | [0006 - Versionamento conjunto](0006-versionamento-conjunto.md) | Aceita | Política de versão do protocolo e biblioteca |
+| [0007 - Wire format do envelope BTP v1](0007-wire-format-btp-v1.md) | Aceita | Layout, identidade, CRC, fragmentação e limites do frame v1 |
 
 ## Como criar uma decisão
 
