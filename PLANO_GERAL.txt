@@ -1,0 +1,150 @@
+BALLY TELEMETRY PROTOCOL (BTP) V1
+PLANO GERAL DE DOCUMENTACAO E IMPLEMENTACAO
+
+Objetivo
+========
+
+Criar uma linguagem binaria unica, versionada e testavel para:
+
+  bally_software (firmware do robo, tambem referido como bally_OS)
+      -> ESP-NOW
+  t_dongle_develop (gateway, persistencia, comandos e terminal)
+      -> USB Serial
+  TraceView (cliente de telemetria, graficos e controles)
+
+O repositorio bally_protocol sera a fonte canonica do contrato. Os demais
+repositorios dependem de uma versao identificada desse contrato, mas nao
+mantem copias independentes da especificacao ou do codec.
+
+Decisoes ja tomadas
+====================
+
+1. Nao havera suporte ao protocolo legado.
+2. A migracao pode remover a struct message e o parser serial antigos.
+3. Nenhuma struct C/C++ sera transmitida por reinterpret_cast.
+4. O wire format usa tipos de largura fixa e serializacao little-endian.
+5. O payload e sempre uma sequencia opaca de bytes com tamanho explicito.
+6. Payloads podem conter 0x00, CR, LF e qualquer outro byte.
+7. Telemetria de producao usa PACKED_LE; CSV fica apenas como formato
+   opcional de teste/diagnostico.
+8. LOG, TELEMETRY, COMMAND e TERMINAL sao canais logicos diferentes.
+9. O ID de telemetria identifica um topico, nunca um grafico.
+10. Graficos se associam a source + topic + field.
+11. O timestamp e criado na origem e nunca substituido pelo dongle.
+12. O Logger continua destinado a eventos/logs; amostras frequentes usam um
+    TelemetryPublisher separado.
+13. O dongle e dono das acoes virtuais persistidas e do catalogo apresentado
+    ao computador.
+14. A serial usa frames BTP delimitados por COBS no modo protocolado.
+15. O console humano continua existindo como um modo separado.
+16. Comandos possuem request ID, resultado e deduplicacao.
+17. Telemetria e best effort; nao recebe ACK por amostra.
+18. CRC detecta corrupcao, mas nao e autenticacao.
+
+Repositorios no workspace
+=========================
+
+  C:\git\bally_protocol
+  C:\git\bally_software
+  C:\git\t_dongle_develop
+  C:\git\TraceView
+
+Observacao Git
+==============
+
+No momento da criacao deste plano, bally_protocol estava sem commits e o
+arquivo .git/HEAD apontava para refs/heads/.invalid. Corrigir a branch antes
+do primeiro commit, sem apagar ou recriar o repositorio inadvertidamente.
+
+Como usar os topicos
+====================
+
+Cada arquivo em topicos/ representa um chat/tarefa independente. Antes de
+iniciar um topico:
+
+1. Confirmar que todos os topicos listados em DEPENDENCIAS foram concluidos.
+2. Ler AGENTS.md/CONTRIBUTING.md/README.md aplicaveis ao repositorio alterado.
+3. Verificar git status e preservar mudancas existentes do usuario.
+4. Nao criar commits, tags ou publicar pacotes sem pedido explicito.
+5. Atualizar a documentacao canonica quando uma decisao do wire format mudar.
+6. Nao adicionar adaptadores, parsers ou flags de compatibilidade legada.
+7. Executar os builds e testes indicados no proprio topico.
+8. Encerrar o chat informando arquivos alterados, testes e decisoes pendentes.
+
+Ordem dos chats
+===============
+
+BLOCO A - CONTRATO CANONICO (sequencial)
+
+  01 - Fundacao do repositorio e arquitetura
+  02 - Wire format BTP v1
+  03 - Telemetria binaria, arrays e schemas
+  04 - Comandos, manifesto, sessao e terminal
+  05 - Transportes ESP-NOW e Serial/COBS
+
+BLOCO B - IMPLEMENTACAO COMPARTILHADA (sequencial)
+
+  06 - Codec binario e CRC
+  07 - COBS, fragmentacao e reassembly
+  08 - Vetores de teste e conformidade
+
+BLOCO C - FIRMWARE DO ROBO (sequencial; pode comecar apos 08)
+
+  09 - Integracao base no bally_software
+  10 - TelemetryPublisher e primeiro topico
+  11 - Comandos, resultados e scheduler de TX
+
+BLOCO D - DONGLE (sequencial; 12 pode comecar apos 08)
+
+  12 - Recepcao BTP, roteamento e filas
+  13 - SerialMux, COBS e sessao protocolada
+
+BLOCO E - TRACEVIEW (14 pode comecar apos 08; 15 depende de 10, 13 e 14)
+
+  14 - Cliente BTP e modelo de dados
+  15 - Fatia vertical de telemetria binaria
+
+BLOCO F - RECURSOS DE ECOSSISTEMA
+
+  16 - Manifesto e descoberta
+  17 - Assinaturas e controle de taxa
+  18 - Acoes persistidas e comandos virtuais
+  19 - Terminal protocolado
+  20 - Migracao completa dos topicos
+
+BLOCO G - FECHAMENTO
+
+  21 - Robustez, seguranca e testes de carga
+  22 - Limpeza, documentacao final e release v1
+
+Marco 1 - Contrato congelado
+============================
+
+Topicos 01 a 08 concluidos. O mesmo vetor binario deve ser codificado e
+decodificado igualmente em C++ do ESP-IDF, Arduino e Qt/desktop.
+
+Marco 2 - Primeira amostra ponta a ponta
+========================================
+
+Topicos 09 a 15 concluidos:
+
+  bally_software produz protocol.test em PACKED_LE
+      -> dongle valida e encaminha sem converter para texto
+      -> TraceView decodifica pelo schema e plota pelo timestamp da origem
+
+O payload de teste deve conter bytes 0x00, 0x0A e 0x0D para demonstrar que
+nao existe dependencia de strings ou delimitadores de linha.
+
+Marco 3 - Ecossistema autodetectavel
+====================================
+
+Topicos 16 a 19 concluidos. Um computador novo conecta, recebe manifesto,
+descobre topicos e acoes, assina dados e usa o terminal sem misturar canais.
+
+Marco 4 - BTP v1 completo
+=========================
+
+Topicos 20 a 22 concluidos. Todos os produtores e consumidores antigos foram
+removidos, a carga foi medida no hardware e a versao 1 esta documentada,
+testada e pronta para ser fixada em uma tag.
+

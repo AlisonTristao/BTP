@@ -1,0 +1,32 @@
+TOPICO 13 - DONGLE: SERIALMUX, COBS E SESSAO
+
+OBJETIVO
+Criar uma unica saida serial protocolada sem misturar terminal, log e telemetria.
+
+DEPENDENCIAS
+Topicos 05, 07 e 12 concluidos.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\t_dongle_develop
+
+PASSOS
+1. Criar estado Console e ProtocolSession.
+2. Adicionar comando de shell para negociar BTP v1.
+3. Evitar prompts de boot bloqueantes para clientes automaticos.
+4. Criar um SerialMux como unico escritor no modo protocolado.
+5. Codificar cada frame com COBS e delimitadores 0x00.
+6. Decodificar frames recebidos incrementalmente.
+7. Encaminhar TELEMETRY, LOG, STATUS e COMMAND_RESULT em canais proprios.
+8. Enfileirar TERMINAL_IN/OUT separadamente.
+9. Aplicar prioridades e limites de fila.
+10. Implementar timeout/desconexao que retorna ao console de forma segura.
+11. Garantir que nenhuma task escreva Serial diretamente no modo BTP.
+12. Criar teste de estresse com telemetria e terminal simultaneos.
+
+CRITERIOS DE ACEITE
+- Terminal nao recebe bytes de TELEMETRY.
+- Payload contendo CR/LF/zero atravessa a serial intacto.
+- Frame parcial e ruido recuperam no delimitador seguinte.
+- Um computador comum ainda pode usar o console apos reboot.
+

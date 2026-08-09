@@ -1,0 +1,34 @@
+TOPICO 09 - BALLY_OS/BALLY_SOFTWARE: INTEGRACAO BASE
+
+OBJETIVO
+Substituir a infraestrutura de mensagens ESP-NOW antiga pelo BTP, ainda sem
+migrar todos os produtores de dados.
+
+DEPENDENCIAS
+Topico 08 concluido.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\bally_software
+
+PASSOS
+1. Ler CONTRIBUTING.md do firmware e preservar as regras de tasks/memoria.
+2. Integrar uma versao identificavel de bally_protocol ao build.
+3. Remover SharedMessageTypes.h, messageContent_t e transmissao por sizeof.
+4. Criar identidade source_id e boot_id.
+5. Criar contador sequence seguro no contexto das tasks produtoras.
+6. Adaptar envio ESP-NOW para frame de tamanho real.
+7. Adaptar recepcao para decoder BTP com validacao completa.
+8. Colocar somente COMMAND_REQUEST valido na fila do shell/comandos.
+9. Rejeitar qualquer outro tipo como entrada de comando.
+10. Validar origem autorizada antes da execucao.
+11. Atualizar Logger para emitir LOG BTP, preservando o ring de PSRAM.
+12. Remover checksum e fragmentacao antigos.
+13. Adicionar testes de integracao usando os vetores canonicos.
+
+CRITERIOS DE ACEITE
+- Nao resta envio/recepcao da struct message antiga.
+- Logs do Logger saem como frames BTP validos.
+- TELEMETRY ou LOG recebidos nunca sao executados como comando.
+- Build esp32-s3 e testes passam sem warnings novos.
+

@@ -1,0 +1,30 @@
+TOPICO 07 - COBS, FRAGMENTACAO E REASSEMBLY
+
+OBJETIVO
+Implementar utilitarios comuns de stream serial e mensagens maiores que um frame.
+
+DEPENDENCIAS
+Topico 06 concluido.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Implementar COBS encode/decode com buffers fornecidos pelo chamador.
+2. Testar vazio, zeros consecutivos e todos os valores de byte.
+3. Implementar decoder serial incremental delimitado por 0x00.
+4. Aplicar limite de frame e descarte ate o proximo delimitador em overflow.
+5. Implementar fragmentador preservando source, boot, sequence e type.
+6. Implementar reassembly indexado pela identidade completa da mensagem.
+7. Aceitar fragmentos fora de ordem ou documentar/restringir a ordem.
+8. Detectar duplicatas, total divergente e indice fora do intervalo.
+9. Implementar timeout e liberacao deterministica de slots.
+10. Limitar memoria e quantidade simultanea de mensagens em reassembly.
+11. Testar dois sources intercalando fragmentos.
+
+CRITERIOS DE ACEITE
+- O proximo frame valido e recuperado depois de ruido ou frame parcial.
+- Fragmentos de mensagens distintas nunca sao concatenados.
+- Mensagem incompleta nunca chega ao consumidor.
+- Nao ha crescimento de memoria sem limite.
+

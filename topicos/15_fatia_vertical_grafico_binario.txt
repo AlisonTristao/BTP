@@ -1,0 +1,29 @@
+TOPICO 15 - FATIA VERTICAL: PRIMEIRO GRAFICO BINARIO
+
+OBJETIVO
+Validar BTP de ponta a ponta com hardware real antes de ampliar o protocolo.
+
+DEPENDENCIAS
+Topicos 10, 12, 13 e 14 concluidos.
+
+REPOSITORIOS
+Todos os quatro repositorios.
+
+PASSOS
+1. Usar o topico protocol.test definido no schema canonico.
+2. Fazer bally_software publicar counter + float32 em PACKED_LE.
+3. Confirmar frame ESP-NOW de tamanho real e CRC valido.
+4. Confirmar que o dongle apenas valida/roteia, sem converter payload.
+5. Confirmar COBS na serial e preservacao dos bytes especiais.
+6. Fazer TraceView decodificar pelo schema e plotar pelo timestamp de origem.
+7. Abrir terminal simultaneamente e comprovar ausencia de mistura.
+8. Desconectar/reconectar e validar novo HELLO/Boot ID.
+9. Medir taxa enviada, recebida, plotada e quantidade de drops.
+10. Registrar uma captura binaria como vetor/integracao de referencia.
+
+CRITERIOS DE ACEITE
+- Valor plotado corresponde exatamente ao produzido pelo robo.
+- 0x00, CR e LF no payload nao afetam framing ou terminal.
+- Sequence permite observar perdas.
+- Nenhum componente usa parser de string para a amostra.
+

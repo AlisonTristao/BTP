@@ -1,0 +1,31 @@
+TOPICO 20 - MIGRACAO COMPLETA DOS TOPICOS
+
+OBJETIVO
+Migrar os dados reais do robo para schemas binarios medidos e documentados.
+
+DEPENDENCIAS
+Topicos 15 a 17 concluidos.
+
+REPOSITORIOS
+Todos os quatro repositorios.
+
+PASSOS
+1. Inventariar todos os logs usados como telemetria atualmente.
+2. Classificar cada item como LOG, EVENT ou TELEMETRY.
+3. Definir IDs estaveis e schemas para estado, bateria, motores, encoders,
+   array de linha, IMU, EKF e diagnosticos.
+4. Agrupar campos amostrados juntos para reduzir overhead.
+5. Escolher precisao/tipo menor quando nao houver perda util.
+6. Garantir que cada amostra frequente caiba em um frame sempre que possivel.
+7. Migrar um dominio por vez com vetor de teste e grafico de verificacao.
+8. Adicionar unidades, escalas, limites e taxa maxima ao manifesto.
+9. Comparar valores binarios com leituras locais conhecidas.
+10. Remover logs textuais que existiam apenas para alimentar graficos.
+11. Manter eventos importantes tambem como LOG quando fizer sentido humano.
+12. Medir trafego agregado no pior perfil de assinatura.
+
+CRITERIOS DE ACEITE
+- Todo grafico usa topico/schema, nao parsing de texto.
+- Logger nao e inundado por amostras de alta frequencia.
+- Taxa total cabe no orcamento medido com margem definida.
+

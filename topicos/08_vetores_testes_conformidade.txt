@@ -1,0 +1,28 @@
+TOPICO 08 - VETORES DE TESTE E CONFORMIDADE
+
+OBJETIVO
+Criar a referencia binaria que impedira divergencias entre os tres projetos.
+
+DEPENDENCIAS
+Topicos 06 e 07 concluidos.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Criar test-vectors/v1/valid e invalid.
+2. Gerar HELLO, LOG UTF8, TELEMETRY PACKED_LE e COMMAND_REQUEST validos.
+3. Incluir array com 0x00, 0x0A, 0x0D, 0x7F, 0x80 e 0xFF.
+4. Incluir mensagem fragmentada e dois sources intercalados.
+5. Incluir frames com CRC, magic, versao, tamanho e indices invalidos.
+6. Salvar .bin e descricao JSON/humana de cada vetor.
+7. Criar teste que codifica a descricao e compara bytes exatos.
+8. Criar teste que decodifica .bin e compara todos os campos.
+9. Criar instrucoes para consumidores rodarem a suite de conformidade.
+10. Registrar qualquer alteracao de vetor como mudanca de contrato.
+
+CRITERIOS DE ACEITE
+- Os bytes esperados nao dependem de sizeof, alinhamento ou compilador.
+- O mesmo conjunto pode ser usado no ESP-IDF, Arduino e Qt.
+- Casos invalidos falham pelo motivo documentado.
+

@@ -1,0 +1,29 @@
+TOPICO 16 - MANIFESTO E DESCOBERTA
+
+OBJETIVO
+Permitir que um computador novo descubra automaticamente dispositivos, topicos,
+schemas e capacidades.
+
+DEPENDENCIAS
+Topico 15 concluido.
+
+REPOSITORIOS
+Todos os quatro repositorios.
+
+PASSOS
+1. Finalizar schema de HELLO e MANIFEST na especificacao.
+2. Fazer o robo anunciar identidade, boot, versao e schemas suportados.
+3. Fazer o dongle cachear/agregar manifests por source.
+4. Persistir apenas o que precisar sobreviver a reboot e invalidar por revisao.
+5. Incluir config_revision no HELLO do dongle.
+6. Fazer TraceView solicitar manifesto apenas quando revisao mudar.
+7. Montar catalogo source/topic/field com unidades e tipos.
+8. Fragmentar manifesto grande usando o mecanismo comum.
+9. Rejeitar amostra com schema_version desconhecida e solicitar atualizacao.
+10. Testar computador sem cache e computador com cache desatualizado.
+
+CRITERIOS DE ACEITE
+- TraceView nao precisa de tipos/indices digitados manualmente para decodificar.
+- Mudanca de schema nao gera interpretacao silenciosamente incorreta.
+- Manifesto de varios robos nao produz colisao de topic_id.
+

@@ -1,0 +1,35 @@
+TOPICO 14 - TRACEVIEW: CLIENTE BTP E MODELO DE DADOS
+
+OBJETIVO
+Substituir o protocolo de linhas por uma sessao BTP binaria independente da UI.
+
+DEPENDENCIAS
+Topico 08 concluido.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\TraceView
+
+PASSOS
+1. Ler CONTRIBUTING.md e preservar a separacao transporte/protocolo/UI.
+2. Integrar bally_protocol ao CMake.
+3. Remover SerialLineAssembler e decodeFrame [time][id].
+4. Criar BtpSession sobre SerialManager.
+5. Implementar decoder COBS incremental e validacao BTP.
+6. Criar ProtocolRouter por MessageType.
+7. Definir TelemetrySample com source, boot, sequence, timestamp, topic,
+   schema_version e QByteArray payload.
+8. Nunca converter TELEMETRY para UTF-8 antes do decoder de schema.
+9. Criar catalogo de sources/topics/schemas independente dos widgets.
+10. Alterar roteamento de um widget por key para varios assinantes por campo.
+11. Manter buffers de pares timestamp/valor.
+12. Separar taxa de ingestao da taxa de repaint.
+13. Adicionar contadores de CRC, frame, schema e drop para diagnostico.
+14. Remover configuracoes que duplicam encoding/tipo pertencentes ao schema.
+
+CRITERIOS DE ACEITE
+- O timestamp nao e descartado no roteador.
+- Dois widgets podem consumir o mesmo campo.
+- Payload binario com zero nao e truncado.
+- Parser/protocolo possui testes sem QWidget.
+

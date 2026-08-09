@@ -1,0 +1,35 @@
+TOPICO 12 - DONGLE: RECEPCAO BTP, ROTEAMENTO E FILAS
+
+OBJETIVO
+Substituir EspNowManager/EspNowConfig baseados na struct antiga por um pipeline
+BTP validado e roteado por tipo.
+
+DEPENDENCIAS
+Topico 08 concluido.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\t_dongle_develop
+
+PASSOS
+1. Ler CONTRIBUTING.md e preservar o DAG das bibliotecas.
+2. Integrar bally_protocol ao PlatformIO.
+3. Remover SharedMessageTypes.h e todos os acessos a message antigo.
+4. Receber datagrama como bytes + tamanho e decodificar BTP.
+5. Validar CRC antes de enfileirar.
+6. Substituir o assembly visual global pelo reassembly compartilhado.
+7. Criar ProtocolRouter para HELLO, LOG, TELEMETRY, COMMAND, STATUS e MANIFEST.
+8. Preservar source_id, boot_id, sequence e timestamp da origem.
+9. Registrar hora de chegada apenas como metadado local, sem sobrescrever.
+10. Criar filas separadas/priorizadas, com contadores de drop.
+11. Encaminhar TELEMETRY como bytes, sem String, snprintf ou formatacao visual.
+12. Atualizar heartbeat para o tipo BTP definido.
+13. Remover formatacao serial antiga [TYPE][arrival][packet/total].
+14. Rodar build tdongle-s3 e testes com vetores canonicos.
+
+CRITERIOS DE ACEITE
+- Nenhum codigo depende de sizeof(message) legado.
+- Payload binario e preservado byte a byte.
+- Dois robos podem fragmentar simultaneamente.
+- Timestamp original chega intacto ao proximo estagio.
+

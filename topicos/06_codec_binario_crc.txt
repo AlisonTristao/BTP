@@ -1,0 +1,30 @@
+TOPICO 06 - CODEC BINARIO E CRC
+
+OBJETIVO
+Implementar o nucleo portavel de encode/decode do frame BTP.
+
+DEPENDENCIAS
+Topicos 01 a 05 concluidos e wire format revisado.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Criar headers publicos pequenos e independentes de plataforma.
+2. Representar payload como ponteiro/span de bytes mais tamanho.
+3. Implementar leitura/escrita little-endian sem casts desalinhados.
+4. Implementar CRC32 exatamente conforme a especificacao.
+5. Implementar calculo de tamanho antes da escrita.
+6. Implementar encoder em buffer fornecido pelo chamador.
+7. Implementar decoder validando magic, versao, header, tamanho e CRC.
+8. Rejeitar campos reservados invalidos e payload acima do limite.
+9. Nao exigir heap, Arduino String, std::string, QString ou QObject.
+10. Criar testes unitarios de round trip e corrupcao de cada campo.
+11. Compilar o nucleo ao menos com toolchain desktop e uma toolchain embarcada.
+
+CRITERIOS DE ACEITE
+- Nenhuma struct e enviada como memoria crua.
+- Decoder nunca le alem do buffer informado.
+- Payload binario retorna byte a byte identico.
+- CRC invalido e tamanho incoerente sao rejeitados antes do roteamento.
+

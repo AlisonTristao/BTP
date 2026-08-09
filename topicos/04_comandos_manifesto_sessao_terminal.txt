@@ -1,0 +1,34 @@
+TOPICO 04 - COMANDOS, MANIFESTO, SESSAO E TERMINAL
+
+OBJETIVO
+Especificar os tipos nao relacionados diretamente a amostras de telemetria.
+
+DEPENDENCIAS
+Topicos 02 e 03 concluidos.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Criar docs/COMMANDS_AND_ACTIONS.md.
+2. Definir COMMAND_REQUEST e COMMAND_RESULT.
+3. Usar sequence da requisicao como request ID ou definir explicitamente a
+   correlacao reply_to_sequence.
+4. Definir status, error_code, mensagem opcional e payload de resultado.
+5. Definir deduplicacao e idempotencia de comandos repetidos.
+6. Definir HELLO, versoes suportadas, UUID e config_revision.
+7. Definir MANIFEST_REQUEST e MANIFEST_DATA.
+8. Definir descricao de sources, topics, fields e actions no manifesto.
+9. Definir SUBSCRIBE, UNSUBSCRIBE, taxa solicitada e taxa efetiva.
+10. Definir STATUS e contadores de frames/drops/CRC/reassembly.
+11. Definir TERMINAL_IN e TERMINAL_OUT como bytes opacos.
+12. Definir entrada e saida do modo protocolado e retorno seguro ao console.
+13. Definir limites, timeouts e comportamento quando uma versao nao combina.
+14. Definir prioridade logica entre comandos, status, terminal, logs e telemetria.
+
+CRITERIOS DE ACEITE
+- Um comando possui resposta inequivoca e nao executa duas vezes por retry.
+- Um computador novo consegue descobrir topicos e acoes.
+- O terminal nunca precisa interpretar um frame TELEMETRY.
+- Manifesto e respostas grandes podem usar a fragmentacao comum.
+

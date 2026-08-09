@@ -1,0 +1,28 @@
+TOPICO 17 - ASSINATURAS E CONTROLE DE TAXA
+
+OBJETIVO
+Transmitir apenas os topicos necessarios na taxa suportada pelo sistema.
+
+DEPENDENCIAS
+Topico 16 concluido.
+
+REPOSITORIOS
+Todos os quatro repositorios.
+
+PASSOS
+1. Congelar SUBSCRIBE/UNSUBSCRIBE e respostas na especificacao.
+2. TraceView agrega assinaturas de todos os widgets.
+3. Dongle agrega pedidos de clientes e encaminha ao source correto.
+4. Robo aplica min/max/default do schema e retorna taxa efetiva.
+5. Remover assinatura somente quando nao houver outro consumidor.
+6. Definir comportamento na desconexao da sessao.
+7. Criar rate limiting sem bloquear tasks criticas.
+8. Medir bytes/s por topico e ocupacao das filas.
+9. Expor taxa efetiva e drops em STATUS.
+10. Testar multiplos graficos e alteracao dinamica de taxa.
+
+CRITERIOS DE ACEITE
+- Fechar um grafico reduz trafego quando nenhum outro consumidor usa o topico.
+- Pedido acima do maximo e limitado e informado ao cliente.
+- Controle de taxa nao altera timestamp nem schema.
+

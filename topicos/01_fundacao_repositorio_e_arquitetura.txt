@@ -1,0 +1,37 @@
+TOPICO 01 - FUNDACAO DO REPOSITORIO E ARQUITETURA
+
+OBJETIVO
+Estruturar bally_protocol como fonte canonica e documentar as responsabilidades
+de bally_software, t_dongle_develop e TraceView.
+
+DEPENDENCIAS
+Nenhuma.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Corrigir de forma segura a branch invalida do repositorio vazio.
+2. Criar README.md com objetivo, projetos consumidores e estado do protocolo.
+3. Criar docs/ARCHITECTURE.md com os fluxos robo -> dongle -> PC.
+4. Criar docs/decisions/ e registrar as decisoes listadas em PLANO_GERAL.txt.
+5. Documentar a separacao entre Logger e TelemetryPublisher.
+6. Documentar o dongle como gateway, catalogo e dono das acoes persistidas.
+7. Documentar o TraceView como apresentacao, sem semantica de comando local.
+8. Definir politica de versionamento do protocolo e da biblioteca.
+9. Definir que especificacao e codigo compartilhado nao serao copiados entre
+   repositorios.
+10. Criar CONTRIBUTING.md com testes obrigatorios e processo para mudar o wire.
+
+FORA DO ESCOPO
+Nao definir ainda offsets de bytes nem implementar codec.
+
+CRITERIOS DE ACEITE
+- Um novo colaborador entende quem produz, roteia, persiste e apresenta dados.
+- Esta explicito que nao existe suporte legado.
+- Esta explicito que payload e binario e possui tamanho, nao terminador.
+- Mudancas futuras de wire exigem documentacao, vetor de teste e versao.
+
+ENTREGA DO CHAT
+Listar a arvore criada e resumir decisoes que ainda precisam ser congeladas.
+

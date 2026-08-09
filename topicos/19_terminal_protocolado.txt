@@ -1,0 +1,31 @@
+TOPICO 19 - TERMINAL PROTOCOLADO
+
+OBJETIVO
+Entregar experiencia tipo miniterm sobre os canais TERMINAL_IN/OUT sem corrupcao
+por telemetria assincrona.
+
+DEPENDENCIAS
+Topicos 13 e 14 concluidos.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\t_dongle_develop
+C:\git\TraceView
+
+PASSOS
+1. Listar exatamente as sequencias ANSI usadas por ShellSerial.
+2. Decidir e documentar se edicao vive no dongle ou no TraceView.
+3. Se viver no dongle, transportar teclas/escape como TERMINAL_IN opaco.
+4. Transportar eco, prompt e respostas somente em TERMINAL_OUT.
+5. Implementar o subconjunto VT100 necessario ou um modelo de linha equivalente.
+6. Remover prompt local duplicado e eco duplo do widget atual.
+7. Garantir copy/selection/scroll sem enviar teclas acidentalmente.
+8. Testar backspace, setas, Ctrl+C, Ctrl+D, Tab e historico.
+9. Testar logs e telemetria intensos enquanto uma linha esta sendo editada.
+10. Confirmar que reboot volta ao console humano normal.
+
+CRITERIOS DE ACEITE
+- Texto digitado nao e perdido ou deslocado por mensagens assincronas.
+- Telemetria nunca aparece como caracteres do terminal.
+- Nao existe prompt/eco duplicado entre PC e dongle.
+

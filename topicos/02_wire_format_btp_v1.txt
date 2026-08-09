@@ -1,0 +1,43 @@
+TOPICO 02 - WIRE FORMAT BTP V1
+
+OBJETIVO
+Especificar normativamente o frame BTP v1, campo por campo e byte por byte.
+
+DEPENDENCIAS
+Topico 01 concluido.
+
+REPOSITORIO PRINCIPAL
+C:\git\bally_protocol
+
+PASSOS
+1. Criar docs/BTP_V1.md usando linguagem MUST/SHOULD/MAY.
+2. Congelar magic, version, type, flags e header_size.
+3. Congelar source_id, boot_id, sequence e timestamp_us.
+4. Congelar object_id, fragment_index, fragment_count e payload_size.
+5. Definir a posicao do CRC32 e exatamente quais bytes ele cobre.
+6. Definir little-endian para todos os inteiros multibyte.
+7. Definir tamanhos maximos para ESP-NOW e para a serial.
+8. Definir que o frame ESP-NOW usa somente header + payload valido + CRC,
+   sem transmitir padding ate 250 bytes.
+9. Definir regras para tipos e flags desconhecidos.
+10. Definir sequence por mensagem logica; todos os fragmentos compartilham a
+    mesma sequence.
+11. Definir boot_id novo a cada boot e source_id estavel por dispositivo.
+12. Definir timestamp de origem em microssegundos e proibir o dongle de troca-lo
+    pela hora de chegada.
+13. Incluir diagramas de offsets e exemplos hexadecimais ainda que manuais.
+14. Adicionar static limits normativos para impedir frame maior que o transporte.
+
+DECISAO BASE A VALIDAR
+Usar cabecalho explicito proximo de 36 bytes e CRC32 de 4 bytes, preservando
+aproximadamente 210 bytes de payload em um datagrama ESP-NOW de 250 bytes.
+
+FORA DO ESCOPO
+Nao implementar structs enviadas diretamente nem codec da plataforma.
+
+CRITERIOS DE ACEITE
+- Dois implementadores independentes produziriam os mesmos bytes.
+- Nao existe size_t, enum com tamanho implicito ou padding no contrato.
+- O frame aceita payload contendo qualquer byte.
+- Fragmentos de dispositivos diferentes nunca compartilham identidade.
+

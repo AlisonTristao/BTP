@@ -1,0 +1,31 @@
+TOPICO 10 - BALLY_OS/BALLY_SOFTWARE: TELEMETRY PUBLISHER
+
+OBJETIVO
+Criar o caminho de alta frequencia para amostras binárias, separado do Logger.
+
+DEPENDENCIAS
+Topico 09 concluido e documento TELEMETRY.md congelado.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\bally_software
+
+PASSOS
+1. Criar TelemetryPublisher desacoplado de sensores e UI.
+2. Usar fila bounded e memoria pre-alocada apropriada ao firmware.
+3. Publicar timestamp_us no momento da amostragem, nao no envio.
+4. Registrar schemas/topicos estaticos do firmware.
+5. Implementar PACKED_LE sem snprintf, CSV, hex ou terminador.
+6. Criar primeiro topico protocol.test com u32 counter e float32 value.
+7. Fazer o payload de teste produzir representacoes contendo zero, CR e LF.
+8. Criar depois um topico real pequeno, como estado ou bateria.
+9. Contabilizar amostras descartadas por fila cheia.
+10. Garantir que publicar nunca bloqueie a task de controle.
+11. Testar bytes do payload contra um vetor canonico.
+
+CRITERIOS DE ACEITE
+- TelemetryPublisher nao usa Logger como fila de amostras.
+- Uma amostra e enviada sem conversao textual.
+- Timestamp representa a origem.
+- Fila cheia tem politica explicita e nao bloqueia o robo.
+

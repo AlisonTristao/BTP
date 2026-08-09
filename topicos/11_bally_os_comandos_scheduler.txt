@@ -1,0 +1,31 @@
+TOPICO 11 - BALLY_OS/BALLY_SOFTWARE: COMANDOS E SCHEDULER
+
+OBJETIVO
+Implementar comandos confiaveis e prioridade de transmissao no robo.
+
+DEPENDENCIAS
+Topicos 09 e 10 concluidos.
+
+REPOSITORIOS
+C:\git\bally_protocol
+C:\git\bally_software
+
+PASSOS
+1. Criar roteamento por MessageType.
+2. Converter COMMAND_REQUEST valido em chamada controlada ao TinyShell/handler.
+3. Produzir COMMAND_RESULT correlacionado com a requisicao.
+4. Implementar cache bounded de requests recentes para deduplicacao.
+5. Responder a retry sem executar novamente.
+6. Criar scheduler com prioridade COMMAND_RESULT > STATUS > LOG critico >
+   TELEMETRY > DEBUG.
+7. Usar callback de entrega ESP-NOW para comandos que exigem resultado.
+8. Nao retransmitir automaticamente cada amostra de telemetria.
+9. Expor contadores de aceite, entrega, timeout e drop.
+10. Testar comando duplicado, origem invalida e fila saturada.
+
+CRITERIOS DE ACEITE
+- Comando duplicado executa uma vez.
+- Congestao de telemetria nao impede COMMAND_RESULT.
+- Erros sao estruturados e correlacionados.
+- Nenhum payload arbitrario vira comando sem validacao de tipo/origem.
+
