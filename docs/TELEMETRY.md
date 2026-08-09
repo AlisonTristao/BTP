@@ -414,6 +414,29 @@ Tabela de `quality`: `0=invalid`, `1=low`, `2=good`, `3=saturated`. Como
 seguida vêm `element_count:uint16_le`, os elementos de `reflectance`, o
 `centroid` somente quando presente e `quality`.
 
+### 9.4 Tópicos iniciais do firmware Bally
+
+O firmware `bally_software` registra estaticamente estes schemas `PACKED_LE`
+versão 1. Os IDs são locais à fonte do robô, mas permanecem estáveis entre
+boots:
+
+| topic_id | name | order / field_id / campo | tipo | unidade |
+| ---: | --- | --- | --- | --- |
+| `0x0001` | `protocol.test` | 0 / 1 / `counter` | `uint32` | `1` |
+| `0x0001` | `protocol.test` | 1 / 2 / `value` | `float32` | `1` |
+| `0x0002` | `robot.state` | 0 / 1 / `state` | `uint8` | `1` |
+
+O payload canônico de `protocol.test` usa `counter=0x01020304` e um
+`float32` finito com bits IEEE-754 `0x3F0D0A00`:
+
+```text
+01 00 04 03 02 01 00 0a 0d 3f
+```
+
+Assim, `0x00`, LF (`0x0A`) e CR (`0x0D`) aparecem dentro da amostra e não
+possuem semântica de terminador. O frame completo correspondente está em
+`test-vectors/v1/valid/protocol_test.bin`.
+
 ## 10. Ordem de validação
 
 Depois de validar o envelope segundo `BTP_V1.md` e concluir eventual

@@ -5,6 +5,7 @@
     "hello",
     "log_utf8",
     "telemetry_packed_le",
+    "protocol_test",
     "command_request",
     "fragment_source_a_0",
     "fragment_source_a_1",

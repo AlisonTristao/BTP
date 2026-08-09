@@ -1,0 +1,36 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "protocol_test",
+  "description": "Primeira amostra canonica protocol.test PACKED_LE; o float32 contem NUL, LF e CR como dados.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0000",
+    "source_id": "0x11223344",
+    "boot_id": "0xA1B2C3D4",
+    "sequence": "0x00000001",
+    "timestamp_us": "0x00000000000F4240",
+    "object_id": "0x0001",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "01 00 04 03 02 01 00 0a 0d 3f"
+  },
+  "payload_model": {
+    "encoding": "PACKED_LE",
+    "schema_version": 1,
+    "fields": [
+      {
+        "field_id": 1,
+        "name": "counter",
+        "type": "uint32",
+        "value": "0x01020304"
+      },
+      {
+        "field_id": 2,
+        "name": "value",
+        "type": "float32",
+        "ieee754_bits": "0x3F0D0A00"
+      }
+    ]
+  }
+}

@@ -18,7 +18,8 @@ envelope BTP.
 [`manifest.json`](../test-vectors/v1/manifest.json) enumera todos os vetores e
 a ordem de chegada do cenário com duas fontes fragmentadas. A suíte cobre:
 
-- `HELLO`, `LOG` UTF-8, `TELEMETRY` `PACKED_LE` e `COMMAND_REQUEST` válidos;
+- `HELLO`, `LOG` UTF-8, `TELEMETRY` `PACKED_LE`, `protocol.test` canônico e
+  `COMMAND_REQUEST` válidos;
 - o array `00 0a 0d 7f 80 ff` dentro de payload binário;
 - fragmentos fora de ordem de duas fontes, intercalados sem mistura;
 - magic, versão, `header_size`, `payload_size`, CRC, índice e contagem de
