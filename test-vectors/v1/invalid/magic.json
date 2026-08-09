@@ -1,0 +1,10 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "invalid_magic",
+  "description": "Primeiro octeto do magic alterado de 0x42 para 0x43.",
+  "base": "hello",
+  "mutations": [
+    {"operation": "set_u8", "offset": 0, "value": "0x43"}
+  ],
+  "expected_error": "InvalidMagic"
+}

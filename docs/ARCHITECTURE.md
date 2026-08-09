@@ -136,9 +136,11 @@ terminal estão em
 
 ESP-NOW e USB Serial são transportes, não versões alternativas da semântica do
 BTP. O envelope, o CRC, os limites e as invariantes de fragmentação estão em
-[`BTP_V1.md`](BTP_V1.md). A serial protocolada usará frames BTP delimitados por
-COBS; as regras operacionais de cada transporte e de reassembly pertencem aos
-tópicos próprios.
+[`BTP_V1.md`](BTP_V1.md). Um frame ou fragmento ocupa um datagrama conforme
+[`TRANSPORT_ESPNOW.md`](TRANSPORT_ESPNOW.md); a serial protocolada usa COBS,
+decoder incremental e propriedade exclusiva da porta conforme
+[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md). O reassembly pertence à
+implementação compartilhada.
 
 ## Compatibilidade
 
@@ -153,7 +155,11 @@ versionamento](VERSIONING.md) e o [registro de decisões](decisions/README.md).
 ## Estado das decisões do contrato
 
 O layout, os campos, o CRC e os limites do envelope estão congelados em
-[`BTP_V1.md`](BTP_V1.md). Permanecem para os próximos tópicos:
+[`BTP_V1.md`](BTP_V1.md), e as regras operacionais dos transportes estão nos
+documentos ESP-NOW e Serial. Os utilitários compartilhados de COBS, decoder
+incremental, fragmentação e reassembly estão implementados e documentados em
+[`STREAM_AND_REASSEMBLY.md`](STREAM_AND_REASSEMBLY.md). Permanecem para os
+próximos tópicos os vetores canônicos de conformidade para todos os canais.
 
-- regras operacionais de transporte, COBS e reassembly;
-- formato de distribuição da futura biblioteca compartilhada.
+O codec do envelope já é compartilhado por CMake e PlatformIO, conforme
+[`CODEC.md`](CODEC.md).

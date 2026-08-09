@@ -1,0 +1,12 @@
+{
+  "name": "bally-protocol",
+  "version": "0.1.0",
+  "description": "Portable, allocation-free codec and transport utilities for Bally Telemetry Protocol v1",
+  "keywords": ["btp", "telemetry", "protocol", "codec"],
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}

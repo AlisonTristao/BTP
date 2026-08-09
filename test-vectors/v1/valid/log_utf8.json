@@ -1,0 +1,22 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "log_utf8",
+  "description": "Evento LOG com texto UTF-8, sem terminador implícito.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "LOG",
+    "flags": "0x0000",
+    "source_id": "0x11223344",
+    "boot_id": "0xA1B2C3D4",
+    "sequence": "0x00000002",
+    "timestamp_us": "0x00000000000F4240",
+    "object_id": "0x0002",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "49 6e 69 63 69 61 6c 69 7a 61 c3 a7 c3 a3 6f 20 4f 4b 3a 20 c2 b5"
+  },
+  "payload_model": {
+    "encoding": "UTF8",
+    "text": "Inicialização OK: µ"
+  }
+}

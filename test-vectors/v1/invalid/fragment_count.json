@@ -1,0 +1,10 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "invalid_fragment_count",
+  "description": "FRAGMENTED está marcado, mas fragment_count vale 1.",
+  "base": "fragment_source_a_0",
+  "mutations": [
+    {"operation": "set_u8", "offset": 35, "value": 1, "recompute_crc": true}
+  ],
+  "expected_error": "InvalidFragmentation"
+}

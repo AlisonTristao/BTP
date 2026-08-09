@@ -3,16 +3,21 @@
 O **Bally Telemetry Protocol (BTP)** é o contrato binário compartilhado entre
 o firmware do robô, o dongle e as aplicações de computador do ecossistema
 Bally. Este repositório é a fonte canônica da especificação, das decisões de
-arquitetura e, nas próximas etapas, do codec e dos vetores de conformidade.
+arquitetura, do codec e dos vetores de conformidade.
 
 ## Estado atual
 
 O BTP v1 está em fase de especificação. A fundação, as responsabilidades, o
 [wire format do envelope](docs/BTP_V1.md), os [payloads de
-telemetria](docs/TELEMETRY.md) e os [comandos, manifesto, sessão e
-terminal](docs/COMMANDS_AND_ACTIONS.md) estão documentados. Os transportes e o
-codec ainda serão definidos de forma sequencial pelos tópicos em
-[`topicos/`](topicos/).
+telemetria](docs/TELEMETRY.md), os [comandos, manifesto, sessão e
+terminal](docs/COMMANDS_AND_ACTIONS.md) e os transportes
+[ESP-NOW](docs/TRANSPORT_ESPNOW.md) e [Serial/COBS](docs/TRANSPORT_SERIAL.md)
+estão documentados. O [codec BTP v1](docs/CODEC.md) portátil e sem alocação
+dinâmica já codifica e valida o envelope. Os utilitários compartilhados de
+[COBS, decoder incremental, fragmentação e reassembly](docs/STREAM_AND_REASSEMBLY.md)
+também estão implementados. Os [vetores canônicos de
+conformidade](docs/CONFORMANCE.md) completam a referência binária comum para as
+toolchains ESP-IDF, Arduino e Qt/desktop.
 
 Não existe nem será criado suporte ao protocolo legado. Até a publicação de
 uma versão identificada, nenhum consumidor deve tratar o conteúdo atual como
@@ -49,12 +54,33 @@ limites de responsabilidade.
 bally_protocol/
 |-- README.md
 |-- CONTRIBUTING.md
+|-- CMakeLists.txt
+|-- library.json
 |-- PLANO_GERAL.txt
+|-- include/btp/
+|   |-- codec.hpp
+|   |-- fragmentation.hpp
+|   `-- stream.hpp
+|-- src/
+|   |-- codec.cpp
+|   |-- fragmentation.cpp
+|   `-- stream.cpp
+|-- tests/
+|-- test-vectors/v1/
+|   |-- valid/
+|   |-- invalid/
+|   `-- manifest.json
+|-- tools/test_vectors.py
 |-- docs/
 |   |-- ARCHITECTURE.md
 |   |-- BTP_V1.md
+|   |-- CODEC.md
+|   |-- CONFORMANCE.md
+|   |-- STREAM_AND_REASSEMBLY.md
 |   |-- COMMANDS_AND_ACTIONS.md
 |   |-- TELEMETRY.md
+|   |-- TRANSPORT_ESPNOW.md
+|   |-- TRANSPORT_SERIAL.md
 |   |-- VERSIONING.md
 |   `-- decisions/
 `-- topicos/
@@ -72,8 +98,13 @@ e integrar o artefato a partir daqui. Não é permitido manter cópias
 independentes da especificação, do codec ou de arquivos-fonte compartilhados
 nos repositórios consumidores.
 
-O mecanismo de empacotamento será definido quando a biblioteca compartilhada
-for criada; essa escolha não altera a regra de fonte canônica única.
+A biblioteca pode ser consumida pelo alvo CMake `btp::codec` ou pelo manifesto
+PlatformIO [`library.json`](library.json), conforme [documentação do
+codec](docs/CODEC.md). Os consumidores devem executar os mesmos
+[vetores de conformidade](docs/CONFORMANCE.md) diretamente desta dependência.
+Publicar pacotes e releases continua exigindo ação
+explícita do mantenedor; esses mecanismos não alteram a regra de fonte
+canônica única.
 
 ## Como contribuir
 

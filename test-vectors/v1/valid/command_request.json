@@ -1,0 +1,29 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "command_request",
+  "description": "COMMAND_REQUEST com parâmetros binários e todos os comprimentos explícitos.",
+  "transport": "serial",
+  "frame": {
+    "type": "COMMAND",
+    "flags": "0x0000",
+    "source_id": "0x0C0D0E0F",
+    "boot_id": "0x10203040",
+    "sequence": "0x00000002",
+    "timestamp_us": "0x00000000000007D0",
+    "object_id": "0x0001",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "44 33 22 11 88 77 66 55 01 02 01 00 00 00 00 00 06 00 00 00 00 0a 0d 7f 80 ff"
+  },
+  "payload_model": {
+    "name": "COMMAND_REQUEST",
+    "target_source_id": "0x11223344",
+    "target_boot_id": "0x55667788",
+    "action_id": "0x0201",
+    "action_version": 1,
+    "flags": 0,
+    "reserved": 0,
+    "parameter_size": 6,
+    "parameters_hex": "00 0a 0d 7f 80 ff"
+  }
+}

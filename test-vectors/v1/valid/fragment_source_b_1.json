@@ -1,0 +1,22 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "fragment_source_b_1",
+  "description": "Segundo fragmento lógico da fonte B no cenário intercalado.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TERMINAL",
+    "flags": "0x0001",
+    "source_id": "0xBBB00002",
+    "boot_id": "0xBBB10002",
+    "sequence": "0x00000020",
+    "timestamp_us": "0x0000000000030D40",
+    "object_id": "0x0002",
+    "fragment_index": 1,
+    "fragment_count": 2,
+    "payload_hex": "a4 a5 a6 a7"
+  },
+  "payload_model": {
+    "logical_payload_hex": "a0 a1 a2 a3 a4 a5 a6 a7",
+    "fragment_slice": "bytes 4..7"
+  }
+}

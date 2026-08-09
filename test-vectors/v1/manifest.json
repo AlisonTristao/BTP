@@ -1,0 +1,39 @@
+{
+  "format": "btp-test-vector-manifest-v1",
+  "contract": "BTP v1 / bally_protocol 0.1.0 em elaboração",
+  "valid_vectors": [
+    "hello",
+    "log_utf8",
+    "telemetry_packed_le",
+    "command_request",
+    "fragment_source_a_0",
+    "fragment_source_a_1",
+    "fragment_source_b_0",
+    "fragment_source_b_1"
+  ],
+  "invalid_vectors": [
+    "invalid_crc",
+    "invalid_magic",
+    "invalid_version",
+    "invalid_header_size",
+    "invalid_payload_size",
+    "invalid_fragment_index",
+    "invalid_fragment_count"
+  ],
+  "scenarios": [
+    {
+      "id": "two_sources_interleaved_out_of_order",
+      "arrival_order": [
+        "fragment_source_a_1",
+        "fragment_source_b_0",
+        "fragment_source_a_0",
+        "fragment_source_b_1"
+      ],
+      "expected_completed_order": ["fragment_source_a", "fragment_source_b"],
+      "expected_logical_payloads": {
+        "fragment_source_a": "10 11 12 13 14 15",
+        "fragment_source_b": "a0 a1 a2 a3 a4 a5 a6 a7"
+      }
+    }
+  ]
+}

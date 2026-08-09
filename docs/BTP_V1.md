@@ -226,8 +226,10 @@ Assim, o tamanho do datagrama **MUST** ser exatamente `40 + payload_size`.
 
 Um frame BTP decodificado destinado à serial protocolada **MUST** satisfazer
 `frame_size <= 4096` e `payload_size <= 4056`, antes da codificação de framing
-da serial. A codificação COBS e seus delimitadores são definidos na
-especificação de transporte e não contam em `frame_size`.
+da serial. A codificação COBS e seus delimitadores são definidos em
+[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md) e não contam em `frame_size`. O
+mapeamento de um frame para ESP-NOW é definido em
+[`TRANSPORT_ESPNOW.md`](TRANSPORT_ESPNOW.md).
 
 Uma mensagem lógica maior que o payload permitido pelo transporte **MUST** ser
 fragmentada. Um encoder **MUST** verificar o limite do transporte antes de
@@ -264,14 +266,14 @@ Campos principais: `type=LOG`, `source_id=0x11223344`,
 sem fragmentação e sem payload.
 
 ```text
-42 54 50 00  01 03  00 00  24 00  00 00
+42 54 50 00  01 02  00 00  24 00  00 00
 44 33 22 11  d4 c3 b2 a1  01 00 00 00
 40 42 0f 00 00 00 00 00  02 00  00 01
-eb fd 00 d1
+3a 15 e7 df
 ```
 
-O CRC numérico é `0xD100FDEB`; no wire little-endian aparece como
-`eb fd 00 d1`. O frame possui 40 octetos.
+O CRC numérico é `0xDFE7153A`; no wire little-endian aparece como
+`3a 15 e7 df`. O frame possui 40 octetos.
 
 ### 10.2 Segundo fragmento de TELEMETRY
 

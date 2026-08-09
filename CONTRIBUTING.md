@@ -58,22 +58,32 @@ CSV pode ser usado em testes e diagnóstico, mas não substitui vetores
 
 ## Testes obrigatórios
 
-Enquanto este repositório contiver apenas documentação, valide:
-
-- links relativos e árvore documentada;
-- correspondência entre decisões, arquitetura e política de versão;
-- ausência de definição acidental de offsets fora do tópico responsável.
-
-Depois que o código compartilhado existir, toda contribuição deverá executar:
+Toda contribuição ao código compartilhado deverá executar:
 
 - testes unitários do codec e do framing;
 - testes dos vetores canônicos;
 - build com warnings tratados como erro nas plataformas suportadas;
 - testes de integração dos consumidores afetados.
 
-Os comandos concretos serão adicionados quando o sistema de build for criado.
-Uma contribuição deve informar exatamente o que foi executado e qualquer teste
-que não pôde ser realizado.
+Execute ao menos:
+
+```text
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
+pio run -d tests/embedded
+```
+
+O `ctest` inclui a validação das descrições JSON, a igualdade byte a byte dos
+`.bin`, o decode de todos os campos e os motivos exatos dos casos inválidos.
+Consulte [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) antes de alterar qualquer
+vetor. Arquivo `.bin` alterado é mudança de contrato e nunca uma fixture local
+descartável.
+
+Mudanças somente documentais também devem validar links relativos, a árvore
+documentada e a correspondência entre decisões, arquitetura e versão. Uma
+contribuição deve informar exatamente o que foi executado e qualquer teste que
+não pôde ser realizado.
 
 ## Checklist de revisão
 

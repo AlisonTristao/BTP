@@ -1,0 +1,31 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "telemetry_packed_le",
+  "description": "Amostra PACKED_LE com array contendo os seis octetos de fronteira obrigatórios.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0000",
+    "source_id": "0x11223344",
+    "boot_id": "0xA1B2C3D4",
+    "sequence": "0x00000003",
+    "timestamp_us": "0x00000000000F4628",
+    "object_id": "0x0201",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "01 00 00 0a 0d 7f 80 ff"
+  },
+  "payload_model": {
+    "encoding": "PACKED_LE",
+    "schema_version": 1,
+    "fields": [
+      {
+        "field_id": 1,
+        "name": "edge_bytes",
+        "type": "uint8",
+        "element_count": 6,
+        "values_hex": ["00", "0a", "0d", "7f", "80", "ff"]
+      }
+    ]
+  }
+}

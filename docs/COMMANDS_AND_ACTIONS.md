@@ -515,8 +515,9 @@ dongle faz a mesma limpeza e retorna ao console. Tráfego inválido não renova 
 watchdog. Perder o transporte não autoriza repetir comandos e não apaga o
 cache de deduplicação.
 
-Os detalhes de COBS, delimitadores, decoder incremental e tamanho do buffer
-são responsabilidade da especificação do transporte serial.
+Os detalhes de COBS, delimitadores, decoder incremental, tamanho do buffer e
+propriedade exclusiva da porta estão em
+[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md).
 
 ## 11. Timeouts e incompatibilidade
 

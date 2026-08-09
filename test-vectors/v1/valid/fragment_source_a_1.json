@@ -1,0 +1,25 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "fragment_source_a_1",
+  "description": "Segundo fragmento lógico da fonte A; chega primeiro no cenário intercalado.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0001",
+    "source_id": "0xAAA00001",
+    "boot_id": "0xAAA10001",
+    "sequence": "0x00000010",
+    "timestamp_us": "0x00000000000186A0",
+    "object_id": "0x0301",
+    "fragment_index": 1,
+    "fragment_count": 2,
+    "payload_hex": "13 14 15"
+  },
+  "payload_model": {
+    "encoding": "OPAQUE_BYTES",
+    "schema_version": "0x1110",
+    "body_hex": "12 13 14 15",
+    "logical_payload_hex": "10 11 12 13 14 15",
+    "fragment_slice": "bytes 3..5"
+  }
+}
