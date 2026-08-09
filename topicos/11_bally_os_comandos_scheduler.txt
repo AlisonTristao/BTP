@@ -29,3 +29,24 @@ CRITERIOS DE ACEITE
 - Erros sao estruturados e correlacionados.
 - Nenhum payload arbitrario vira comando sem validacao de tipo/origem.
 
+RESULTADO (2026-08-09)
+- Concluido em C:\git\bally_software com CommandProcessor e TxScheduler
+  estaticos, sem alocacao no caminho de recepcao, deduplicacao ou radio.
+- O roteador aceita somente COMMAND/COMMAND_REQUEST do MAC/source autorizado;
+  demais MessageTypes e objetos nunca chegam ao TinyShell.
+- A chave (request_source_id, request_boot_id, request_sequence) e os bytes do
+  payload sao reservados antes da fila. Retry identico em andamento nao cria
+  trabalho; depois da conclusao, reutiliza sequence, timestamp e payload exatos
+  do COMMAND_RESULT. Mesma chave com bytes diferentes retorna REQUEST_CONFLICT.
+- O cache bounded possui 16 entradas retidas por todo o boot. Cache ou fila de
+  execucao cheios retornam BUSY/CAPACITY_EXHAUSTED sem executar o comando.
+- TinyShell retorna SUCCESS ou FAILED/INTERNAL_ERROR em COMMAND_RESULT com a
+  referencia completa, action_id/action_version, status e error_code.
+- O scheduler usa filas FIFO independentes na ordem COMMAND_RESULT > STATUS >
+  LOG critico > TELEMETRY > DEBUG. Uma fila de 16 telemetrias cheia nao consome
+  os 8 slots reservados a resultados.
+- Existe no maximo um esp_now_send pendente, permitindo correlacionar o callback.
+  O callback somente registra sucesso/falha; pump contabiliza aceite, entrega,
+  timeout e drop. Telemetria e logs espontaneos nao possuem retry automatico.
+- Testes: pio test -e native (14/14) e pio run -e esp32-s3 passaram. Firmware:
+  132252 bytes de RAM (40.4%) e 1290745 bytes de flash (15.5%).
