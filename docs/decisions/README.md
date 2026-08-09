@@ -16,6 +16,8 @@ Estados permitidos: `Proposta`, `Aceita`, `Substituída` e `Rejeitada`.
 | [0005 - Transportes, entrega e integridade](0005-transportes-entrega-e-integridade.md) | Aceita | 14 a 18 |
 | [0006 - Versionamento conjunto](0006-versionamento-conjunto.md) | Aceita | Política de versão do protocolo e biblioteca |
 | [0007 - Wire format do envelope BTP v1](0007-wire-format-btp-v1.md) | Aceita | Layout, identidade, CRC, fragmentação e limites do frame v1 |
+| [0008 - Payloads e schemas de telemetria](0008-payloads-e-schemas-de-telemetria.md) | Aceita | Identidade de tópicos, encodings, tipos, arrays e binding de telemetria |
+| [0009 - Comandos, descoberta, sessão e terminal](0009-comandos-descoberta-sessao-terminal.md) | Aceita | Correlação, deduplicação, manifesto, assinatura, status e terminal |
 
 ## Como criar uma decisão
 

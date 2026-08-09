@@ -84,11 +84,11 @@ mensagem fragmentada ele não descreve o tamanho lógico total.
 | Valor | Nome | Uso |
 | ---: | --- | --- |
 | `0x00` | `INVALID` | Reservado; **MUST NOT** aparecer no wire |
-| `0x01` | `TELEMETRY` | Amostras e dados de tópicos |
+| `0x01` | `TELEMETRY` | Amostras e dados de tópicos; payload em [`TELEMETRY.md`](TELEMETRY.md) |
 | `0x02` | `LOG` | Eventos e diagnóstico |
-| `0x03` | `COMMAND` | Requisições, resultados e ações |
-| `0x04` | `TERMINAL` | Entrada e saída de terminal como bytes opacos |
-| `0x05` | `CONTROL` | Sessão, descoberta, manifesto, assinatura e status |
+| `0x03` | `COMMAND` | Requisições, resultados e ações; payload em [`COMMANDS_AND_ACTIONS.md`](COMMANDS_AND_ACTIONS.md) |
+| `0x04` | `TERMINAL` | Entrada e saída de terminal como bytes opacos; payload no mesmo documento |
+| `0x05` | `CONTROL` | Sessão, descoberta, manifesto, assinatura e status; payload no mesmo documento |
 | `0x06` a `0xFF` | — | Reservados |
 
 Os formatos internos desses payloads são especificados pelos documentos dos

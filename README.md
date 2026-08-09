@@ -7,10 +7,12 @@ arquitetura e, nas próximas etapas, do codec e dos vetores de conformidade.
 
 ## Estado atual
 
-O BTP v1 está em fase de especificação. A fundação, as responsabilidades dos
-componentes e o [wire format do envelope](docs/BTP_V1.md) estão documentados.
-Os payloads dos canais e o codec ainda serão definidos de forma sequencial
-pelos tópicos em [`topicos/`](topicos/).
+O BTP v1 está em fase de especificação. A fundação, as responsabilidades, o
+[wire format do envelope](docs/BTP_V1.md), os [payloads de
+telemetria](docs/TELEMETRY.md) e os [comandos, manifesto, sessão e
+terminal](docs/COMMANDS_AND_ACTIONS.md) estão documentados. Os transportes e o
+codec ainda serão definidos de forma sequencial pelos tópicos em
+[`topicos/`](topicos/).
 
 Não existe nem será criado suporte ao protocolo legado. Até a publicação de
 uma versão identificada, nenhum consumidor deve tratar o conteúdo atual como
@@ -51,6 +53,8 @@ bally_protocol/
 |-- docs/
 |   |-- ARCHITECTURE.md
 |   |-- BTP_V1.md
+|   |-- COMMANDS_AND_ACTIONS.md
+|   |-- TELEMETRY.md
 |   |-- VERSIONING.md
 |   `-- decisions/
 `-- topicos/

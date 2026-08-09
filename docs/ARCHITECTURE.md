@@ -128,7 +128,11 @@ Separadores de linha não delimitam payloads.
 
 Os valores usam larguras fixas e little-endian. Nenhum componente transmite a
 representação de memória de uma `struct`, pois padding, alinhamento, ABI e
-endianness variam entre plataformas.
+endianness variam entre plataformas. A identidade, os encodings, os tipos e as
+regras de arrays de telemetria estão em [`TELEMETRY.md`](TELEMETRY.md).
+Os layouts e as garantias de comandos, manifesto, assinatura, sessão, status e
+terminal estão em
+[`COMMANDS_AND_ACTIONS.md`](COMMANDS_AND_ACTIONS.md).
 
 ESP-NOW e USB Serial são transportes, não versões alternativas da semântica do
 BTP. O envelope, o CRC, os limites e as invariantes de fragmentação estão em
@@ -140,7 +144,7 @@ tópicos próprios.
 
 Não há fallback, autodetecção nem adaptador para o protocolo legado. Um peer
 incompatível deve ser rejeitado de forma explícita conforme as regras de
-sessão que ainda serão especificadas.
+[sessão e negociação](COMMANDS_AND_ACTIONS.md).
 
 Especificação, implementação compartilhada e vetores de conformidade existem
 somente neste repositório. Consulte a [política de
@@ -151,7 +155,5 @@ versionamento](VERSIONING.md) e o [registro de decisões](decisions/README.md).
 O layout, os campos, o CRC e os limites do envelope estão congelados em
 [`BTP_V1.md`](BTP_V1.md). Permanecem para os próximos tópicos:
 
-- tipos de schema, arrays e regras exatas de `PACKED_LE`;
-- mensagens de comando, manifesto, sessão e terminal;
 - regras operacionais de transporte, COBS e reassembly;
 - formato de distribuição da futura biblioteca compartilhada.
