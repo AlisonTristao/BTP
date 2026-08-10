@@ -30,3 +30,164 @@ CRITERIOS DE ACEITE
 - Frame parcial e ruido recuperam no delimitador seguinte.
 - Um computador comum ainda pode usar o console apos reboot.
 
+RESULTADO (2026-08-10)
+- Concluido em C:\git\t_dongle_develop. Duas libs novas: SerialSession (puro
+  C++, sem Arduino/FreeRTOS, roda em pio test -e native como
+  ProtocolRouter/BtpTransport) e SerialMux (glue Arduino/FreeRTOS: decode
+  incremental, filas priorizadas, COBS encode + Serial.write).
+- SerialSession::Session implementa a maquina de estados Console ->
+  AwaitingHello -> Protocolled (PASSO 1) e o codec dos payloads logicos que a
+  sessao precisa: parseHello/buildHelloResultSuccess/buildHelloResultFailure
+  (COMMANDS_AND_ACTIONS.md secao 5, layout de 40+V e 52 bytes conferido
+  contra o vetor canonico bally_protocol/test-vectors/v1/valid/hello.json),
+  parseSessionClose/buildSessionCloseResult (secao 10, 8 e 16 bytes) e
+  buildStatus (secao 8, 92 bytes fixos). classify() mapeia MessageType/
+  object_id para uma de 4 PriorityClass (kSession/kTerminal/kLogStatus/
+  kTelemetry) -- as classes 2 e 3 do texto normativo (COMMAND_REQUEST/
+  resultado de controle; assinatura/STATUS DEGRADED) colapsam em kSession/
+  kLogStatus porque este dongle nunca origina COMMAND_REQUEST nem trafego de
+  assinatura *para* o desktop neste topico; documentado como simplificacao
+  deliberada, nao lacuna esquecida.
+- Entrada em modo protocolado (PASSO 2/3): a porta comeca em Console
+  (ShellSerial). Uma linha "BTP/1 ENTER <16 hex>" e reconhecida como controle
+  reservado direto em AppRuntime::handleShellInput (antes de virar comando
+  TinyShell) via SerialMux::tryEnterFromConsoleLine, que escreve
+  "BTP/1 READY <hex minusculo>\r\n" e arma o prazo de 2s do HELLO. O comando
+  de shell "dongle -btp_v1" (DongleCommands.cpp) faz o mesmo com um nonce de
+  64 bits gerado localmente (esp_random() x2), para um humano testar sem
+  montar a linha crua na mao. Desvio de escopo assumido: em vez de tentar
+  reconhecer ENTER durante a animacao de boot (StartupConfig), o
+  while(!enterConfirmed) sem timeout de waitForSerialAndAnimateLed virou
+  limitado a 6s (kAutoConfirmMs) -- corrige o bloqueio real (um cliente
+  automatico que nunca aperta Enter travava ali para sempre, PASSO 3) sem
+  reescrever toda a sequencia de boot; o cliente manda BTP/1 ENTER assim que
+  o shell interativo estiver de pe, o que agora acontece em tempo finito.
+  promptAndSetDateTime ja tinha timeout (30s) e ficou como estava.
+- SerialMux e o unico escritor da porta no modo protocolado (PASSO 4/11):
+  ShellCommandSupport::printLine, e os prints diretos em EspNowConfig
+  (handleLogItem, handleRoutedCommandResult) e AppRuntime (flushPendingEspNowOutput,
+  refresh de prompt) passam a checar SerialMux::isConsoleOwned() antes de
+  tocar Serial; nenhum deles escreve na porta enquanto uma sessao esta
+  negociando/protocolada. AppRuntime::handleShellInput() so le
+  ShellSerial::readInputLine quando isConsoleOwned(); caso contrario
+  SerialMux::tick() (chamado sempre, no-op rapido em modo console) e quem
+  drena bytes recebidos e filas de saida -- tudo a partir do loop principal,
+  nenhuma task FreeRTOS chama Serial.write diretamente (a task espnow_rx so
+  empurra ProtocolRouter::RoutedMessage nas filas do SerialMux via
+  forwardRelay, nunca toca Serial).
+- Codificacao (PASSO 5): cada frame proprio (HELLO_RESULT, SESSION_CLOSE_RESULT,
+  STATUS, COMMAND_RESULT, TERMINAL_OUT) e montado com identidade/sequencia de
+  BtpTransport (sourceId/bootId/reserveSequence, mesmas usadas no lado
+  ESP-NOW) e btp::encode(..., TransportProfile::Serial); a saida so vira
+  bytes na porta em writeFrameCobs, que aplica btp::cobs_encode e escreve
+  0x00 || bloco || 0x00 num unico Serial.write em loop ate esgotar o buffer
+  (sem intercalar com outro frame, ja que so o tick() do loop principal
+  chama essa funcao). Decodificacao (PASSO 6) reusa btp::SerialDecoder
+  (bally_protocol/include/btp/stream.hpp) byte a byte dentro de
+  SerialMux::pumpRx, com os buffers minimos exigidos pelo contrato da classe
+  (kSerialMaxCobsBlockSize=4113, kSerialMaxFrameSize=4096).
+- Roteamento (PASSO 7/8): TELEMETRY e LOG roteados pelo EspNowConfig (do
+  robo via ESP-NOW) agora tem consumidor real -- SerialMux::forwardRelay
+  reencapsula o RoutedMessage::header original (source_id/boot_id/sequence/
+  timestamp_us nunca reescritos, so o profile de transporte muda de EspNow
+  pra Serial) e enfileira na classe de prioridade correta; handleLogItem
+  ainda imprime como antes quando isConsoleOwned() (comportamento do humano
+  plugado direto inalterado), so retransmite quando protocolado.
+  COMMAND_REQUEST/TERMINAL_IN vindos do cliente sao tratados dentro de
+  SerialMux (handleCommandRequest/handleTerminalIn) e respondem
+  COMMAND_RESULT/TERMINAL_OUT em filas proprias (kSession e kTerminal,
+  PASSO 8/9), nunca a mesma fila de TELEMETRY -- e o que
+  test_stress_interleaved_telemetry_and_terminal_never_cross_classes
+  demonstra intercalando 100 TELEMETRY e 100 TERMINAL_IN e checando que
+  nenhum resultado de TELEMETRY vira FrameOutcome::TerminalIn/CommandRequest.
+  COMMAND_REQUEST reusa BtpTransport::btp_command::parse_request/
+  copy_shell_command/build_result (o mesmo parser do caminho ESP-NOW) com
+  identidade "serial" -- decisao deliberada: um cliente cabeado nesta porta
+  compartilha o mesmo perimetro fisico de confianca do console humano, entao
+  nao ganha uma identidade sudo separada tipo "espnow:<MAC>".
+- Limites de fila e prioridade (PASSO 9): 4 filas FreeRTOS (kSession=4,
+  kTerminal=4, kLogStatus=8, kTelemetry=16 posicoes; cada slot guarda um
+  frame BTP ja codificado, ate 740 bytes = header(36)+crc(4)+ate 700 bytes de
+  payload). Drenagem por tick() segue a ordem normativa (sessao/comando >
+  terminal > log/status > telemetria) com um teto de itens por classe por
+  chamada para telemetria nao travar comando nem starvar completamente as
+  classes baixas. Fila cheia em kTelemetry/kLogStatus descarta o item mais
+  antigo pra abrir espaco pro mais novo (amostra fresca ganha, como o
+  wire format pede); kSession/kTerminal so contam o descarte, nunca expulsam
+  algo que um cliente esteja esperando.
+- Timeout/desconexao (PASSO 10): Session::pollTimeout cobre tanto o prazo de
+  2s do HELLO quanto o session_timeout_ms negociado (min do pedido do
+  cliente com o default local de 15s) sem frame BTP valido; qualquer decode
+  invalido (COBS/CRC/envelope) nunca renova o watchdog, so um
+  btp::SerialDecodeEvent::Frame renova. Ao fechar (SESSION_CLOSE valido,
+  HELLO malformado/sem versao em comum, ou timeout), SerialMux::
+  finalizeToConsole escreve o ultimo frame de sessao (HELLO_RESULT/
+  SESSION_CLOSE_RESULT) fora das filas, descarta tudo que ainda nao comecou
+  a sair (xQueueReset em todas as classes -- TRANSPORT_SERIAL.md secao 6:
+  "descartar... itens ainda nao iniciados nas filas de transmissao"),
+  escreve exatamente "BTP/1 CONSOLE\r\n" e devolve a porta pro ShellSerial.
+- Desvios de escopo assumidos (analogos as decisoes de topico 12 para
+  HELLO/MANIFEST no lado ESP-NOW):
+  * Sem reassembly logica na serial: um frame com kFlagFragmented chegando
+    pela serial e rejeitado (contabilizado, nao decodificado como parcial).
+    O teto proprio deste dongle para mensagens que ele mesmo gera e de 700
+    bytes de payload (kOutboundPayloadCap em SerialMux.cpp), bem abaixo do
+    teto de 4096 do wire format -- cobre HELLO_RESULT (52B), STATUS (92B),
+    COMMAND_RESULT (ate ~426B) e TERMINAL_OUT (truncado em 700B) com folga.
+    Um manifesto grande (topico 16) vai precisar de reassembly serial de
+    verdade; nao foi construido aqui por nao ter consumidor ainda.
+  * MANIFEST_REQUEST/DATA, SUBSCRIBE/UNSUBSCRIBE e qualquer object_id
+    CONTROL alem de HELLO/HELLO_RESULT/STATUS/SESSION_CLOSE(_RESULT) sao
+    ignorados silenciosamente (watchdog ja renovado por serem frame valido) --
+    topicos 16/17, mesma decisao que topico 12 tomou pro lado ESP-NOW.
+  * TERMINAL_IN/OUT e um MVP deliberado: uma mensagem TERMINAL_IN == uma
+    linha de shell (CR/LF final removido, executada via ShellConfig::runLine
+    com identidade "serial", saida completa devolvida como um unico
+    TERMINAL_OUT). O protocolo interativo completo (pty real, streaming
+    byte a byte) e escopo do topico 19 ("terminal protocolado"); o que este
+    topico precisava provar -- canal isolado de TELEMETRY e round-trip real
+    sob estresse -- nao exige mais que isso.
+  * Sem deduplicacao de COMMAND_REQUEST na sessao serial (mesma lacuna ja
+    existente no caminho ESP-NOW desde o topico 12, nao introduzida aqui;
+    document ada como pre-existente, nao corrigida por estar fora do escopo
+    deste topico).
+  * UUID local (peer_uuid do HELLO_RESULT) nao tem armazenamento persistido
+    proprio ainda: e derivado do MAC (6 bytes) + sufixo fixo nao-zero
+    (0xB0..0xBF), estavel durante o boot, gerado em AppRuntime::begin(). Uma
+    identidade real de dongle fica para quando existir HELLO/MANIFEST do
+    lado ESP-NOW tambem (topico 16).
+- Arquivos novos: lib/SerialSession/{SerialSession.h,.cpp},
+  lib/SerialMux/{SerialMux.h,.cpp}, test/test_serial_session/test_main.cpp.
+  Arquivos alterados: lib/AppRuntime/{AppRuntime.h,.cpp} (fiacao do
+  SerialMux::begin/tick, gating de handleShellInput/tick),
+  lib/EspNowConfig/EspNowConfig.cpp (relay de TELEMETRY/LOG, gating de
+  prints), lib/ShellCommandSupport/ShellCommandSupport.cpp (gating de
+  printLine -- ver nota abaixo sobre WIP preexistente), lib/DongleCommands/
+  DongleCommands.cpp (comando btp_v1), lib/StartupConfig/StartupConfig.cpp
+  (timeout do prompt de boot), lib/HelpCommands/HelpCommands.cpp (linha de
+  help -e), include/error_codes.h (SERIAL_SESSION_BUSY=1117), platformio.ini
+  (test_filter inclui test_serial_session), README.md/CONTRIBUTING.md.
+- WIP preexistente preservado: antes deste topico comecar, lib/DatabaseStore/
+  {DatabaseStore.h,.cpp} e lib/ShellCommandSupport/{ShellCommandSupport.h,.cpp}
+  ja estavam modificados sem commit (remocao de getDefaultBroadcastMac/
+  resolveDefaultBroadcastMac, codigo morto ligado ao antigo alias de
+  broadcast "000" removido no topico 12). DatabaseStore.h/.cpp nao foram
+  tocados por este topico e continuam fora do commit, intactos. Ja
+  ShellCommandSupport.h/.cpp precisavam mesmo ser tocados aqui (gating de
+  printLine): o commit deste topico inclui tambem aquela remocao de codigo
+  morto pre-existente porque esta no mesmo arquivo e nao da pra separar por
+  linha; nao e trabalho deste topico, so carregado junto por estar no mesmo
+  diff.
+- Testes: pio test -e native, 21/21 (8 test_protocol_router + 13
+  test_serial_session, incluindo parse do vetor canonico valid/hello.json,
+  handshake completo HELLO->HELLO_RESULT com negociacao de minimos,
+  rejeicao de versao incompativel, timeout de sessao, SESSION_CLOSE,
+  round-trip COBS de payload com 0x00/0x0A/0x0D, recuperacao apos ruido sem
+  delimitador inicial e apos frame truncado, delimitadores consecutivos sem
+  frame vazio, e o teste de estresse do PASSO 12). pio run -e tdongle-s3
+  sem warnings novos (so os pre-existentes do Sqlite3Esp32). Firmware: RAM
+  21.3% (69924/327680 bytes, +9168B vs topico 12), Flash 41.8%
+  (1395633/3342336 bytes, +7760B vs topico 12) -- custo principal e os
+  buffers fixos do SerialDecoder (~8.2KB) e as 4 filas FreeRTOS priorizadas
+  (~23KB de RAM reservada estaticamente).
+
