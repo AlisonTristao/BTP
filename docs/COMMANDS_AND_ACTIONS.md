@@ -451,14 +451,59 @@ referência à requisição, `status:uint8`, `reserved:uint8` e
 | 76 | 8 | `command_duplicates` | `uint64_le` |
 | 84 | 8 | `telemetry_dropped` | `uint64_le` |
 
-O tamanho lógico é exatamente 92 octetos. Contadores são monotônicos e
-saturam em `UINT64_MAX`; reiniciam somente com novo `boot_id`.
-`frames_dropped` inclui frames válidos descartados por filas ou capacidade;
-`crc_errors` conta frames rejeitados por CRC; `decode_errors`, envelopes ou
-payloads malformados; e contadores de reassembly separam sucesso, timeout e
-inconsistência/capacidade. Um mesmo evento **MAY** contribuir para um contador
-específico e para `frames_dropped`, mas não pode ser contado duas vezes no
-mesmo contador.
+O tamanho lógico é exatamente 92 octetos quando `status_version=1`. Contadores
+são monotônicos e saturam em `UINT64_MAX`; reiniciam somente com novo
+`boot_id`. `frames_dropped` inclui frames válidos descartados por filas ou
+capacidade; `crc_errors` conta frames rejeitados por CRC; `decode_errors`,
+envelopes ou payloads malformados; e contadores de reassembly separam
+sucesso, timeout e inconsistência/capacidade. Um mesmo evento **MAY**
+contribuir para um contador específico e para `frames_dropped`, mas não pode
+ser contado duas vezes no mesmo contador.
+
+### 8.1 Extensão por tópico (`status_version=2`)
+
+Um emissor que rastreia consumo por tópico de telemetria (topico 17: taxa
+efetiva e drops por assinatura) **MAY** publicar `status_version=2`. Os 92
+octetos da seção 8 continuam no mesmo layout e no mesmo offset; `status_version`
+passa a valer `2` e a mensagem é seguida por:
+
+| Offset | Tamanho | Campo | Tipo no wire |
+| ---: | ---: | --- | --- |
+| 92 | 2 | `topic_status_count` | `uint16_le` |
+| 94 | 24 × T | `topic_status` | `topic_status_count` registros de tamanho fixo |
+
+Cada registro `topic_status` (24 octetos, sem `record_size` próprio — a
+contagem em `topic_status_count` já delimita a lista) contém, nesta ordem:
+
+| Campo | Tipo no wire |
+| --- | --- |
+| `source_id` | `uint32_le` não zero |
+| `topic_id` | `uint16_le` não zero |
+| `subscriber_count` | `uint16_le` |
+| `effective_rate_millihz` | `uint32_le`; zero significa que o tópico não está sendo publicado agora |
+| `bytes_total` | `uint64_le`, monotônico desde o boot do emissor |
+| `samples_dropped_total` | `uint64_le`, monotônico desde o boot do emissor |
+
+`source_id` existe porque `topic_id` sozinho não é globalmente único (decisão
+9 do PLANO_GERAL.txt: "o ID de telemetria identifica um tópico, nunca um
+gráfico"; decisão 10: gráficos se associam a source + topic + field) -- um
+gateway relatando mais de uma fonte **MUST** desambiguar por
+(`source_id`, `topic_id`), nunca só por `topic_id`. Uma fonte que só descreve
+a si mesma (por exemplo o próprio robô) **MUST** usar seu próprio `source_id`
+em todo registro.
+
+Uma mensagem com `status_version=1` **MUST NOT** incluir esses campos. Um
+receptor **MUST** parar de ler em 92 octetos quando `status_version=1` e **MAY**
+ignorar `topic_status` inteiro quando não tiver interesse em métricas por
+tópico; isso preserva compatibilidade com um leitor que só conhece a seção 8
+original. `topic_status_count` **MAY** ser zero (nenhum tópico com assinatura
+ativa). A ordem dos registros não é normativa; um receptor identifica cada
+tópico pelo par (`source_id`, `topic_id`), que **MUST** ser único dentro de uma
+mesma mensagem `STATUS`. `bytes_total` conta os octetos do payload lógico de
+`TELEMETRY` publicados para aquele tópico (sem envelope/CRC); um evento que
+incrementa `samples_dropped_total` de um tópico específico também **MAY**
+contribuir para `telemetry_dropped` (seção 8), mas não é contado duas vezes no
+mesmo contador `samples_dropped_total`.
 
 ## 9. Terminal opaco
 
