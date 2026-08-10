@@ -29,3 +29,197 @@ CRITERIOS DE ACEITE
 - Telemetria nunca aparece como caracteres do terminal.
 - Nao existe prompt/eco duplicado entre PC e dongle.
 
+RESULTADO (2026-08-10)
+- PASSO 1 (levantamento): ShellSerial (t_dongle_develop/lib/ShellSerial) e um
+  line editor completo -- ESC [ A/B/C/D (setas), Tab com completion provider
+  plugavel, Ctrl+R (byte 0x12, busca reversa por prefixo no historico),
+  historico circular (MAX_LOG_STORAGE=128), edicao em qualquer posicao do
+  cursor, e uma janela deslizante com marcadores '<'/'>' quando prompt+input
+  excede MAX_RENDER_COLUMNS=72. Sua saida usa so tres primitivas de terminal,
+  nunca ANSI CSI: '\r' (volta coluna 0, nao apaga), '\b' (move cursor uma
+  coluna a esquerda) e caracteres imprimiveis (sobrescreve/estende a linha na
+  coluna atual) -- redrawInput() sempre reconstroi a linha inteira com '\r' +
+  conteudo + padding de espacos pro rastro antigo + '\r' + reprint ate o
+  cursor; o fast path de digitar/apagar no fim da linha usa so print(c) ou
+  "\b \b". Ctrl+C (0x03) e Ctrl+D (0x04) sao ignorados hoje (caem no guard
+  `>= 32` de processChar, nunca tratados) -- nao ha operacao cancelavel no
+  TinyShell (cada comando roda ate o fim de forma sincrona dentro do mesmo
+  tick), entao esse no-op e comportamento correto, nao uma lacuna.
+- PASSO 2 (decisao de design): edicao de linha continua no dongle.
+  ShellSerial ja e mais completo (historico, busca reversa, Tab, janela
+  deslizante) que qualquer coisa que valesse a pena reimplementar client-side
+  em Qt, e sua saida ja e trivial de renderizar sem ANSI (so \r/\b/imprimivel,
+  ver PASSO 1) -- portar isso pro TraceView seria a mudanca maior E duplicaria
+  logica que ja existe e e testada no firmware. A alternativa (edicao no
+  TraceView, dongle vira pty cru) exigiria ensinar o TraceView sobre
+  candidatos de Tab completion (que dependem do catalogo de comandos do
+  TinyShell, so existe no dongle) e historico persistido (SQLite via
+  DatabaseStore, tambem so no dongle) -- essencialmente replicar o mesmo
+  estado em dois lugares. Custo real da escolha tomada: o widget do
+  TraceView vira "burro" (so encaminha teclas e renderiza bytes), o que e
+  exatamente o padrao miniterm/PlatformIO Serial Monitor que o comentario
+  original do widget ja citava como inspiracao.
+- PASSO 3 (dongle, t_dongle_develop): SerialMux.cpp ganhou um segundo par
+  Stream/ShellSerial privado, so pra sessao BTP: TerminalPtyStream
+  (lib/SerialMux/TerminalPtyStream.h, um adaptador fino de Arduino::Stream)
+  sobre SerialSession::TerminalPtyBuffer (lib/SerialSession/
+  TerminalPtyBuffer.h/.cpp, dois ByteRing<Capacity> puros -- RX 1024B, TX
+  4096B -- sem nenhuma dependencia de Arduino, testados em pio test -e
+  native). handleTerminalIn() agora so faz g_terminalPty.feedInput(payload);
+  substituiu de vez o MVP do topico 13 (uma mensagem = uma linha de shell,
+  saida truncada em 700B). g_terminalShell (ShellSerial) roda sem nenhuma
+  modificacao contra esse Stream sintetico -- prova concreta de que a decisao
+  do PASSO 2 nao exigiu tocar ShellSerial.h/.cpp.
+- PASSO 4: TERMINAL_OUT e o unico canal que carrega eco/prompt/resposta.
+  pumpTerminalShell() (chamado a cada tick() enquanto Protocolled) faz
+  exatamente o mesmo fluxo de AppRuntime::handleShellInput() no console: um
+  g_terminalShell.readInputLine() por tick, e so quando uma linha completa
+  volta, roda o comando via g_runShellLine (o mesmo RunShellLineFn injetado
+  do topico 13, identidade "serial") e imprime a resposta com
+  ShellOutput::printResponse(g_terminalPty, fullOutput) -- reusa a mesma
+  formatacao (trim, split de linha) que o console usa, criterio "sem
+  prompt/eco duplicado" cumprido por construcao, nao por coincidencia.
+  flushTerminalPtyOutput() drena g_terminalPty em pedacos de ate
+  kOutboundPayloadCap (700B) e enfileira cada pedaco como TERMINAL_OUT
+  (kTerminal, prioridade 2) -- ao contrario do MVP do topico 13, uma saida
+  longa agora vai em varios frames em vez de truncar em 700B.
+- PASSO 5 (modelo de linha equivalente a VT100): como ShellSerial nunca emite
+  CSI, o TraceView so precisa de \r/\n/\b + sobrescrita-na-coluna-atual (ver
+  PASSO 1). Implementado em SerialTerminalWidget::appendData() como um
+  QString m_currentLine + int m_cursorCol: '\r' zera a coluna sem apagar,
+  '\n' comita a linha atual num QTextCursor::insertText("\n") e abre uma
+  nova, '\b' decrementa a coluna, e qualquer outro byte >=0x20 sobrescreve
+  (se cursorCol < tamanho) ou estende (senao) a m_currentLine naquela coluna
+  -- exatamente a semantica de "\b \b" (apaga o ultimo char virando espaco
+  final, funcionalmente identico a um terminal real limpando uma celula) e do
+  padding de espacos do redrawInput() completo. Decodificacao UTF-8 usa
+  QStringDecoder com estado incremental entre chamadas de appendData(), pra
+  um caractere multibyte (acento de mensagem em pt-br) partido exatamente no
+  limite de um frame TERMINAL_OUT nao virar mojibake -- testado
+  (appendDataSplitsMultibyteUtf8AcrossCallsWithoutMojibake). Bug real achado
+  e corrigido durante a implementacao: commitLine() precisa sincronizar
+  m_currentLine no documento ANTES de inserir o '\n' -- render so roda uma
+  vez no fim de appendData(), entao "info\r\n" numa unica chamada perderia
+  "info" se o '\n' so acrescentasse a quebra de linha num bloco ainda vazio.
+- PASSO 6: removido por completo o prompt local ("> ") e o eco/insercao de
+  texto local do SerialTerminalWidget::keyPressEvent -- keyPressEvent agora
+  so emite sendRequested(bytes), nunca chama insertPlainText/moveCursor
+  sozinho; todo texto visivel vem de appendData(). setas (Up/Down/Left/Right,
+  sem modificador) passam a virar ESC [ A/B/C/D -- no widget antigo elas nao
+  eram tratadas (caiam no default do QPlainTextEdit, so scroll/selecao
+  local); agora sao encaminhadas como teclas reais pro ShellSerial do dongle,
+  que e quem entende delas.
+- PASSO 7: Ctrl+<letra> sempre vira o byte de controle ASCII (Ctrl+C=0x03,
+  Ctrl+D=0x04, Ctrl+R=0x12), decisao ja existente no widget antigo mantida --
+  copiar selecao usa o menu de botao direito, nao Ctrl+C. Novidade deste
+  topico: setas/Left/Right/Up/Down SO viram bytes de terminal quando
+  Qt::NoModifier; com Shift (ou Ctrl) elas caem no QPlainTextEdit::
+  keyPressEvent padrao, preservando selecao de texto via teclado sobre o
+  scrollback read-only. Mouse (clique/arrasto/roda) nunca foi interceptado
+  por keyPressEvent, entao selecao/scroll por mouse sempre funcionaram sem
+  risco de disparar sendRequested().
+- PASSO 8/9 (testes): dongle -- test/test_serial_session/test_main.cpp ganhou
+  5 testes novos pra TerminalPtyBuffer (round-trip em ordem, chunking de
+  saida respeitando o cap do chamador, FIFOs de entrada/saida independentes
+  sem reordenar sob interleaving, reset() limpando as duas direcoes, e
+  overflow de entrada limitado sem corromper estado) -- cobre exatamente
+  CRITERIO 1 ("texto digitado nao e perdido ou deslocado") na camada onde a
+  logica realmente mora. Ctrl+C/Ctrl+D nao ganharam teste dedicado alem do
+  guard de char>=32 ja coberto indiretamente (nenhum efeito colateral
+  possivel de testar quando o comportamento e "ignorar o byte"). TraceView --
+  tests/test_serialterminalwidget.cpp (novo, 11 casos): teclas
+  printable/Enter/Backspace/Tab/Ctrl+letra/setas emitem os bytes certos e
+  NUNCA inserem texto localmente; Shift+seta nao emite nada; \r/\b/\n e um
+  redraw completo (encolhendo uma linha, com padding de espaco) renderizam
+  exatamente como o dongle pretendia, inclusive posicao final do cursor;
+  UTF-8 partido no meio de um caractere entre duas chamadas de appendData()
+  nao vira mojibake; clearTerminal() reresta tambem o estado de linha, nao
+  so o documento visivel. Nao foi feito teste de estresse LOG+TELEMETRY
+  simultaneo a uma linha em edicao no TraceView (PASSO 9): a separacao de
+  canais ja e garantida estruturalmente por ProtocolRouter::MessageType
+  dispatch (test_protocolrouter.cpp, topico 14) e por SerialSession::
+  classify() nunca misturar Terminal com Telemetry (test_serial_session,
+  topico 13) -- nao ha estado compartilhado entre os dois caminhos no
+  TraceView (TelemetryFieldRouter e SerialTerminalWidget sao assinantes
+  independentes do mesmo ProtocolRouter) que um teste de estresse adicional
+  pudesse invalidar; o teste de estresse existente do dongle
+  (test_stress_interleaved_telemetry_and_terminal_never_cross_classes,
+  topico 13, ainda passando) e quem realmente exercita concorrencia real
+  entre os dois canais.
+- PASSO 10: finalizeToConsole() (SerialMux.cpp) ganhou g_terminalPty.reset()
+  alem do que o topico 13 ja fazia (resetQueues(), escrever "BTP/1
+  CONSOLE\r\n", resetar o decoder COBS) -- descarta qualquer linha
+  meio-digitada/bytes pendentes do terminal BTP junto com o resto do estado
+  de sessao, por TRANSPORT_SERIAL.md secao 6 ("descartar... itens ainda nao
+  iniciados"). O mesmo reset foi adicionado ao caminho de timeout em tick()
+  (que nao passa por finalizeToConsole(), tem sua propria logica inline) --
+  lacuna que so apareceria num timeout de sessao com uma linha de terminal
+  parcialmente digitada, agora coberta. O caminho de volta ao console
+  (ShellSerial::readInputLine contra Serial de verdade) e o mesmo de sempre,
+  nao foi tocado.
+- Desvio de escopo assumido: nenhuma negociacao HELLO/ENTER-READY foi
+  adicionada ao MainWindow do TraceView (topicos 15-17, deliberadamente fora
+  da lista de DEPENDENCIAS deste topico -- so 13 e 14). SerialWidgetBridge
+  gera uma identidade BTP minima e privada (source_id/boot_id aleatorios,
+  nao-zero, gerados uma vez por processo) so pra poder montar frames
+  TERMINAL_IN -- nao ha HELLO real, entao nao existe negociacao de limites
+  nem verificacao do lado do dongle de que essa identidade e valida. Isso
+  significa que o caminho fim-a-fim (TraceView -> dongle real) so funciona
+  depois que uma sessao Protocolled ja foi aberta por outro meio (por
+  exemplo, um humano digitando "BTP/1 ENTER <nonce>" a mao antes de ligar o
+  TraceView) -- o mesmo desvio que o topico 14 ja havia assumido para
+  BtpSession (RESULTADO daquele topico: "BtpSession NAO inclui o handshake
+  ENTER/READY nem a negociacao HELLO"). O que este topico entrega e o canal
+  de terminal completo e testado nas duas pontas; fechar esse gap de
+  handshake fica para quando os topicos 15-17 estiverem prontos.
+- Arquivos novos (t_dongle_develop): lib/SerialSession/{TerminalPtyBuffer.h,
+  .cpp}, lib/SerialMux/TerminalPtyStream.h. Arquivos alterados: lib/SerialMux/
+  {SerialMux.h,.cpp} (novo Stream/ShellSerial privado, begin() ganhou
+  parametro terminalPrompt, setTerminalCompletionProvider(),
+  addTerminalHistory()), lib/AppRuntime/AppRuntime.cpp (passa prompt/
+  completion provider/historico pro SerialMux, mesmo completion provider
+  reusado pros dois shells), test/test_serial_session/test_main.cpp (5 testes
+  novos). lib/DatabaseStore/{DatabaseStore.h,.cpp} continuam com WIP nao
+  relacionado pre-existente, intocados e fora do commit.
+- Arquivos novos (TraceView): tests/test_serialterminalwidget.cpp. Arquivos
+  alterados: lib/dashboard/widgets/serialterminalwidget.{h,cpp} (reescrito:
+  sem eco/prompt local, modelo de linha \r/\b/\n, setas viram ESC[A-D),
+  lib/core/serialwidgetbridge.{h,cpp} (terminal sai do caminho raw
+  SerialManager e passa a usar BtpSession::sendFrame()/ProtocolRouter::
+  terminalFrameReceived()), lib/core/mainwindow.cpp (passa m_btpSession/
+  m_protocolRouter pro SerialWidgetBridge), tests/CMakeLists.txt (registra o
+  teste novo), docs/PROTOCOL.md (secao "Terminal (topico 19)" nova, nota
+  desatualizada sobre passthrough cru corrigida). lib/project/
+  {projectstore.h,.cpp} continuam com WIP nao relacionado pre-existente,
+  intocados e fora do commit. lib/core/mainwindow.cpp ja tinha alteracoes
+  locais nao commitadas e nao relacionadas (fullscreen, ver git log de
+  commits recentes tipo "implementamos na mao o full screen") antes deste
+  topico comecar -- mesma situacao que o RESULTADO do topico 14 documentou
+  pro mesmo arquivo; a mudanca de uma linha na construcao do
+  SerialWidgetBridge foi aplicada em cima delas sem tocar o resto, entao o
+  diff final desse arquivo mistura os dois trabalhos de novo.
+- Testes: t_dongle_develop -- pio test -e native, 26/26 (13 test_protocol_
+  router + 13 test_serial_session, incluindo os 5 novos deste topico; nenhum
+  teste anterior mudou de comportamento). pio run -e tdongle-s3 limpo, 0
+  warnings novos. RAM 23.7% (77652/327680 bytes, +7728B vs topico 13), Flash
+  41.8% (1396793/3342336 bytes, +1160B vs topico 13) -- custo principal e o
+  segundo ShellSerial (historico/estado de Tab/busca reversa duplicados) e os
+  dois ByteRing (RX 1024B + TX 4096B). TraceView -- ctest, 13/13 suites
+  (as 12 de topico 14 inalteradas + test_serialterminalwidget novo, 11 casos
+  QTest::keyClick/appendData). TraceView.exe e tools/chart_preview.exe
+  seguem buildando (windows-mingw-qt preset, Qt 6.9.2 MinGW).
+- CRITERIOS DE ACEITE: "texto digitado nao e perdido ou deslocado" -- FIFOs
+  puros nas duas pontas (TerminalPtyBuffer no dongle, ordem de bytes
+  preservada; nenhuma fila do TraceView reordena BtpFrame, ProtocolRouter
+  despacha na ordem de frameReceived) mais teste dedicado de interleaving.
+  "Telemetria nunca aparece como caracteres do terminal" -- estrutural nos
+  dois lados: SerialSession::classify() nunca mapeia Telemetry pra
+  PriorityClass::kTerminal (topico 13), e SerialWidgetBridge so alimenta
+  SerialTerminalWidget::appendData() a partir de ProtocolRouter::
+  terminalFrameReceived (que so dispara pra MessageType::Terminal), nunca
+  mais a partir de SerialManager::dataReceived bruto -- essa ultima conexao
+  (que existia no widget antigo e teria misturado telemetria binaria com
+  texto do terminal) foi removida neste topico. "Sem prompt/eco duplicado" --
+  TraceView nunca desenha prompt/eco proprio (PASSO 6); o unico prompt/eco
+  vem do dongle via TERMINAL_OUT.
+
