@@ -33,3 +33,85 @@ CRITERIOS DE ACEITE
 - Dois robos podem fragmentar simultaneamente.
 - Timestamp original chega intacto ao proximo estagio.
 
+RESULTADO (2026-08-09)
+- Concluido em C:\git\t_dongle_develop com bally_protocol integrado via
+  lib_deps = symlink://../bally_protocol (env:tdongle-s3 e novo env:native).
+- SharedMessageTypes.h, a struct message/logType e todo acesso a ela foram
+  removidos. EspNowManager virou transporte burro: ReceiveCallback e os
+  sendTo*/sendTo*WithStatus passam a usar bytes+tamanho (limite MAX_DATA_LEN
+  = 250, o teto fisico do ESP-NOW), sem qualquer conhecimento de BTP.
+- ProtocolRouter (lib nova) decodifica com btp::decode(), valida CRC antes de
+  qualquer enfileiramento e faz reassembly com btp::Reassembler (4 slots x
+  600 bytes, timeout 4s) apenas para frames com kFlagFragmented; mensagem de
+  pacote unico e copiada direto do buffer transiente. E puro C++ (sem
+  Arduino/FreeRTOS), com testes rodando em pio test -e native contra os
+  vetores canonicos de bally_protocol/test-vectors/v1, incluindo o cenario
+  "two_sources_interleaved_out_of_order" do manifest.json (dois source_id
+  fragmentando ao mesmo tempo, fora de ordem, sem um atropelar o outro).
+- BtpTransport (lib nova) concentra identidade deste boot (source_id
+  derivado do MAC, boot_id aleatorio nao nulo por boot), reserva de sequence,
+  envio fragmentado e o namespace btp_command (parse_request/
+  copy_shell_command/parse_result/build_result, mesmos Status/ErrorCode do
+  wire format). Para nao criar ciclo no DAG (EspNowConfig e EspNowCommands
+  dependem dela, mas nenhuma pode incluir EspNowManager de volta sem fechar
+  um ciclo via ShellConfig), o envio usa um callback de funcao
+  (SendFn/SendWithStatusFn) em vez de receber EspNowManager& direto -- cada
+  chamador fornece um adaptador de uma linha. Isso tambem deixou BtpTransport
+  livre de Arduino, entao roda no mesmo teste nativo do ProtocolRouter.
+- EspNowConfig foi reescrito: decodifica/roteia cada datagrama recebido em
+  filas FreeRTOS separadas por MessageType (TELEMETRY/LOG/TERMINAL/CONTROL,
+  cada uma com profundidade e contador de drop proprios; COMMAND e tratado
+  sincronamente por ser latencia-sensivel, sem fila propria). Contadores
+  separados para decode invalido, CRC invalido, reassembly invalida e fila
+  cheia. horario de chegada (RoutedMessage::arrivalMs) e so metadado local;
+  source_id/boot_id/sequence/timestamp_us da origem nunca sao sobrescritos.
+  TELEMETRY/TERMINAL/CONTROL roteados nao tem consumidor ainda nesta versao
+  (fica para os topicos 13/14/16/19) e sao apenas drenados/contados, sem
+  nenhuma formatacao String/snprintf. A formatacao serial antiga
+  [TYPE][arrival][packet/total] foi removida; LOG agora imprime como
+  "[log <source_id hex>] <texto>".
+- Decisao HELLO/MANIFEST (bloqueio de design avaliado, nao ficou pendente):
+  o proprio wire format ja frozen usa HELLO/HELLO_RESULT/MANIFEST_REQUEST/
+  MANIFEST_DATA/STATUS como object_id dentro de MessageType::Control (ver
+  bally_protocol/docs/COMMANDS_AND_ACTIONS.md secao 3.2 e o vetor canonico
+  valid/hello.json, que ja usa "type":"CONTROL"). Nao havia motivo para
+  inventar um MessageType novo no codec canonico; o ProtocolRouter roteia
+  Control para uma fila propria e o roteamento por object_id dentro dela
+  fica para o topico 16 (nao implementado ainda), estruturado via um
+  handler placeholder.
+- Heartbeat: em vez de PING (que nao existe no vocabulario BTP), passou a
+  mandar um frame CONTROL/STATUS (object_id 0x0009) com payload vazio -- o
+  proprio wire format descreve STATUS como "publicacao espontanea e nao
+  possui resposta", o que bate com o que um heartbeat de liveness precisa
+  ser. O ACK de entrega (nao o payload) continua alimentando o tile LINK.
+- Execucao remota de comando (antigo CMDO) migrou para COMMAND/
+  COMMAND_REQUEST -> COMMAND_RESULT, preservando o modelo de seguranca
+  exatamente como pedido: autorizacao continua por MAC ja cadastrado no
+  registry de peers, sudo continua vinculado a identidade "espnow:<MAC>",
+  sem whitelist/blacklist de conteudo. Desvio necessario do texto do topico:
+  um COMMAND_REQUEST exige target_boot_id valido do executor, e o dongle nao
+  tem HELLO/MANIFEST ainda para descobrir isso. Solucao adotada: BtpTransport
+  mantem uma tabela (rememberPeer/lookupPeer) do ultimo (source_id, boot_id)
+  observado por MAC, atualizada a cada frame BTP valido recebido; um comando
+  so pode ser endereçado a um peer do qual ja recebemos algo antes. Por
+  causa disso, o alias de broadcast "000" do antigo send_to foi retirado
+  (nao ha como montar um COMMAND_REQUEST coerente para um MAC de broadcast);
+  "espnow -send_to <texto>" sem indice agora e redirecionado para send_all
+  (que enderaça cada peer individualmente, pulando quem ainda tem boot_id
+  desconhecido) em vez de ficar quebrado. Peer nunca visto responde
+  PEER_BOOT_UNKNOWN (AppError::Code novo, 1212) em vez de falhar silencioso.
+- DatabaseStore::logIncomingEspNow foi removido (ja era no-op morto antes
+  deste topico); logOutgoingEspNow trocou de EspNowManager::message para
+  (mac, btp::MessageType, payload bytes, size, delivered) -- payload_type na
+  tabela espnow_outgoing_log agora e o valor numerico do MessageType.
+- README.md e CONTRIBUTING.md atualizados (grafo de dependencias, secao
+  ESP-NOW completa, tabela de comandos espnow, estrutura do repositorio,
+  limitacoes conhecidas, nota de padrao "callback em vez de include direto"
+  para evitar ciclo no DAG).
+- Testes: pio test -e native (8/8, cobrindo vetores validos, os 7 vetores
+  invalidos, o cenario de duas fontes concorrentes fora de ordem e o
+  round-trip de COMMAND_REQUEST/COMMAND_RESULT) e pio run -e tdongle-s3
+  passaram sem warnings novos (so os pre-existentes do Sqlite3Esp32).
+  Firmware: RAM 18.5% (60756/327680 bytes), Flash 41.5% (1387873/3342336
+  bytes).
+
