@@ -1,0 +1,34 @@
+TOPICO 23 - TRANSPORTE USB NATIVO (FULL-SPEED)
+
+OBJETIVO
+Transportar BTP v1 sobre USB nativo (CDC/vendor-specific class), usando toda
+a banda disponivel do USB, sem depender de uma porta serial virtual e sem os
+limites de baudrate/framing do transporte Serial/COBS atual.
+
+STATUS
+Pendencia. Nao iniciado.
+
+DEPENDENCIAS
+Topico 22 concluido (limpeza e release v1 sobre os transportes existentes).
+
+REPOSITORIOS
+BTP (especificacao do novo transporte), Bally_dongle e Bally_OS (onde houver
+porta USB nativa disponivel no hardware).
+
+PASSOS
+1. Especificar o novo transporte em docs/TRANSPORT_USB.md: framing, limites
+   de tamanho de payload, e como ele coexiste com (ou substitui) o
+   Serial/COBS descrito em docs/TRANSPORT_SERIAL.md.
+2. Decidir a classe USB usada (CDC simples vs. interface vendor-specific) e
+   o motivo da escolha em termos de throughput e simplicidade de driver.
+3. Definir como sessao, fragmentacao e reassembly de docs/STREAM_AND_REASSEMBLY.md
+   se aplicam sem alteracao sobre o novo transporte.
+4. Prototipar no dongle (unico ponto com host USB direto hoje) e medir
+   throughput real contra o Serial/COBS atual.
+5. Vetores de conformidade cobrindo o novo transporte.
+
+CRITERIOS DE ACEITE
+- Throughput medido se aproxima do limite fisico do USB full-speed, nao do
+  baudrate configurado hoje na porta serial.
+- Nenhuma mudanca no envelope BTP v1 nem nos payloads existentes.
+- Serial/COBS continua funcionando sem alteracao para quem nao usar USB nativo.

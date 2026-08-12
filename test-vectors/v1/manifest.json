@@ -1,6 +1,6 @@
 {
   "format": "btp-test-vector-manifest-v1",
-  "contract": "BTP v1 / bally_protocol 1.0.0-beta",
+  "contract": "BTP v1 / btp 1.0.1-beta",
   "valid_vectors": [
     "hello",
     "log_utf8",

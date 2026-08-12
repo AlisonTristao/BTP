@@ -1,9 +1,11 @@
-# Bally Telemetry Protocol (BTP)
+# BTP - Binary Telemetry Protocol
 
-O **Bally Telemetry Protocol (BTP)** é o contrato binário compartilhado entre
-o firmware do robô, o dongle e as aplicações de computador do ecossistema
-Bally. Este repositório é a fonte canônica da especificação, das decisões de
-arquitetura, do codec e dos vetores de conformidade.
+O **BTP (Binary Telemetry Protocol)** é um protocolo binário de comunicação e
+plotagem de dados em tempo real entre firmwares ESP32 (via ESP-NOW) e
+aplicações de computador. Este repositório é a fonte canônica da
+especificação, das decisões de arquitetura, do codec e dos vetores de
+conformidade — independente de qualquer robô específico, para poder ser
+reaproveitado em outros projetos.
 
 ## Estado atual
 
@@ -27,8 +29,8 @@ um contrato estável.
 
 | Projeto | Responsabilidade no BTP |
 | --- | --- |
-| `bally_software` (`bally_OS`) | Produzir telemetria e logs, executar comandos e originar timestamps no robô. |
-| `t_dongle_develop` | Atuar como gateway entre ESP-NOW e USB Serial, rotear canais, manter catálogo e ações persistidas. |
+| `Bally_OS` | Produzir telemetria e logs, executar comandos e originar timestamps no robô. |
+| `Bally_dongle` | Atuar como gateway entre ESP-NOW e USB Serial, rotear canais, manter catálogo e ações persistidas. |
 | `TraceView` | Descobrir fontes e tópicos, apresentar telemetria e enviar intenções de comando; não definir a semântica dos comandos. |
 
 Consulte [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) para os fluxos e os
@@ -48,10 +50,15 @@ limites de responsabilidade.
 - O timestamp nasce na origem e não é substituído pelo dongle.
 - CRC detecta corrupção, mas não autentica origem nem conteúdo.
 
+## Pendências
+
+- Transporte USB nativo full-speed (sem depender de porta serial) — ver
+  [`topicos/23_transporte_usb_nativo.txt`](topicos/23_transporte_usb_nativo.txt).
+
 ## Organização
 
 ```text
-bally_protocol/
+BTP/
 |-- README.md
 |-- CONTRIBUTING.md
 |-- CMakeLists.txt

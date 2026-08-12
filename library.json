@@ -1,8 +1,8 @@
 {
-  "name": "bally-protocol",
-  "version": "1.0.0-beta",
-  "description": "Portable, allocation-free codec and transport utilities for Bally Telemetry Protocol v1",
-  "keywords": ["btp", "telemetry", "protocol", "codec"],
+  "name": "btp",
+  "version": "1.0.1-beta",
+  "description": "Portable, allocation-free codec and transport utilities for BTP (Binary Telemetry Protocol) v1 -- real-time communication and data plotting over ESP32/ESP-NOW",
+  "keywords": ["btp", "telemetry", "protocol", "codec", "esp32", "esp-now"],
   "build": {
     "includeDir": "include",
     "srcDir": "src"
