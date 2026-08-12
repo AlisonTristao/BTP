@@ -1,6 +1,6 @@
 {
   "name": "bally-protocol",
-  "version": "0.1.0",
+  "version": "1.0.0-beta",
   "description": "Portable, allocation-free codec and transport utilities for Bally Telemetry Protocol v1",
   "keywords": ["btp", "telemetry", "protocol", "codec"],
   "build": {

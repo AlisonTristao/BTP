@@ -26,3 +26,107 @@ CRITERIOS DE ACEITE
 - Pedido acima do maximo e limitado e informado ao cliente.
 - Controle de taxa nao altera timestamp nem schema.
 
+RESULTADO (2026-08-12)
+- PASSO 1 (spec): SUBSCRIBE/SUBSCRIBE_RESULT/UNSUBSCRIBE/UNSUBSCRIBE_RESULT em
+  COMMANDS_AND_ACTIONS.md ja estavam congelados desde antes deste topico; a
+  secao 8.1 (STATUS status_version=2, registros topic_status) tambem ja
+  existia (commit "mudando o protocolo"), mas tinha um erro de aritmetica: o
+  texto dizia "24 octetos" por registro enquanto a soma dos campos listados
+  (uint32+uint16+uint16+uint32+uint64+uint64) sempre deu 28. Corrigido para
+  28 nesta sessao (docs/COMMANDS_AND_ACTIONS.md secao 8.1), com tabela de
+  offset por campo dentro do registro (source_id@0, topic_id@4,
+  subscriber_count@6, effective_rate_millihz@8, bytes_total@12,
+  samples_dropped_total@20, total 28) para eliminar a ambiguidade. Nenhuma
+  outra mudanca de spec foi feita neste topico.
+- bally_software: tabela de assinaturas por (subscriber_source_id,
+  subscriber_boot_id, topic_id) em TopicRuntime (ate 8 simultaneas),
+  substituindo a assinatura unica por topico que existia antes. Taxa de
+  publicacao do topico = maximo das taxas concedidas entre assinantes vivos;
+  effective_rate_millihz de cada SUBSCRIBE_RESULT continua sendo
+  min(requested, cap), nunca acima do pedido. resolve_effective_rate(): teto
+  = max_rate_millihz (periodico) ou default_rate_millihz (event-driven);
+  pedido acima do teto e limitado e informado (SUCCESS); pedido abaixo do
+  min e REJECTED/INVALID_ARGUMENT (conceder acima do pedido violaria a
+  secao 7). TopicSchema ganhou min_rate_millihz/default_rate_millihz como
+  politica local (nao serializados no manifesto v1). Fim de sessao via
+  expiracao de lease (varrida em sampleTelemetry), drop_session() explicito,
+  ou SUBSCRIBE do mesmo source_id com boot_id novo liberando tudo que o boot
+  antigo segurava. Rate limiting com atomic_flag de secao curta (spin
+  limitado a 256 tentativas) protegendo so a tabela de assinaturas, nunca
+  segurado sobre o radio/TxScheduler; publicacao continua via
+  topic_period_us() dentro de sampleTelemetry(), sem busy-wait e sem tocar o
+  loop de controle. Nova lib StatusReporter (lib/StatusReporter/) serializa
+  STATUS v2 byte a byte (28 octetos por registro), publicada 1x/s como
+  CONTROL/0x0009 dentro de routine(); contadores de recepcao/CRC/decode/
+  reassembly viraram atomicos novos alimentados no callback ESP-NOW, e
+  publishStatus() passou a chamar Reassembler::expire() (nenhum codigo
+  anterior varria slots de reassembly abandonados). Testes: pio test -e
+  native 21/21 PASSED (14 preexistentes + 7 novos cobrindo clamp acima/
+  abaixo do teto, agregacao de multiplos assinantes, topico so para no
+  ultimo consumidor, expiracao de lease e boot_id novo, serializacao do
+  topic_status, publicacao do STATUS como CONTROL, e rate control nao altera
+  timestamp/schema). Build: pio run -e esp32-s3 SUCCESS (RAM 40.5%/132732B,
+  Flash 15.6%/1298077B). platformio.ini restaurado ao estado WIP nao
+  commitado do usuario apos os testes.
+- t_dongle_develop: o commit "mudando o protocolo" ja trazia um rascunho
+  (SubscriptionRegistry + wiring em SerialMux/EspNowConfig/SerialSession/
+  ManifestCache/BtpTransport) sem suite de testes; auditado e corrigido
+  nesta sessao. Defeitos encontrados: buildStatusV2 escrevia 28 octetos por
+  registro mas avancava o offset em 24 (corrupcao a partir do segundo
+  registro, e estouro de 4 bytes no buffer do chamador com snapshot cheio);
+  queda da taxa agregada nao gerava nenhuma acao upstream quando o assinante
+  mais rapido saia (robo continuava publicando na taxa antiga); renovacao de
+  lease do cliente era absorvida localmente sem nunca renovar o lease
+  upstream com o robo; comparacoes diretas de millis() quebrariam apos
+  rollover (~49 dias). Os quatro corrigidos. SubscriptionRegistry agrega por
+  (source_id, topic_id): um so SUBSCRIBE upstream por topico, na uniao das
+  taxas pedidas pelos clientes vivos; evaluateUpstream() e o unico ponto de
+  decisao (Subscribe/Unsubscribe/None) usado por subscribe, unsubscribe, fim
+  de sessao e sweep periodico -- perder um assinante nao e automaticamente
+  unsubscribe, vira Subscribe na taxa/lease reduzida se sobrar consumidor.
+  Renovacao upstream a meio lease (kUpstreamRenewDivisor=2), varrida no
+  tick(). Contadores de bytes/drops desambiguados por (source_id, topic_id)
+  no STATUS v2 (dongle relata mais de uma fonte). Testes: pio test -e native
+  43/43 PASSED (26 preexistentes + 17 novos em test_subscription_registry,
+  cobrindo agregacao, nao-alteracao com assinante mais lento saindo, queda
+  de taxa, unsubscribe so no ultimo consumidor, retry idempotente, limpeza
+  em fim de sessao, expiracao/renovacao de lease, desambiguacao por
+  (source_id, topic_id), contadores monotonicos, e serializacao completa do
+  topic_status). Build: pio run -e tdongle-s3 SUCCESS (RAM 29.4%/96348B,
+  Flash 42.0%/1403265B).
+- TraceView: nova classe SubscriptionManager (lib/protocol/
+  subscriptionmanager.h/.cpp, so QtCore) agrega consumidores por handle
+  opaco em (source_id, topic_id) com contagem de referencia; MainWindow e o
+  unico lugar que mapeia widget->handle. Taxa pedida por widget derivada do
+  Ts do config do chart (1e6/Ts mHz); gauge pede 5Hz fixos. SUBSCRIBE fica
+  retido ate ManifestClient fornecer o boot_id da fonte (nunca enviado com
+  boot zero/adivinhado). onSessionLost() esquece grants mas mantem
+  consumidores; onSessionEstablished() reassina tudo. Lease renovado com
+  nova sequence a metade do granted_lease_ms, varrido por QTimer de 1s.
+  Corrida "ultimo consumidor sai com SUBSCRIBE em voo": sem subscription_id
+  ainda nao ha como enviar UNSUBSCRIBE, entao o grant e liberado assim que o
+  SUBSCRIBE_RESULT chega. Nova classe StatusReport (lib/protocol/
+  statusreport.h/.cpp) parseia CONTROL/STATUS v1 (para em 92 octetos) e v2
+  (registros topic_status de 28 octetos, mapa por topico substituido
+  inteiro a cada snapshot). Status bar da MainWindow expoe taxa efetiva por
+  topico (com aviso "limited, asked X") e tooltip com subscriber_count/
+  bytes/drops. Corrigido de quebra (achado pelo teste, nao relacionado a
+  esta feature em si mas bloqueava compilar/testar): telemetrycatalog.h
+  declarava registerSourceBootId()/sourceBootId() desde o commit
+  "acabando o 1" sem definicao em telemetrycatalog.cpp; implementadas.
+  Testes: ctest 14/15 suites -- test_subscriptionmanager 13/13 e
+  test_statusreport 6/7 na primeira rodada (stride 24, proprio teste
+  pegou), 7/7 apos corrigir para 28. Falha remanescente e preexistente e
+  nao relacionada: test_dashboardgrid (3 casos) quebrou no commit
+  "acabando o 1" quando kGridColumns/kGridRows/kMargin dobraram sem
+  atualizar as expectativas do teste; nao alterado por este topico. Build:
+  cmake --build build --preset windows-mingw-qt limpo, TraceView.exe
+  linkou.
+- PASSO 10 (nao executado): nenhum cenario foi validado em hardware real
+  (COM3/COM5 em uso pela sessao ao vivo do usuario durante o topico, por
+  restricao). Falta: gravar os tres firmwares/binarios (ja compilados e
+  testados nesta sessao) e testar fim-a-fim com multiplos graficos abertos
+  no mesmo topico e alteracao dinamica de taxa (abrir/fechar graficos,
+  observar SUBSCRIBE/UNSUBSCRIBE reais e o STATUS v2 refletindo bytes/drops
+  agregados corretos nos tres pontos da cadeia).
+

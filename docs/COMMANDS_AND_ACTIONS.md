@@ -470,19 +470,23 @@ passa a valer `2` e a mensagem é seguida por:
 | Offset | Tamanho | Campo | Tipo no wire |
 | ---: | ---: | --- | --- |
 | 92 | 2 | `topic_status_count` | `uint16_le` |
-| 94 | 24 × T | `topic_status` | `topic_status_count` registros de tamanho fixo |
+| 94 | 28 × T | `topic_status` | `topic_status_count` registros de tamanho fixo |
 
-Cada registro `topic_status` (24 octetos, sem `record_size` próprio — a
+Cada registro `topic_status` (28 octetos, sem `record_size` próprio — a
 contagem em `topic_status_count` já delimita a lista) contém, nesta ordem:
 
-| Campo | Tipo no wire |
-| --- | --- |
-| `source_id` | `uint32_le` não zero |
-| `topic_id` | `uint16_le` não zero |
-| `subscriber_count` | `uint16_le` |
-| `effective_rate_millihz` | `uint32_le`; zero significa que o tópico não está sendo publicado agora |
-| `bytes_total` | `uint64_le`, monotônico desde o boot do emissor |
-| `samples_dropped_total` | `uint64_le`, monotônico desde o boot do emissor |
+| Offset no registro | Tamanho | Campo | Tipo no wire |
+| ---: | ---: | --- | --- |
+| 0 | 4 | `source_id` | `uint32_le` não zero |
+| 4 | 2 | `topic_id` | `uint16_le` não zero |
+| 6 | 2 | `subscriber_count` | `uint16_le` |
+| 8 | 4 | `effective_rate_millihz` | `uint32_le`; zero significa que o tópico não está sendo publicado agora |
+| 12 | 8 | `bytes_total` | `uint64_le`, monotônico desde o boot do emissor |
+| 20 | 8 | `samples_dropped_total` | `uint64_le`, monotônico desde o boot do emissor |
+
+(4 + 2 + 2 + 4 + 8 + 8 = 28 octetos por registro; uma revisão anterior desta
+seção citava 24 octetos por erro de aritmética — os offsets acima são a
+referência normativa.)
 
 `source_id` existe porque `topic_id` sozinho não é globalmente único (decisão
 9 do PLANO_GERAL.txt: "o ID de telemetria identifica um tópico, nunca um
