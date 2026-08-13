@@ -52,7 +52,7 @@ seu mecanismo de dependências e em seus artefatos de build. Durante
 desenvolvimento coordenado, uma revisão Git imutável também pode ser fixada.
 
 Não é permitido copiar a especificação ou o código da biblioteca para dentro
-de `bally_software`, `t_dongle_develop` ou `TraceView`. Atualizações são feitas
+de `Bally_OS`, `Bally_dongle` ou `TraceView`. Atualizações são feitas
 mudando a referência da dependência e executando os testes de conformidade.
 
 ## Processo de release
