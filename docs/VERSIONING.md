@@ -55,6 +55,24 @@ Não é permitido copiar a especificação ou o código da biblioteca para dentr
 de `Bally_OS`, `Bally_dongle` ou `TraceView`. Atualizações são feitas
 mudando a referência da dependência e executando os testes de conformidade.
 
+## Branches de release
+
+- `main` contém sempre a versão estável mais recente da linha MAJOR em
+  desenvolvimento.
+- Uma branch de manutenção só é criada ao avançar para uma nova versão
+  MAJOR (`1.0` → `2.0`, `2.0` → `3.0`, ...): antes de `main` receber a
+  primeira mudança incompatível da MAJOR seguinte, corta-se a branch `N.x`
+  (ex.: `1.x`) a partir do último commit da linha MAJOR anterior.
+- MINOR e PATCH dentro da mesma MAJOR não recebem branch própria; ficam
+  identificados apenas por tag (`vMAJOR.MINOR.PATCH[-suffix]`) no histórico
+  de `main` ou da branch de manutenção correspondente.
+- Uma branch `N.x` recebe somente PATCH retrocompatível da sua própria
+  linha (backport de correção). MINOR, MAJOR e features novas não são
+  portadas para trás.
+- Toda release, em qualquer branch, precisa da tag correspondente no commit
+  exato (ver "Processo de release" abaixo); é essa tag que os repositórios
+  consumidores fixam em `lib_deps`.
+
 ## Processo de release
 
 Uma release somente pode ser identificada depois de:
