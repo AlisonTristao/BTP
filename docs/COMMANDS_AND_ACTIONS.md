@@ -462,8 +462,8 @@ ser contado duas vezes no mesmo contador.
 
 ### 8.1 Extensão por tópico (`status_version=2`)
 
-Um emissor que rastreia consumo por tópico de telemetria (topico 17: taxa
-efetiva e drops por assinatura) **MAY** publicar `status_version=2`. Os 92
+Um emissor que rastreia consumo por tópico de telemetria (taxa efetiva e
+drops por assinatura) **MAY** publicar `status_version=2`. Os 92
 octetos da seção 8 continuam no mesmo layout e no mesmo offset; `status_version`
 passa a valer `2` e a mensagem é seguida por:
 
@@ -488,9 +488,10 @@ contagem em `topic_status_count` já delimita a lista) contém, nesta ordem:
 seção citava 24 octetos por erro de aritmética — os offsets acima são a
 referência normativa.)
 
-`source_id` existe porque `topic_id` sozinho não é globalmente único (decisão
-9 do PLANO_GERAL.txt: "o ID de telemetria identifica um tópico, nunca um
-gráfico"; decisão 10: gráficos se associam a source + topic + field) -- um
+`source_id` existe porque `topic_id` sozinho não é globalmente único (ver
+[ADR 0003](decisions/0003-canais-telemetria-e-tempo.md): o ID de telemetria
+identifica um tópico, nunca um gráfico, e gráficos se associam a
+source + topic + field) -- um
 gateway relatando mais de uma fonte **MUST** desambiguar por
 (`source_id`, `topic_id`), nunca só por `topic_id`. Uma fonte que só descreve
 a si mesma (por exemplo o próprio robô) **MUST** usar seu próprio `source_id`

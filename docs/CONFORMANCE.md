@@ -34,7 +34,7 @@ recalculam o CRC para alcançar a validação do header.
 
 ## Executar a suíte canônica
 
-Na raiz de `bally_protocol`:
+Na raiz de `BTP`:
 
 ```text
 cmake -S . -B build -G Ninja
@@ -60,7 +60,7 @@ python tools/test_vectors.py --root test-vectors/v1 --check
 
 ## Uso por ESP-IDF, Arduino e Qt
 
-O consumidor deve fixar uma tag ou revisão imutável de `bally_protocol` e usar
+O consumidor deve fixar uma tag ou revisão imutável de `BTP` e usar
 os arquivos diretamente dessa dependência. Não deve copiar ou manter uma
 variante local dos vetores.
 

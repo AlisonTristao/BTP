@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 1.0.1 LANGUAGES CXX)
+project(btp VERSION 1.0.2 LANGUAGES CXX)
 
 option(BTP_BUILD_TESTS "Build the BTP codec unit tests" ON)
 

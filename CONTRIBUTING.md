@@ -2,7 +2,7 @@
 
 ## Princípios obrigatórios
 
-- Preserve `bally_protocol` como fonte canônica. Não copie especificação,
+- Preserve este repositório como fonte canônica. Não copie especificação,
   codec ou vetores para repositórios consumidores.
 - Não adicione suporte legado, adaptadores, fallback ou autodetecção do
   protocolo anterior.
@@ -12,10 +12,10 @@
 
 ## Antes de alterar
 
-1. Leia o tópico atual e confirme que suas dependências foram concluídas.
-2. Leia os documentos em `docs/` e os ADRs relacionados.
-3. Verifique o estado Git e preserve alterações existentes.
-4. Delimite se a mudança afeta documentação, API pública, wire format ou mais
+1. Leia os documentos em `docs/` e os ADRs relacionados à área que você vai
+   alterar.
+2. Verifique o estado Git e preserve alterações existentes.
+3. Delimite se a mudança afeta documentação, API pública, wire format ou mais
    de uma dessas áreas.
 
 Não crie tags, releases, pacotes ou commits em nome de outra pessoa sem pedido
