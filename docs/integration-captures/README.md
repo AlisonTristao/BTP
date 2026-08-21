@@ -9,8 +9,10 @@ and there is no format guarantee beyond "raw bytes read off the wire".
 
 Captured 2026-08-10 during topico 15 end-to-end validation.
 
-- **Hardware**: `bally_software` on an ESP32-S3 (MAC `14:C1:9F:44:24:84`,
-  commit `0c26ea6`) talking ESP-NOW to a `t_dongle_develop` dongle
+- **Hardware**: `bally_software` (the robot firmware, since renamed
+  `bally_OS`) on an ESP32-S3 (MAC `14:C1:9F:44:24:84`,
+  commit `0c26ea6`) talking ESP-NOW to a `t_dongle_develop`
+  dongle (since renamed `bally_dongle`)
   (MAC `DC:DA:0C:30:AA:5C`, commit `7ef63a1`), dongle USB serial at
   921600 baud.
 - **Content**: raw bytes off the dongle's protocolled serial port

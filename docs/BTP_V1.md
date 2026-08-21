@@ -309,12 +309,39 @@ que o protocolo já exige, sem contador de nonce dedicado nem campo novo.
 
 ### 8.3 Dados associados (AAD)
 
-Os 36 octetos do cabeçalho (seção 3), completos e sem modificação, **MUST**
-ser usados como dados associados (AAD) da operação AEAD. O cabeçalho
-permanece em claro no wire — necessário para que o pipeline de validação e
-roteamento existente (seção 10) opere por `type`, `object_id` e demais
-campos antes de decifrar — mas, por estar autenticado como AAD, qualquer bit
-alterado nele invalida o tag exatamente como alterar o payload invalidaria.
+Os 36 octetos do cabeçalho (seção 3) **MUST** ser usados como dados
+associados (AAD) da operação AEAD. O cabeçalho permanece em claro no wire —
+necessário para que o pipeline de validação e roteamento existente (seção 10)
+opere por `type`, `object_id` e demais campos antes de decifrar — mas, por
+estar autenticado como AAD, qualquer bit alterado nele invalida o tag
+exatamente como alterar o payload invalidaria.
+
+Como o tag é calculado uma única vez, sobre a mensagem lógica e antes de
+fragmentar (seção 8.4), o cabeçalho usado como AAD é o da **mensagem
+lógica**, e não o de um fragmento. Ele **MUST** ser serializado exatamente
+como a seção 3 define, com estes três campos canonicalizados:
+
+| Campo | Valor no AAD |
+| --- | --- |
+| `payload_size` | tamanho do payload lógico cifrado completo, isto é de `ciphertext ‖ tag` |
+| `flags` | os flags do frame com o bit `FRAGMENTED` (`0x0001`) **limpo** |
+| `fragment_index` / `fragment_count` | `0` e `1`, respectivamente |
+
+Todos os demais campos **MUST** aparecer no AAD com o mesmo valor que
+carregam no wire, inclusive `version`, que vale `0x02` (seção 8.1).
+
+Esses três são exatamente os campos que variam entre fragmentos de uma mesma
+mensagem, e nenhum outro campo do cabeçalho varia dentro de uma mensagem
+lógica (seção 6.2). Um receptor, portanto, **MUST** conseguir reconstruir o
+AAD a partir do cabeçalho de qualquer fragmento, e um emissor **MUST NOT**
+fazer `fragment_index`, `fragment_count` ou o bit `FRAGMENTED` participarem
+do AAD.
+
+A consequência é deliberada: o tag não depende de como a mensagem foi
+fragmentada. Um gateway **MAY** reassemblar uma mensagem cifrada e
+refragmentá-la para um perfil de transporte de limite diferente (seção 9) sem
+possuir a chave, porque nada do que a refragmentação altera — tamanho por
+fragmento, índice, contagem e o CRC de cada frame — entra no cálculo do tag.
 
 ### 8.4 Tag e nível de aplicação
 

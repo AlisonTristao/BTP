@@ -18,7 +18,7 @@ enlace.
 | Componente | Estado |
 | --- | --- |
 | Wire format v1 (`version == 0x01`) | Especificado, implementado e coberto por vetores. Última release publicada: `v1.1.0-beta`. |
-| Wire format v2 (`version == 0x02`, payload AEAD) | Especificado em [BTP_V1.md §8](BTP_V1.md#8-criptografia-aead-do-payload) e implementado na biblioteca (`btp::aead`, duas cifras, vetores em `test-vectors/v2/`). Sem release publicada. |
+| Wire format v2 (`version == 0x02`, payload AEAD) | Especificado em [BTP_V1.md §8](BTP_V1.md#8-criptografia-aead-do-payload) e implementado na biblioteca (`btp::aead`, duas cifras, vetores em `test-vectors/v2/`). O fonte declara `2.0.0-beta`; nenhuma tag v2 foi publicada. |
 | [ADR 0012](decisions/0012-criptografia-aead-payload.md) (criptografia) | `Proposta` — vira `Aceita` quando os três consumidores implementarem a cifra de verdade, não só a biblioteca. |
 | Linha 1.x | Mantida na branch `1.x`, cortada antes de a v2 avançar em `main`. |
 

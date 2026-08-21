@@ -345,6 +345,55 @@ void test_dispatch_rejects_reserved_cipher_id() {
                          sealed, recovered) == btp::AeadError::InvalidCipherId);
 }
 
+// A fragmented message is sealed once, before fragmenting, and opened once,
+// after reassembly -- but the header the receiver has in hand came off one
+// fragment, with that fragment's FRAGMENTED bit, index and count. The AAD is
+// the logical message's header (BTP_V1.md section 8.3), so none of those three
+// fields may reach it: if they did, every fragmented message would fail to
+// authenticate, and a gateway re-fragmenting between transports with different
+// payload ceilings would break the tag it cannot recompute.
+void test_aad_ignores_fragmentation_fields() {
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    const btp::Header logical = make_aes_gcm_header();
+
+    btp::Header fragment = logical;
+    fragment.flags = static_cast<std::uint16_t>(fragment.flags | btp::kFlagFragmented);
+    fragment.fragment_index = 2U;
+    fragment.fragment_count = 3U;
+
+    const std::uint8_t plaintext[] = "sealed once, reassembled from three fragments";
+    const std::uint16_t plaintext_size = static_cast<std::uint16_t>(sizeof(plaintext));
+
+    std::uint8_t sealed_logical[sizeof(plaintext) + 16U] = {};
+    std::uint8_t sealed_fragment[sizeof(plaintext) + 16U] = {};
+    std::uint8_t recovered[sizeof(plaintext)] = {};
+
+    CHECK(btp::aead_seal(key, logical, plaintext_size, plaintext, sealed_logical) ==
+          btp::AeadError::Ok);
+    CHECK(btp::aead_seal(key, fragment, plaintext_size, plaintext, sealed_fragment) ==
+          btp::AeadError::Ok);
+
+    // Same ciphertext AND same tag: the fragmentation fields changed nothing.
+    CHECK(std::memcmp(sealed_logical, sealed_fragment, sizeof(sealed_logical)) == 0);
+
+    // Opening with a fragment's header authenticates what was sealed with the
+    // logical one -- the case a receiver actually hits after reassembly.
+    CHECK(btp::aead_open(key, fragment, static_cast<std::uint16_t>(sizeof(sealed_logical)),
+                         sealed_logical, recovered) == btp::AeadError::Ok);
+    CHECK(std::memcmp(recovered, plaintext, sizeof(plaintext)) == 0);
+
+    // Every other header field stays authenticated: only the three
+    // fragmentation fields are canonicalized away.
+    btp::Header tampered = fragment;
+    tampered.object_id = static_cast<std::uint16_t>(fragment.object_id + 1U);
+    CHECK(btp::aead_open(key, tampered, static_cast<std::uint16_t>(sizeof(sealed_logical)),
+                         sealed_logical, recovered) == btp::AeadError::TagMismatch);
+}
+
 }  // namespace
 
 int main() {
@@ -360,6 +409,7 @@ int main() {
     test_dispatch_aead_seal_open_aes_gcm_round_trip();
     test_dispatch_aead_seal_open_chacha20poly1305_round_trip();
     test_dispatch_rejects_reserved_cipher_id();
+    test_aad_ignores_fragmentation_fields();
 
     if (failures != 0) {
         std::cerr << failures << " aead test(s) failed\n";

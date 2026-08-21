@@ -5,11 +5,11 @@
 O BTP conecta três domínios com responsabilidades deliberadamente separadas:
 
 ```text
-bally_software / bally_OS       t_dongle_develop                TraceView
--------------------------       -----------------                ---------
+bally_OS                        bally_dongle                    TraceView
+--------                        ------------                    ---------
 sensores e atuadores      BTP   gateway ESP-NOW <-> USB   BTP   apresentação
-origem do timestamp       --->  roteamento por canal       --->  e interação
-telemetria e logs         <---  catálogo e ações           <---  do usuário
+origem do timestamp       --->  roteamento por canal      --->  e interação
+telemetria e logs         <---  catálogo e ações          <---  do usuário
 execução de comandos            persistidas
 ```
 
@@ -19,7 +19,7 @@ timestamp de origem e o payload não ganham uma nova semântica no gateway.
 
 ## Responsabilidades por componente
 
-### `bally_software` (`bally_OS`)
+### `bally_OS`
 
 O firmware do robô é responsável por:
 
@@ -44,7 +44,7 @@ Enviar amostras frequentes pelo `Logger` perde a identidade estruturada dos
 campos, mistura canais e dificulta controle de taxa. O publisher não substitui
 o logger: eventos continuam sendo eventos, mesmo quando contêm números.
 
-### `t_dongle_develop`
+### `bally_dongle`
 
 O dongle é o gateway entre ESP-NOW e USB Serial. Ele é responsável por:
 
@@ -116,9 +116,10 @@ best effort.
 ### Log e terminal
 
 Logs são eventos unidirecionais do canal `LOG`. O terminal é uma sessão
-bidirecional própria no canal `TERMINAL`. A USB Serial também poderá oferecer
-um modo de console humano separado do modo protocolado; texto humano nunca é
-inferido a partir de um payload BTP arbitrário.
+bidirecional própria no canal `TERMINAL`. A USB Serial oferece um modo de
+console humano separado do modo protocolado, com alternância definida em
+[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md); texto humano nunca é inferido a
+partir de um payload BTP arbitrário.
 
 ## Envelope, payload e transportes
 
@@ -134,12 +135,14 @@ Os layouts e as garantias de comandos, manifesto, assinatura, sessão, status e
 terminal estão em
 [`COMMANDS_AND_ACTIONS.md`](COMMANDS_AND_ACTIONS.md).
 
-ESP-NOW e USB Serial são transportes, não versões alternativas da semântica do
-BTP. O envelope, o CRC, os limites e as invariantes de fragmentação estão em
+ESP-NOW, USB Serial e USB HID são transportes, não versões alternativas da
+semântica do BTP. O envelope, o CRC, os limites e as invariantes de fragmentação estão em
 [`BTP_V1.md`](BTP_V1.md). Um frame ou fragmento ocupa um datagrama conforme
 [`TRANSPORT_ESPNOW.md`](TRANSPORT_ESPNOW.md); a serial protocolada usa COBS,
 decoder incremental e propriedade exclusiva da porta conforme
-[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md). O reassembly pertence à
+[`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md); a interface HID do mesmo
+dispositivo composto entrega um relatório de tamanho fixo por vez conforme
+[`TRANSPORT_USB_HID.md`](TRANSPORT_USB_HID.md). O reassembly pertence à
 implementação compartilhada.
 
 ## Compatibilidade
@@ -156,10 +159,16 @@ versionamento](VERSIONING.md) e o [registro de decisões](decisions/README.md).
 
 O layout, os campos, o CRC e os limites do envelope estão congelados em
 [`BTP_V1.md`](BTP_V1.md), e as regras operacionais dos transportes estão nos
-documentos ESP-NOW e Serial. Os utilitários compartilhados de COBS, decoder
-incremental, fragmentação e reassembly estão implementados e documentados em
-[`STREAM_AND_REASSEMBLY.md`](STREAM_AND_REASSEMBLY.md). Permanecem para os
-próximos tópicos os vetores canônicos de conformidade para todos os canais.
+documentos ESP-NOW, Serial e USB HID. Os utilitários compartilhados de COBS,
+decoder incremental, fragmentação e reassembly estão implementados e
+documentados em
+[`STREAM_AND_REASSEMBLY.md`](STREAM_AND_REASSEMBLY.md). Os vetores canônicos
+de conformidade existem para o wire v1 e para a extensão AEAD da v2, com o
+contrato dos arquivos em [`CONFORMANCE.md`](CONFORMANCE.md).
 
 O codec do envelope já é compartilhado por CMake e PlatformIO, conforme
 [`CODEC.md`](CODEC.md).
+
+A criptografia AEAD do payload ([`CRYPTO.md`](CRYPTO.md)) está especificada e
+implementada na biblioteca, mas nenhum dos três componentes acima chama cifra
+ainda: até que chamem, todo tráfego entre eles segue com `ENCRYPTED` limpo.

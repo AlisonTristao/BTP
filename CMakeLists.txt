@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 1.1.0 LANGUAGES CXX)
+project(btp VERSION 2.0.0 LANGUAGES CXX)
 
 option(BTP_BUILD_TESTS "Build the BTP codec unit tests" ON)
 option(BTP_ENABLE_AEAD "Build the btp::aead AEAD backend (requires mbedtls)" ON)

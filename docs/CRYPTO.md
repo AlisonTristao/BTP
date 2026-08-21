@@ -123,16 +123,47 @@ O `payload_size` gravado nesse header é o tamanho **do wire**, isto é, do
 montar o AAD, enquanto `aead_open()` recebe um tamanho que já inclui o tag e
 o usa como está.
 
-!!! warning "Detalhe de interoperabilidade ainda não fixado na especificação"
-    Em uma mensagem **fragmentada** e cifrada, o AAD não coincide com o
-    header de nenhum fragmento individual: o `payload_size` do AAD é o da
-    mensagem lógica inteira, enquanto cada fragmento grava no wire o tamanho
-    da sua própria fatia e o seu próprio `fragment_index`. Os dois lados
-    precisam construir esse header lógico da mesma forma, e a seção 8.3 ainda
-    não escreve qual convenção vale. Hoje todos os testes de `btp::aead`
-    usam `fragment_count = 1`, então o caso fragmentado não está exercitado
-    neste repositório — quem for implementar a cifra em outro consumidor
-    deveria fechar essa convenção antes.
+### O AAD de uma mensagem fragmentada
+
+Aqui está a parte que é fácil errar. O tag é calculado **uma vez**, antes de
+fragmentar, mas cada fragmento carrega no wire um header **diferente** —
+`payload_size` da sua fatia, seu `fragment_index`, o bit `FRAGMENTED`
+marcado. Nenhum desses headers é o AAD. O AAD é o header de uma coisa que
+nunca aparece no wire: a mensagem lógica.
+
+E aí surge a pergunta que decide se a coisa funciona: quais valores vão nos
+campos de fragmentação desse header? Cada resposta dá 36 octetos diferentes,
+logo um tag diferente. Se os dois lados escolherem respostas diferentes,
+**toda** mensagem fragmentada falha na verificação — de um jeito
+indistinguível de chave errada ou de ataque.
+
+A regra normativa (seção 8.3) é canonicalizar os três campos que variam entre
+fragmentos:
+
+| Campo | Valor no AAD |
+| --- | --- |
+| `payload_size` | o do `ciphertext ‖ tag` completo, não o da fatia |
+| `flags` | os flags do frame com `FRAGMENTED` limpo |
+| `fragment_index` / `fragment_count` | `0` e `1` |
+
+Todo o resto entra no AAD com o valor que está no wire. Como nenhum outro
+campo varia dentro de uma mensagem lógica, o receptor reconstrói o AAD a
+partir do header de **qualquer** fragmento — não precisa guardar o primeiro
+nem tratar o índice 0 de forma especial.
+
+O `btp::aead` faz essa canonicalização dentro de `aead_seal()`/`aead_open()`,
+não por contrato com o chamador: passar o header de um fragmento ou o da
+mensagem lógica produz exatamente o mesmo tag, e é isso que
+`test_aad_ignores_fragmentation_fields` verifica byte a byte. Para mensagem
+não fragmentada é um no-op — os campos já valem `0`/`1` —, então todos os
+vetores de conformidade existentes seguem produzindo o mesmo AAD de antes.
+
+O ganho não é só evitar a ambiguidade: como o tag não depende do
+enquadramento, **o gateway pode refragmentar uma mensagem cifrada sem ter a
+chave**. Isso importa concretamente, porque o dongle roteia entre perfis com
+tetos diferentes (210 octetos no ESP-NOW, 22 no USB HID). Se os campos de
+fragmentação entrassem no AAD, reenquadrar exigiria recifrar, e o dongle
+precisaria da chave apenas para trocar de enlace.
 
 ### O tag pertence à mensagem, não ao fragmento
 
@@ -324,7 +355,10 @@ Ainda em aberto, em ordem de impacto:
 1. **Provisionamento de chave.** Obrigatório operacionalmente e fora do wire
    por decisão: NVS/flash nos dois lados do ESP-NOW, configuração local no
    TraceView. Sem isso, nada disso liga em produção.
-2. **A convenção de AAD para mensagens fragmentadas** (ver o aviso acima).
+2. **Um vetor de conformidade de mensagem fragmentada e cifrada.** A
+   canonicalização do AAD está normativa, implementada e coberta por teste
+   unitário, mas ainda não existe um par `.json`/`.bin` que a prove
+   entre plataformas, como os dois vetores de mensagem única já provam.
 3. **A política de `ENCRYPTED` para `UsbHid`**, provavelmente com tag
    truncado, em uma ADR futura.
 4. **Anti-replay**, se e quando for considerado necessário — hoje não há

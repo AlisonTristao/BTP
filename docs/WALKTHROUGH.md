@@ -144,10 +144,13 @@ uma para a outra.
 !!! note "Ponto em aberto"
     O teto de payload do USB HID (22 octetos) é menor que o do ESP-NOW (210).
     Uma mensagem que chegou do rádio próxima do teto não cabe em um relatório
-    HID como está, e a especificação ainda não define reenquadramento no
-    gateway — a mensagem teria que ser remontada e refragmentada, o que
-    nenhum capítulo normativo descreve hoje. Na prática, o caminho
-    exercitado ponta a ponta é ESP-NOW → Serial/COBS.
+    HID como está: ela teria que ser remontada e refragmentada pelo gateway, e
+    nenhum capítulo de transporte descreve esse reenquadramento hoje. A
+    criptografia já não é obstáculo — a
+    [seção 8.3](BTP_V1.md#83-dados-associados-aad) foi escrita justamente para
+    que o tag sobreviva a uma refragmentação sem o gateway ter a chave —, mas
+    o comportamento no nível do transporte continua não especificado. Na
+    prática, o caminho exercitado ponta a ponta é ESP-NOW → Serial/COBS.
 
 → [Serial (COBS)](TRANSPORT_SERIAL.md), [USB HID](TRANSPORT_USB_HID.md)
 

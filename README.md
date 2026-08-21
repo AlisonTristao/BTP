@@ -16,7 +16,7 @@ sequencial.
 | Wire format | v1 (`version == 0x01`) e v2 (`version == 0x02`, payload AEAD) |
 | Biblioteca | C++11, sem alocação dinâmica, sem dependência de Arduino/ESP-IDF/Qt/SO |
 | Alvos | `btp::codec` (sem dependências) e `btp::aead` (mbedtls, opcional) |
-| Última tag | `v1.1.0-beta`; linha v1 mantida na branch `1.x` |
+| Versão | `2.0.0-beta` no fonte; última tag publicada `v1.1.0-beta`, linha v1 na branch `1.x` |
 
 ## Invariantes de projeto
 

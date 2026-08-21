@@ -417,7 +417,7 @@ seguida vêm `element_count:uint16_le`, os elementos de `reflectance`, o
 
 ### 9.4 Tópicos iniciais do firmware Bally
 
-O firmware `bally_software` registra estaticamente estes schemas `PACKED_LE`
+O firmware `bally_OS` registra estaticamente estes schemas `PACKED_LE`
 versão 1. Os IDs são locais à fonte do robô, mas permanecem estáveis entre
 boots:
 

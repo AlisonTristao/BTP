@@ -93,6 +93,25 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
    — necessário para o pipeline de validação existente rotear por `type`,
    `object_id` etc. antes de decifrar (`BTP_V1.md` §8) — mas qualquer bit
    alterado no header invalida o tag tanto quanto alterar o payload.
+   - **O header do AAD é o da mensagem lógica, com os campos de fragmentação
+     canonicalizados:** `payload_size` é o do `ciphertext ‖ tag` completo, o
+     bit `FRAGMENTED` entra limpo e `fragment_index`/`fragment_count` entram
+     como `0`/`1` (`BTP_V1.md` §8.3). Sem essa regra, o AAD ficava
+     indefinido para mensagem fragmentada: o tag é calculado uma vez, antes
+     de fragmentar (item 5), mas cada fragmento carrega no wire um
+     `payload_size` e um `fragment_index` diferentes, então não existe "o
+     header" do frame para usar — e dois endpoints que escolhessem
+     convenções diferentes falhariam **todo** tag de mensagem fragmentada,
+     de forma indistinguível de chave errada ou de ataque.
+   - Canonicalizar em vez de fixar uma convenção qualquer (por exemplo
+     "índice 0 e a contagem real") tem uma segunda razão, específica desta
+     topologia: o dongle é gateway entre perfis com limites de payload
+     diferentes (210 octetos no `EspNow`, 22 no `UsbHid` — ADR 0010/0011).
+     Com os campos de fragmentação fora do AAD, ele **pode** reassemblar e
+     refragmentar uma mensagem cifrada para o outro enlace sem possuir a
+     chave. Com eles dentro, refragmentar invalidaria o tag, e o gateway
+     precisaria da chave só para reenquadrar — o que contraria o papel dele
+     (ADR 0004: roteia e retransmite, não reinterpreta).
 
 5. **O tag (16 octetos) é calculado e verificado no nível da mensagem
    lógica**, antes de fragmentar (emissor) / depois de reassemblar
@@ -148,6 +167,16 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
 - **Incluir a chave, ou parte dela, em algum campo do header:** rejeitado —
   inverteria o propósito da criptografia; um nonce pode e deve ser público,
   a chave nunca.
+- **Incluir os campos de fragmentação no AAD** (o header do fragmento 0, ou o
+  header lógico com a contagem real de fragmentos): rejeitado. Autenticar
+  `fragment_index`/`fragment_count` não protege nada que o tag da mensagem
+  reassemblada já não proteja — um fragmento alterado, perdido, duplicado ou
+  reordenado produz um `ciphertext ‖ tag` diferente e cai na verificação do
+  tag de qualquer forma. Em troca, amarraria o tag ao enquadramento de um
+  transporte específico: a mesma mensagem lógica passaria a ter tags
+  diferentes conforme o enlace por onde saiu, o gateway perderia a
+  possibilidade de refragmentar sem a chave, e o emissor teria que conhecer o
+  limite do transporte de destino antes de cifrar.
 - **Duas flags booleanas independentes, uma por cifra, em vez do sub-campo
   `CIPHER_ID` de 2 bits:** rejeitado — permitiria combinações inválidas que
   um decoder teria que detectar e rejeitar à parte (as duas marcadas ao
