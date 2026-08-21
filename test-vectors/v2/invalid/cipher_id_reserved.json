@@ -1,0 +1,10 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "cipher_id_reserved",
+  "description": "ENCRYPTED permanece marcado (e version permanece 2), mas o sub-campo CIPHER_ID (bits 2-3 de flags, mascara 0x000C, BTP_V1.md secao 5/8.1) e' alterado de 0 (AES-128-GCM) para 2, um valor reservado para cifras futuras. BTP_V1.md secao 8.1: com ENCRYPTED marcado, CIPHER_ID MUST ser 0 ou 1; 2 e 3 MUST ser rejeitados, o mesmo principio ja aplicado a bits de flag reservados. CRC recomputado porque flags faz parte do header coberto pelo CRC.",
+  "base": "aead_telemetry_gcm",
+  "mutations": [
+    {"operation": "xor_u8", "offset": 6, "value": "0x08", "recompute_crc": true}
+  ],
+  "expected_error": "InvalidCipherId"
+}

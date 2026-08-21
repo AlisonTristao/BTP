@@ -174,7 +174,9 @@ void test_encoder_rejections_are_atomic() {
     frame.header.type = btp::MessageType::Invalid;
     expect(btp::Error::InvalidType);
     frame.header = header;
-    frame.header.flags = 0x0004U;  // 0x0002 is now ENCRYPTED (valid); 0x0004 stays reserved.
+    frame.header.flags = 0x0010U;  // 0x0002 is ENCRYPTED and 0x000C is CIPHER_ID
+                                    // (both valid, known bits now); 0x0010 is the
+                                    // next unallocated bit and stays reserved.
     expect(btp::Error::InvalidFlags);
     frame.header = header;
     frame.header.source_id = 0U;
@@ -274,7 +276,9 @@ void test_decoder_semantic_rejections() {
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidType);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
-    changed[6] = 4U;  // 0x0002 is now ENCRYPTED (valid); 0x0004 stays reserved.
+    changed[6] = 0x10U;  // 0x0002 (ENCRYPTED) and 0x000C (CIPHER_ID) are now
+                          // known bits; 0x0010 is the next unallocated one
+                          // and stays reserved.
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidFlags);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
@@ -441,6 +445,75 @@ void test_decoder_rejects_encrypted_flag_with_v1_version() {
                       &decoded) == btp::Error::EncryptedVersionMismatch);
 }
 
+void test_cipher_id_extraction() {
+    CHECK(btp::cipher_id(0x0000U) == btp::CipherId::AesGcm);
+    CHECK(btp::cipher_id(btp::kFlagEncrypted) == btp::CipherId::AesGcm);
+    CHECK(btp::cipher_id(static_cast<std::uint16_t>(1U << btp::kCipherIdShift)) ==
+          btp::CipherId::ChaCha20Poly1305);
+    CHECK(btp::cipher_id(static_cast<std::uint16_t>(
+              btp::kFlagEncrypted | (1U << btp::kCipherIdShift))) ==
+          btp::CipherId::ChaCha20Poly1305);
+    // Reserved raw values (2, 3) are returned as-is by this pure extraction;
+    // rejecting them is validate_header()'s job inside encode()/decode(),
+    // not cipher_id()'s.
+    CHECK(static_cast<std::uint8_t>(btp::cipher_id(
+              static_cast<std::uint16_t>(2U << btp::kCipherIdShift))) == 2U);
+    CHECK(static_cast<std::uint8_t>(btp::cipher_id(
+              static_cast<std::uint16_t>(3U << btp::kCipherIdShift))) == 3U);
+    // Unrelated flag bits (FRAGMENTED) must not leak into the extracted value.
+    CHECK(btp::cipher_id(static_cast<std::uint16_t>(
+              btp::kFlagFragmented | (1U << btp::kCipherIdShift))) ==
+          btp::CipherId::ChaCha20Poly1305);
+}
+
+void test_encoder_rejects_cipher_id_without_encrypted() {
+    // BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in
+    // use", so CIPHER_ID MUST be 0; a nonzero value MUST be rejected even
+    // though 1 (ChaCha20-Poly1305) is otherwise an assigned value.
+    const std::uint8_t payload[] = {1U, 2U, 3U};
+    btp::Header header = empty_log_header();
+    header.flags = static_cast<std::uint16_t>(1U << btp::kCipherIdShift);
+    const btp::Frame frame = {header, {payload, sizeof(payload)}};
+    std::array<std::uint8_t, 64> output;
+    output.fill(0xA5U);
+    std::size_t written = 123U;
+    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(),
+                      output.size(), &written) == btp::Error::InvalidCipherId);
+    for (std::size_t index = 0U; index < output.size(); ++index) {
+        CHECK(output[index] == 0xA5U);
+    }
+}
+
+void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
+    // BTP_V1.md section 8.1: with ENCRYPTED marked, CIPHER_ID MUST be 0 or 1
+    // -- the only assigned values; 2 and 3 are reserved for future ciphers
+    // and MUST be rejected, the same principle already applied to reserved
+    // flag bits.
+    const std::uint8_t reserved_values[] = {2U, 3U};
+    for (std::size_t index = 0U; index < sizeof(reserved_values); ++index) {
+        btp::Header header = empty_log_header();
+        header.flags = btp::kFlagEncrypted;
+        const std::uint8_t payload[] = {0xAAU, 0xBBU};
+        const btp::Frame frame = {header, {payload, sizeof(payload)}};
+
+        std::vector<std::uint8_t> encoded =
+            encode_frame(frame, btp::TransportProfile::EspNow);
+        CHECK(encoded[4] == btp::kV2Version);
+
+        // Patch flags to set the reserved CIPHER_ID value while ENCRYPTED
+        // and version 2 stay untouched, then fix up the CRC so only the
+        // reserved CIPHER_ID value is under test.
+        const std::uint8_t cipher_bits = static_cast<std::uint8_t>(
+            reserved_values[index] << btp::kCipherIdShift);
+        encoded[6] = static_cast<std::uint8_t>(encoded[6] | cipher_bits);
+        write_crc(&encoded);
+
+        btp::DecodedFrame decoded = {};
+        CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+                          &decoded) == btp::Error::InvalidCipherId);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -457,6 +530,9 @@ int main() {
     test_encode_header_matches_encode_bytes();
     test_encrypted_round_trip_with_placeholder_cipher();
     test_decoder_rejects_encrypted_flag_with_v1_version();
+    test_cipher_id_extraction();
+    test_encoder_rejects_cipher_id_without_encrypted();
+    test_decoder_rejects_reserved_cipher_id_with_encrypted();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

@@ -4,7 +4,8 @@ Sibling de [`test-vectors/v1/`](../v1/README.md), mesmo contrato de arquivo
 (par `.json`/`.bin`, gerados e verificados por
 [`tools/test_vectors_v2.py`](../../tools/test_vectors_v2.py)), cobrindo a
 extensao normativa da [secao 8 de `BTP_V1.md`](../../docs/BTP_V1.md#8-criptografia-aead-do-payload)
-(flag `ENCRYPTED`, octeto de versao 2, [ADR 0012](../../docs/decisions/0012-criptografia-aead-payload.md)).
+(flag `ENCRYPTED`, octeto de versao 2, sub-campo `CIPHER_ID`,
+[ADR 0012](../../docs/decisions/0012-criptografia-aead-payload.md)).
 `tools/test_vectors_v2.py` e' um script independente de
 `tools/test_vectors.py` -- nao importa nem depende dele -- exatamente como a
 v2 tem sua propria reimplementacao de referencia do decode, separada da v1.
@@ -23,14 +24,25 @@ python tools/test_vectors_v2.py --root test-vectors/v2 --check
 - `valid/aead_telemetry_gcm.json`: um frame com `ENCRYPTED` marcado cujo
   `payload_hex` e' ciphertext‖tag **real** de AES-128-GCM (nao um
   placeholder), com chave/nonce/AAD/plaintext documentados no bloco `"aead"`
-  do JSON para reproducao e verificacao cross-plataforma futura.
+  do JSON para reproducao e verificacao cross-plataforma futura. `flags`
+  tambem exercita o valor normativo do sub-campo `CIPHER_ID` (bits 2-3,
+  BTP_V1.md secao 5/8.1) para AES-128-GCM: `0`, documentado explicitamente
+  como `"cipher_id": 0` no bloco `"aead"`.
 - `invalid/encrypted_version_mismatch.json`: `ENCRYPTED` marcado com octeto
   de versao 1 -- `btp::Error::EncryptedVersionMismatch`.
 - `invalid/crc_mismatch_encrypted.json`: CRC do envelope corrompido sobre um
   frame `ENCRYPTED` -- prova que o framing (CRC, seccao 7) continua
   funcionando identicamente independente da flag.
-- `invalid/reserved_flag.json`: bit `0x0004` (ainda reservado; `0x0002`
-  deixou de ser reservado ao virar `ENCRYPTED`) -- `btp::Error::InvalidFlags`.
+- `invalid/reserved_flag.json`: bit `0x0010` (ainda reservado; `0x0002` e
+  `0x000C` deixaram de ser reservados ao virar `ENCRYPTED` e `CIPHER_ID`) --
+  `btp::Error::InvalidFlags`.
+- `invalid/cipher_id_reserved.json`: `ENCRYPTED` marcado com `CIPHER_ID == 2`
+  (valor reservado para cifras futuras, BTP_V1.md secao 8.1) --
+  `btp::Error::InvalidCipherId`.
+- `invalid/cipher_id_requires_encrypted.json`: `ENCRYPTED` limpo com
+  `CIPHER_ID == 1` -- nao ha cifra "em uso" por um frame nao cifrado, entao
+  `CIPHER_ID` diferente de zero e' rejeitado mesmo sendo um valor atribuido
+  -- `btp::Error::InvalidCipherId`.
 
 ## O que esta suite deliberadamente NAO cobre
 

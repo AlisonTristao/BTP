@@ -222,7 +222,11 @@ void test_invalid_vectors_fail_for_documented_reason() {
         {"invalid/crc_mismatch_encrypted.bin", btp::TransportProfile::EspNow,
          btp::Error::CrcMismatch},
         {"invalid/reserved_flag.bin", btp::TransportProfile::Serial,
-         btp::Error::InvalidFlags}
+         btp::Error::InvalidFlags},
+        {"invalid/cipher_id_reserved.bin", btp::TransportProfile::EspNow,
+         btp::Error::InvalidCipherId},
+        {"invalid/cipher_id_requires_encrypted.bin", btp::TransportProfile::Serial,
+         btp::Error::InvalidCipherId}
     };
     for (std::size_t index = 0U; index < sizeof(vectors) / sizeof(vectors[0]);
          ++index) {

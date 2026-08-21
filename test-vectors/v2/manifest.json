@@ -8,6 +8,8 @@
   "invalid_vectors": [
     "encrypted_version_mismatch",
     "crc_mismatch_encrypted",
-    "reserved_flag"
+    "reserved_flag",
+    "cipher_id_reserved",
+    "cipher_id_requires_encrypted"
   ]
 }

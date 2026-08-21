@@ -38,9 +38,30 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
      lento e, se a implementação não for constant-time, sujeito a
      side-channel de timing. Um endpoint futuro nessas condições **SHOULD**
      usar ChaCha20-Poly1305 em vez de AES-128-GCM — mesmo tamanho de nonce e
-     tag, constant-time por construção, sem depender de hardware. A escolha
-     de cifra é uma decisão local de cada endpoint, não um campo no wire (ver
-     "Estratégia de negociação" no plano abaixo).
+     tag, constant-time por construção, sem depender de hardware.
+   - **A escolha entre as duas cifras é sinalizada no wire por `CIPHER_ID`,
+     um sub-campo de 2 bits em `flags`** (bits 2 e 3, máscara `0x000C`,
+     deslocamento 2 — `BTP_V1.md` §5/§8.1): `0` para AES-128-GCM (padrão),
+     `1` para ChaCha20-Poly1305, `2`/`3` reservados para cifras futuras e
+     **MUST** ser rejeitados por um decoder desta versão. Com `ENCRYPTED`
+     limpo, `CIPHER_ID` **MUST** ser `0` — não há cifra "em uso" por um
+     frame não cifrado — e um valor diferente de zero nesse caso **MUST**
+     também ser rejeitado. Isso não é negociação em tempo de execução: os
+     dois endpoints de um canal ainda **MUST** estar configurados fora de
+     banda para suportar e aceitar as cifras que usam entre si (ver
+     "Estratégia de negociação" abaixo); o que muda é que a identificação de
+     qual cifra produziu cada frame deixa de depender só dessa configuração
+     externa e passa a ser lida diretamente do próprio frame.
+   - `CIPHER_ID` é um sub-campo de 2 bits — um valor de 1-em-4 — em vez de
+     duas flags booleanas independentes (`AES_GCM`/`CHACHA20_POLY1305`)
+     porque duas flags abririam combinações que o wire não deveria conseguir
+     representar: as duas marcadas ao mesmo tempo (qual cifra vale?) ou,
+     pior, nenhuma marcada com `ENCRYPTED` ligado (qual cifra foi usada?). Um
+     sub-campo de 2 bits tira essa ambiguidade por construção — sobram
+     exatamente 4 valores possíveis, dois atribuídos e dois reservados —,
+     reaproveitando o mesmo princípio já usado para bits reservados do resto
+     de `flags`: um valor não atribuído é rejeitado explicitamente, nunca
+     ignorado.
 
 3. **Nonce = `source_id (4B) ‖ boot_id (4B) ‖ sequence (4B)`** — exatamente os
    96 bits que GCM/ChaCha20-Poly1305 exigem, sem nenhum octeto novo no
@@ -119,6 +140,13 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
 - **Incluir a chave, ou parte dela, em algum campo do header:** rejeitado —
   inverteria o propósito da criptografia; um nonce pode e deve ser público,
   a chave nunca.
+- **Duas flags booleanas independentes, uma por cifra, em vez do sub-campo
+  `CIPHER_ID` de 2 bits:** rejeitado — permitiria combinações inválidas que
+  um decoder teria que detectar e rejeitar à parte (as duas marcadas ao
+  mesmo tempo, ou, com `ENCRYPTED` ligado, nenhuma marcada). Um sub-campo de
+  2 bits — um valor de 1-em-4 — torna essas combinações irrepresentáveis por
+  construção: só existem 4 valores possíveis, dois atribuídos (`0`/`1`) e
+  dois reservados (`2`/`3`), sem espaço para "as duas ao mesmo tempo".
 
 ## Plano de implementação
 

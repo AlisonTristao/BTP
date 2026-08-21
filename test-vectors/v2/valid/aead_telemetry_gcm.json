@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v2",
   "id": "aead_telemetry_gcm",
-  "description": "TELEMETRY com ENCRYPTED marcado (BTP_V1.md secao 8). payload_hex e' o ciphertext‖tag REAL de AES-128-GCM, nao um placeholder: gerado com o pacote Python `cryptography` (AESGCM), chave/nonce/AAD/plaintext documentados no bloco \"aead\" abaixo para permitir que uma etapa futura (consumidor com mbedtls linkado) reproduza e verifique este mesmo ciphertext+tag como vetor de interoperabilidade cross-plataforma. btp::decode() nao verifica o tag (ver test-vectors/v2/README.md); este vetor so exercita e prova o framing: version==2 selecionado automaticamente por causa de ENCRYPTED, payload_size correto, CRC do envelope sobre header+ciphertext+tag.",
+  "description": "TELEMETRY com ENCRYPTED marcado (BTP_V1.md secao 8). payload_hex e' o ciphertext‖tag REAL de AES-128-GCM, nao um placeholder: gerado com o pacote Python `cryptography` (AESGCM), chave/nonce/AAD/plaintext documentados no bloco \"aead\" abaixo para permitir que uma etapa futura (consumidor com mbedtls linkado) reproduza e verifique este mesmo ciphertext+tag como vetor de interoperabilidade cross-plataforma. btp::decode() nao verifica o tag (ver test-vectors/v2/README.md); este vetor so exercita e prova o framing: version==2 selecionado automaticamente por causa de ENCRYPTED, payload_size correto, CRC do envelope sobre header+ciphertext+tag. flags=0x0002 tem os bits 2-3 (CIPHER_ID, BTP_V1.md secao 5/8.1) zerados, que e' exatamente o valor normativo para AES-128-GCM -- ver \"cipher_id\" no bloco \"aead\" abaixo.",
   "transport": "esp_now",
   "frame": {
     "type": "TELEMETRY",
@@ -17,6 +17,8 @@
   },
   "aead": {
     "algorithm": "AES-128-GCM",
+    "cipher_id": 0,
+    "cipher_id_note": "Valor normativo do sub-campo CIPHER_ID (BTP_V1.md secao 5/8.1, bits 2-3 de flags, mascara 0x000C) para AES-128-GCM. Corresponde aos bits 2-3 de flags=0x0002 acima, que ja sao 00 -- este vetor sempre usou AES-128-GCM de verdade, entao CIPHER_ID==0 nao exigiu nenhuma mudanca de bytes ao se tornar normativo.",
     "library": "Python cryptography (AESGCM), matching BTP_V1.md secao 8.1's mandated primary algorithm",
     "key_hex": "00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f",
     "key_note": "Chave de teste fixa, publica e sequencial (0x00..0x0f); documentada apenas para reproduzir este vetor. NUNCA usar em producao -- BTP_V1.md secao 8.5 exige que a chave real nunca trafegue nem seja documentada em claro.",

@@ -1,10 +1,10 @@
 {
   "format": "btp-test-vector-v2",
   "id": "reserved_flag",
-  "description": "Bit reservado 0x0004 marcado em flags (0x0002, agora ENCRYPTED, deixou de ser reservado; 0x0004 e' o proximo bit ainda nao alocado). CRC recomputado porque flags faz parte do header coberto pelo CRC. Prova que kKnownFlagsMask passou de 0x0001 para 0x0003 (FRAGMENTED|ENCRYPTED) sem abrir mao da rejeicao de bits reservados.",
+  "description": "Bit reservado 0x0010 marcado em flags. 0x0002 (ENCRYPTED) e 0x000C (CIPHER_ID, BTP_V1.md secao 5/8.1) sao os bits alocados mais altos hoje; 0x0010 e' o proximo bit ainda nao atribuido, e' quem herda o papel que 0x0004 tinha antes de virar parte de CIPHER_ID. CRC recomputado porque flags faz parte do header coberto pelo CRC. Prova que kKnownFlagsMask passou de 0x0003 (FRAGMENTED|ENCRYPTED) para 0x000F (FRAGMENTED|ENCRYPTED|CIPHER_ID) sem abrir mao da rejeicao de bits reservados.",
   "base": "hello",
   "mutations": [
-    {"operation": "set_u16_le", "offset": 6, "value": "0x0004", "recompute_crc": true}
+    {"operation": "set_u16_le", "offset": 6, "value": "0x0010", "recompute_crc": true}
   ],
   "expected_error": "InvalidFlags"
 }

@@ -98,12 +98,28 @@ void write_header(const Header& header,
     out_header[35] = header.fragment_count;
 }
 
+// BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in use",
+// so CIPHER_ID MUST be 0; with ENCRYPTED set, CIPHER_ID MUST be 0 or 1 (the
+// only assigned values) -- 2 and 3 are reserved for future ciphers and MUST
+// be rejected, the same principle already applied to reserved flag bits.
+bool valid_cipher_id_for_flags(std::uint16_t flags) noexcept {
+    const std::uint16_t raw_cipher_id =
+        static_cast<std::uint16_t>((flags & kCipherIdMask) >> kCipherIdShift);
+    if ((flags & kFlagEncrypted) == 0U) {
+        return raw_cipher_id == 0U;
+    }
+    return raw_cipher_id <= static_cast<std::uint16_t>(CipherId::ChaCha20Poly1305);
+}
+
 Error validate_header(const Header& header) noexcept {
     if (!valid_type(header.type)) {
         return Error::InvalidType;
     }
     if ((header.flags & static_cast<std::uint16_t>(~kKnownFlagsMask)) != 0U) {
         return Error::InvalidFlags;
+    }
+    if (!valid_cipher_id_for_flags(header.flags)) {
+        return Error::InvalidCipherId;
     }
     if (header.source_id == 0U) {
         return Error::InvalidSourceId;
@@ -273,6 +289,11 @@ Error decode(const std::uint8_t* input,
     return Error::Ok;
 }
 
+CipherId cipher_id(std::uint16_t flags) noexcept {
+    return static_cast<CipherId>(
+        static_cast<std::uint8_t>((flags & kCipherIdMask) >> kCipherIdShift));
+}
+
 void aead_nonce(const Header& header, std::uint8_t out_nonce[12]) noexcept {
     write_u32_le(out_nonce, header.source_id);
     write_u32_le(out_nonce + 4U, header.boot_id);
@@ -316,6 +337,8 @@ const char* error_string(Error error) noexcept {
         case Error::InvalidFragmentation: return "invalid fragmentation fields";
         case Error::EncryptedVersionMismatch:
             return "ENCRYPTED flag set without version 2";
+        case Error::InvalidCipherId:
+            return "CIPHER_ID inconsistent with ENCRYPTED or reserved";
     }
     return "unknown error";
 }

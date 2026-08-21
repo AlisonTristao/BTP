@@ -20,7 +20,7 @@ Estados permitidos: `Proposta`, `Aceita`, `Substituída` e `Rejeitada`.
 | [0009 - Comandos, descoberta, sessão e terminal](0009-comandos-descoberta-sessao-terminal.md) | Aceita | Correlação, deduplicação, manifesto, assinatura, status e terminal |
 | [0010 - Perfis de transporte ESP-NOW e Serial/COBS](0010-perfis-de-transporte-espnow-serial.md) | Aceita | Datagramas, entrega, retry, COBS, ressincronização, SerialMux e capacidade |
 | [0011 - Perfil de transporte USB HID](0011-perfil-de-transporte-usb-hid.md) | Aceita | Dispositivo composto CDC+HID, relatórios de 64 octetos, sessão sempre protocolada |
-| [0012 - Criptografia AEAD do payload (v2.0)](0012-criptografia-aead-payload.md) | Proposta | Flag `ENCRYPTED`, AES-128-GCM, nonce de `source_id`/`boot_id`/`sequence`, AAD do header, chave fora do wire |
+| [0012 - Criptografia AEAD do payload (v2.0)](0012-criptografia-aead-payload.md) | Proposta | Flag `ENCRYPTED`, AES-128-GCM, sub-campo `CIPHER_ID` no wire, nonce de `source_id`/`boot_id`/`sequence`, AAD do header, chave fora do wire |
 
 ## Como criar uma decisão
 

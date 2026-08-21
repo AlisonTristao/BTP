@@ -32,7 +32,11 @@ V1_VERSION = 1
 V2_VERSION = 2
 FLAG_FRAGMENTED = 0x0001
 FLAG_ENCRYPTED = 0x0002
-KNOWN_FLAGS_MASK = FLAG_FRAGMENTED | FLAG_ENCRYPTED
+# CIPHER_ID sub-field, bits 2-3 of flags (BTP_V1.md section 5 / section 8.1):
+# 0 == AES-128-GCM (default), 1 == ChaCha20-Poly1305, 2/3 reserved.
+FLAG_CIPHER_ID_MASK = 0x000C
+FLAG_CIPHER_ID_SHIFT = 2
+KNOWN_FLAGS_MASK = FLAG_FRAGMENTED | FLAG_ENCRYPTED | FLAG_CIPHER_ID_MASK
 TYPE_VALUES = {
     "TELEMETRY": 0x01,
     "LOG": 0x02,
@@ -113,11 +117,14 @@ def apply_mutations(data, mutations):
 
 def decode_error(data, transport):
     """Independent reimplementation of btp::decode()'s current rules
-    (src/codec.cpp), including the v2 ENCRYPTED/version-2 extension. The
-    check order below mirrors decode() exactly, which matters: the CRC check
-    runs before the EncryptedVersionMismatch check, so a vector that mutates
-    only the version octet must recompute the CRC to actually exercise
-    EncryptedVersionMismatch instead of tripping CrcMismatch first.
+    (src/codec.cpp), including the v2 ENCRYPTED/version-2 extension and the
+    CIPHER_ID sub-field of flags. The check order below mirrors decode()
+    exactly, which matters: the CRC check runs before the
+    EncryptedVersionMismatch check, so a vector that mutates only the
+    version octet must recompute the CRC to actually exercise
+    EncryptedVersionMismatch instead of tripping CrcMismatch first; likewise
+    the CIPHER_ID consistency check runs after the reserved-flag-bits check
+    (InvalidFlags), mirroring validate_header()'s own order.
     """
     max_frame, max_payload = TRANSPORT_LIMITS[transport]
     if len(data) < HEADER_SIZE + CRC_SIZE:
@@ -154,6 +161,18 @@ def decode_error(data, transport):
         return "InvalidType"
     if flags & ~KNOWN_FLAGS_MASK:
         return "InvalidFlags"
+
+    # BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in
+    # use", so CIPHER_ID must be 0; with ENCRYPTED set, CIPHER_ID must be 0
+    # or 1 (the only assigned values) -- 2 and 3 are reserved and rejected,
+    # the same principle already applied to reserved flag bits above.
+    encrypted = bool(flags & FLAG_ENCRYPTED)
+    raw_cipher_id = (flags & FLAG_CIPHER_ID_MASK) >> FLAG_CIPHER_ID_SHIFT
+    if not encrypted and raw_cipher_id != 0:
+        return "InvalidCipherId"
+    if encrypted and raw_cipher_id > 1:
+        return "InvalidCipherId"
+
     if source_id == 0:
         return "InvalidSourceId"
     if boot_id == 0:

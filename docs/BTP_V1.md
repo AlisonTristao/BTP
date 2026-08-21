@@ -123,7 +123,15 @@ encoder v1 **MUST NOT** emitir um tipo não atribuído.
 | ---: | --- | --- |
 | `0x0001` | `FRAGMENTED` | O frame é parte de uma mensagem lógica com dois ou mais fragmentos |
 | `0x0002` | `ENCRYPTED` | O payload lógico é `ciphertext ‖ tag` em vez de dado em claro; ver seção 8 |
-| `0xFFFC` | — | Bits reservados; **MUST** ser zero |
+| `0x000C` | `CIPHER_ID` | Sub-campo de 2 bits (bits 2 e 3, deslocamento 2) que identifica a cifra AEAD usada quando `ENCRYPTED` está marcado; ver seção 8.1 |
+| `0xFFF0` | — | Bits reservados; **MUST** ser zero |
+
+Diferente de `FRAGMENTED` e `ENCRYPTED`, `CIPHER_ID` não é uma flag booleana
+isolada: é um sub-campo de 2 bits — um valor de 1-em-4, não duas flags
+independentes — extraído de `flags` com a máscara `0x000C` e o deslocamento
+2. Essa escolha evita que o wire consiga representar uma combinação
+ambígua do tipo "duas cifras marcadas ao mesmo tempo"; a seção 8.1 define os
+valores atribuídos e as regras de consistência com `ENCRYPTED`.
 
 Um decoder v1 **MUST** rejeitar um frame com qualquer bit reservado igual a
 um. Flags desconhecidas não são ignoradas, pois podem mudar a interpretação do
@@ -241,11 +249,33 @@ Um endpoint sem acelerador AES em hardware **SHOULD** usar
 bits) e de tag (128 bits), constante em tempo por construção, sem depender
 de aceleração de hardware para evitar side-channel de timing.
 
-A escolha entre as duas cifras é uma decisão local de cada endpoint — não
-existe campo no wire que a transporte ou a sinalize. Dois endpoints que
-troquem frames com `ENCRYPTED` marcado **MUST** ser configurados fora de
-banda com a mesma cifra; esta especificação não define detecção nem
-negociação automática dessa escolha (seção 8.6).
+O sub-campo `CIPHER_ID`, dois bits do campo `flags` (bits 2 e 3, máscara
+`0x000C`, deslocamento 2 — seção 5), sinaliza no wire qual das duas cifras
+acima produziu o payload de um frame:
+
+| `CIPHER_ID` | Cifra |
+| ---: | --- |
+| `0` | AES-128-GCM (cifra primária; valor padrão) |
+| `1` | ChaCha20-Poly1305 |
+| `2` ou `3` | Reservado para cifras futuras |
+
+Quando `ENCRYPTED` está limpo, não há cifra em uso pelo frame: `CIPHER_ID`
+**MUST** ser `0` nesse caso, e um decoder **MUST** rejeitar um frame com
+`ENCRYPTED` limpo e `CIPHER_ID` diferente de zero. Quando `ENCRYPTED` está
+marcado, `CIPHER_ID` **MUST** ser `0` ou `1` — os únicos valores atribuídos
+por esta especificação —, e um decoder **MUST** rejeitar `CIPHER_ID == 2` ou
+`CIPHER_ID == 3`, pelo mesmo princípio já aplicado a bits de flag reservados
+(seção 5): um valor não reconhecido não é ignorado, é motivo de rejeição
+explícita do frame.
+
+`CIPHER_ID` identifica no wire qual cifra foi usada; ele não é, por si só,
+negociação em tempo de execução nem dispensa configuração prévia. Dois
+endpoints que troquem frames com `ENCRYPTED` marcado **MUST** continuar
+configurados fora de banda para suportar e aceitar as cifras que pretendem
+usar entre si (seção 8.5); esta especificação não define como um endpoint
+decide aceitar ou rejeitar um `CIPHER_ID` atribuído (`0` ou `1`) que ele
+mesmo não implementa — essa decisão permanece fora do escopo do wire format,
+na mesma linha da estratégia de negociação descrita na seção 8.6.
 
 ### 8.2 Nonce
 
@@ -326,6 +356,17 @@ chave (seção 8.5) para que a troca funcione; esta especificação não define
 sinalização, descoberta automática nem negociação em tempo de execução — via
 `HELLO` ou qualquer outro handshake — para habilitar ou confirmar o uso de
 `ENCRYPTED`.
+
+O sub-campo `CIPHER_ID` (seção 5, seção 8.1) não muda essa estratégia. Ele
+identifica no wire, frame a frame, qual cifra um emissor que já decidiu
+cifrar de fato usou — não é um mecanismo de descoberta, proposta nem
+confirmação de capacidade entre os dois lados, e não substitui a
+configuração fora de banda dos dois endpoints. A diferença introduzida por
+`CIPHER_ID` é apenas de diagnóstico: antes, um decoder que não suportasse a
+cifra realmente usada por um emissor não tinha, no próprio wire, como saber
+qual cifra deveria tentar; com `CIPHER_ID`, essa identificação deixa de
+depender só de configuração externa, ainda que a capacidade de implementar
+cada cifra continue sendo, ela sim, combinada fora de banda.
 
 ### 8.7 Migração e compatibilidade
 
