@@ -336,10 +336,18 @@ notificação ativa ao emissor.
 
 ### 8.5 Chave
 
-A chave de 128 bits usada por AES-128-GCM ou por ChaCha20-Poly1305 **MUST
-NOT** trafegar em nenhum campo do wire, em nenhuma mensagem, cifrada ou não.
-Provisioná-la — por par de endpoints ou por rede — é responsabilidade de
-cada implantação e está fora do escopo desta especificação.
+Um endpoint **MUST** usar uma chave de 128 bits (16 octetos) com AES-128-GCM
+e uma chave de 256 bits (32 octetos) com ChaCha20-Poly1305 — os dois
+tamanhos não são intercambiáveis entre as cifras: a RFC 8439 exige 256 bits
+para ChaCha20-Poly1305, sem variante padronizada de 128 bits. Qual dos dois
+tamanhos vale em um canal decorre implicitamente do `CIPHER_ID` (seção 8.1)
+configurado fora de banda para esse canal.
+
+Essa chave, em qualquer um dos dois tamanhos, **MUST NOT** trafegar em
+nenhum campo do wire, em nenhuma mensagem, cifrada ou não. Provisioná-la —
+por par de endpoints ou por rede, no tamanho correspondente à cifra
+configurada para esse canal — é responsabilidade de cada implantação e está
+fora do escopo desta especificação.
 
 `boot_id` **MUST NOT** ser tratado como segredo, nem como derivação ou
 substituto da chave: são conceitos independentes. A chave é o segredo

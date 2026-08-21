@@ -62,6 +62,14 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
      reaproveitando o mesmo princípio já usado para bits reservados do resto
      de `flags`: um valor não atribuído é rejeitado explicitamente, nunca
      ignorado.
+   - **As duas cifras usam tamanhos de chave diferentes, não intercambiáveis:**
+     16 octetos (128 bits) para AES-128-GCM, 32 octetos (256 bits) para
+     ChaCha20-Poly1305 — a RFC 8439 exige 256 bits para ChaCha20-Poly1305,
+     sem variante padronizada de 128 bits. `CIPHER_ID` sinaliza, portanto,
+     não só qual cifra mas também qual tamanho de chave um frame usa; o
+     provisionamento fora de banda (item 6 abaixo) **MUST** gerar e
+     armazenar, para cada canal, a chave no tamanho correspondente à cifra
+     configurada para esse canal.
 
 3. **Nonce = `source_id (4B) ‖ boot_id (4B) ‖ sequence (4B)`** — exatamente os
    96 bits que GCM/ChaCha20-Poly1305 exigem, sem nenhum octeto novo no

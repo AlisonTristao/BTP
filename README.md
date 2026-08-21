@@ -47,9 +47,9 @@ O cabeçalho tem exatamente 36 octetos:
 | Offset | Tamanho | Campo | Tipo | Significado |
 | ---: | ---: | --- | --- | --- |
 | 0 | 4 | `magic` | 4 octetos | `42 54 50 00` (`BTP\0`) |
-| 4 | 1 | `version` | `uint8` | `0x01` |
+| 4 | 1 | `version` | `uint8` | `0x01` ou `0x02`; `0x02` é selecionado automaticamente quando `ENCRYPTED` está marcado |
 | 5 | 1 | `type` | `uint8` | Canal lógico da mensagem |
-| 6 | 2 | `flags` | `uint16_le` | Bit `0x0001` = fragmentado; demais reservados |
+| 6 | 2 | `flags` | `uint16_le` | Bit `0x0001` = fragmentado; bit `0x0002` = `ENCRYPTED`; bits 2-3 (`0x000C`) = `CIPHER_ID` (`0` AES-128-GCM, `1` ChaCha20-Poly1305); demais reservados — detalhe normativo completo em [`docs/BTP_V1.md`](docs/BTP_V1.md) seção 8 |
 | 8 | 2 | `header_size` | `uint16_le` | `36`, detecta mudança futura de layout |
 | 10 | 2 | `payload_size` | `uint16_le` | Bytes deste fragmento |
 | 12 | 4 | `source_id` | `uint32_le` | Identidade estável e não nula da origem |
@@ -145,6 +145,55 @@ Detalhes normativos em [`docs/TRANSPORT_ESPNOW.md`](docs/TRANSPORT_ESPNOW.md),
 incremental, fragmentação e reassembly compartilhados em
 [`docs/STREAM_AND_REASSEMBLY.md`](docs/STREAM_AND_REASSEMBLY.md).
 
+## Criptografia (v2.0)
+
+O bit `ENCRYPTED` (`0x0002`) em `flags` sinaliza que o payload lógico de uma
+mensagem deixou de ser dado em claro e passa a ser `ciphertext ‖ tag`; um
+frame que o marca também passa a usar `version == 0x02` no envelope,
+selecionado automaticamente pelo encoder. Com `ENCRYPTED` limpo, nada disso
+se aplica e o frame segue integralmente o formato descrito acima.
+
+Duas cifras AEAD são suportadas, identificadas no wire pelo sub-campo
+`CIPHER_ID` (bits 2-3 de `flags`, máscara `0x000C`): `0` para AES-128-GCM,
+primária e acelerada por hardware nos ESP32-S3 do projeto, e `1` para
+ChaCha20-Poly1305, alternativa constante em tempo para chips sem acelerador
+AES. As duas cifras usam tamanhos de chave diferentes e não intercambiáveis
+— 16 octetos para AES-128-GCM, 32 para ChaCha20-Poly1305 (RFC 8439) — ver
+[`docs/BTP_V1.md`](docs/BTP_V1.md) seções 8.1 e 8.5.
+
+O nonce de 96 bits exigido pelas duas cifras é montado só com campos que o
+cabeçalho já carrega — `source_id ‖ boot_id ‖ sequence` —, sem octeto novo
+no wire; como esses três campos já são obrigatoriamente únicos por regras
+normativas independentes desta extensão (`docs/BTP_V1.md` seção 6), a
+combinação nunca se repete sob a mesma chave (argumento completo em
+`docs/BTP_V1.md` seção 8.2). Os dados
+associados (AAD) são os 36 octetos do cabeçalho, completos: continuam em
+claro, para que roteamento e validação operem antes de decifrar, mas
+qualquer alteração neles invalida o tag do mesmo jeito que alterar o
+payload invalidaria. O tag de 16 octetos é calculado e verificado no nível
+da mensagem lógica — antes de fragmentar, na origem; depois de reassemblar,
+no receptor — nunca por fragmento individual, já que `sequence` identifica
+a mensagem lógica, não o frame físico.
+
+A chave, no tamanho correspondente à cifra em uso, nunca trafega em nenhum
+campo do wire; como a própria decisão de habilitar `ENCRYPTED` em um canal,
+ela é provisionada fora de banda entre os dois endpoints. O perfil `UsbHid`
+fica deliberadamente fora do escopo desta primeira versão: um tag de 16
+octetos sobre um payload de só 22 octetos dominaria o orçamento do
+transporte, e a política adequada para esse caso (provavelmente
+truncamento) fica para revisão futura — motivação completa na ADR abaixo.
+
+A cifragem em si vive em [`include/btp/aead.hpp`](include/btp/aead.hpp) e
+[`src/aead.cpp`](src/aead.cpp), módulo `btp::aead` separado do codec: o
+codec continua só fazendo framing, tratando o payload cifrado como
+`ciphertext ‖ tag` opaco sem chamar nenhuma cifra, e permanece sem
+dependências. É o módulo `btp::aead`, sozinho, que depende de mbedtls para
+implementar as duas cifras (veja "Build e testes" abaixo).
+
+Especificação normativa completa em [`docs/BTP_V1.md`](docs/BTP_V1.md)
+seção 8 e decisão de design em
+[`docs/decisions/0012-criptografia-aead-payload.md`](docs/decisions/0012-criptografia-aead-payload.md).
+
 ## Versionamento
 
 `version` no envelope identifica o wire format e permite rejeição explícita
@@ -163,10 +212,12 @@ BTP/
 |-- CMakeLists.txt
 |-- library.json
 |-- include/btp/
+|   |-- aead.hpp
 |   |-- codec.hpp
 |   |-- fragmentation.hpp
 |   `-- stream.hpp
 |-- src/
+|   |-- aead.cpp
 |   |-- codec.cpp
 |   |-- fragmentation.cpp
 |   `-- stream.cpp
@@ -175,7 +226,12 @@ BTP/
 |   |-- valid/
 |   |-- invalid/
 |   `-- manifest.json
+|-- test-vectors/v2/
+|   |-- valid/
+|   |-- invalid/
+|   `-- manifest.json
 |-- tools/test_vectors.py
+|-- tools/test_vectors_v2.py
 `-- docs/
     |-- ARCHITECTURE.md
     |-- BTP_V1.md
@@ -225,7 +281,11 @@ vetores canônicos de conformidade — geração byte a byte a partir das
 descrições JSON e decodificação independente de cada `.bin`, incluindo o
 motivo exato de cada caso inválido. Vetores em
 [`test-vectors/v1/`](test-vectors/v1/README.md), documentados em
-[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md). Com a opção CMake
+`BTP_ENABLE_AEAD` (ligada por padrão), `cmake`/`ctest` também buscam o
+mbedtls via `FetchContent` e exercitam os testes unitários de `btp::aead`
+e a prova real de decodificação cruzada dos vetores de `test-vectors/v2/`;
+desligada, a dependência e o alvo `btp::aead` são pulados por completo.
 
 ### Consumo
 

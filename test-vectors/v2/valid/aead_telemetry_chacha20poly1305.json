@@ -1,0 +1,35 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "aead_telemetry_chacha20poly1305",
+  "description": "TELEMETRY com ENCRYPTED marcado (BTP_V1.md secao 8), irmao de aead_telemetry_gcm.json mas exercitando o segundo algoritmo suportado. payload_hex e' o ciphertext‖tag REAL de ChaCha20-Poly1305, nao um placeholder: gerado com o pacote Python `cryptography` (ChaCha20Poly1305), chave/nonce/AAD/plaintext documentados no bloco \"aead\" abaixo para permitir que uma etapa futura (consumidor com mbedtls linkado) reproduza e verifique este mesmo ciphertext+tag como vetor de interoperabilidade cross-plataforma. btp::decode() nao verifica o tag (ver test-vectors/v2/README.md); este vetor so exercita e prova o framing: version==2 selecionado automaticamente por causa de ENCRYPTED, payload_size correto, CRC do envelope sobre header+ciphertext+tag. flags=0x0006 tem os bits 2-3 (CIPHER_ID, BTP_V1.md secao 5/8.1) marcados como 01, que e' exatamente o valor normativo para ChaCha20-Poly1305 -- ver \"cipher_id\" no bloco \"aead\" abaixo.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0006",
+    "source_id": "0x0C0D0E0F",
+    "boot_id": "0x10203040",
+    "sequence": "0x0000002A",
+    "timestamp_us": "0x0000000000004E20",
+    "object_id": "0x0002",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "9f 98 44 f4 4d dc 69 73 e1 7a c7 c9 90 fe c8 9d a8 34 f5 c8 7d 4e f4 26 79 3a 84 ae 3c eb fc be 95 2b ee 5c 97 ee c7 05 17 16 c5 b2 15 e3 e0 4a e4 d2 7e d8 66 95 da 2d 9f 98 a4 23"
+  },
+  "aead": {
+    "algorithm": "ChaCha20-Poly1305",
+    "cipher_id": 1,
+    "cipher_id_note": "Valor normativo do sub-campo CIPHER_ID (BTP_V1.md secao 5/8.1, bits 2-3 de flags, mascara 0x000C) para ChaCha20-Poly1305. Corresponde aos bits 2-3 de flags=0x0006 acima, que sao 01 -- este vetor sempre usou ChaCha20-Poly1305 de verdade, entao CIPHER_ID==1 e' o valor que os bits ja carregavam ao se tornar normativo.",
+    "library": "Python cryptography (ChaCha20Poly1305), matching BTP_V1.md secao 8.1's segundo algoritmo suportado",
+    "key_hex": "00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f",
+    "key_note": "Chave de teste fixa, publica e sequencial (0x00..0x1f, 32 octetos), continuacao do mesmo padrao usado em key_hex de aead_telemetry_gcm.json; documentada apenas para reproduzir este vetor. NUNCA usar em producao -- BTP_V1.md secao 8.5 exige que a chave real nunca trafegue nem seja documentada em claro.",
+    "nonce_hex": "0f 0e 0d 0c 40 30 20 10 2a 00 00 00",
+    "nonce_construction": "source_id (4 octetos LE) || boot_id (4 octetos LE) || sequence (4 octetos LE), BTP_V1.md secao 8.2 / btp::aead_nonce(). Derivavel dos campos do frame acima; incluido em claro aqui apenas por conveniencia de reproducao.",
+    "aad_hex": "42 54 50 00 02 01 06 00 24 00 3c 00 0f 0e 0d 0c 40 30 20 10 2a 00 00 00 20 4e 00 00 00 00 00 00 02 00 00 01",
+    "aad_construction": "os 36 octetos do header do frame acima, serializados exatamente como btp::encode_header()/write_header() fariam (com o octeto de versao ja em 2 por causa de ENCRYPTED), BTP_V1.md secao 8.3. Derivavel dos campos do frame acima; incluido em claro aqui apenas por conveniencia de reproducao.",
+    "plaintext_hex": "42 54 50 20 76 32 20 43 68 61 43 68 61 32 30 2d 50 6f 6c 79 31 33 30 35 20 41 45 41 44 20 74 65 73 74 20 70 6c 61 69 6e 74 65 78 74",
+    "plaintext_ascii": "BTP v2 ChaCha20-Poly1305 AEAD test plaintext",
+    "tag_size_octets": 16,
+    "ciphertext_size_octets": 44,
+    "reproduction_note": "payload_hex = ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad); a biblioteca `cryptography` concatena ciphertext e tag (16 octetos finais) automaticamente, exatamente na ordem exigida pelo payload logico de BTP_V1.md secao 8.4, do mesmo jeito que AESGCM faz para o vetor irmao."
+  }
+}
