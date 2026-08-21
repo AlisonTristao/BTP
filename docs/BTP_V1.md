@@ -14,6 +14,10 @@ Todos os inteiros de mais de um octeto, inclusive o CRC, **MUST** ser
 serializados em little-endian. `magic` é uma sequência de quatro octetos e não
 um inteiro.
 
+Esta seção é a fonte normativa das convenções; a notação de largura de campo,
+os termos usados em todos os capítulos e o glossário do protocolo estão
+reunidos em [`CONVENTIONS.md`](CONVENTIONS.md).
+
 ## 2. Composição do frame
 
 Um frame BTP v1 é a concatenação exata abaixo:

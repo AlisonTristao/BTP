@@ -1,0 +1,110 @@
+site_name: BTP — Binary Telemetry Protocol
+site_description: >-
+  Especificação canônica, biblioteca compartilhada e vetores de conformidade do
+  BTP: o protocolo binário de telemetria e controle entre firmware embarcado e
+  aplicações de computador.
+site_url: https://alisontristao.github.io/BTP/
+repo_url: https://github.com/AlisonTristao/BTP
+repo_name: AlisonTristao/BTP
+edit_uri: blob/main/docs/
+
+# Link quebrado, documento fora do sumário ou âncora inexistente falham o build
+# em vez de virarem aviso silencioso: a especificação se referencia por número
+# de seção entre 26 arquivos, e uma renumeração errada é exatamente o tipo de
+# defeito que precisa parar a CI.
+strict: true
+
+theme:
+  name: material
+  language: pt-BR
+  icon:
+    logo: material/access-point-network
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer   # links "anterior/próximo" no pé da página: a leitura sequencial de livro
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - search.share
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Alternar para o modo escuro
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Alternar para o modo claro
+
+plugins:
+  - search:
+      lang: pt
+
+# Reescreve, só na hora do build, os links que saem de docs/ (código-fonte,
+# vetores de conformidade) para URLs do GitHub. Ver mkdocs_hooks.py.
+hooks:
+  - mkdocs_hooks.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+nav:
+  - Início: index.md
+  - Parte I — Panorama:
+      - Arquitetura e domínios: ARCHITECTURE.md
+      - Do sensor à tela: WALKTHROUGH.md
+      - Convenções e glossário: CONVENTIONS.md
+  - Parte II — O contrato no wire:
+      - Frame BTP v1: BTP_V1.md
+      - Codec portátil: CODEC.md
+      - COBS, fragmentação e reassembly: STREAM_AND_REASSEMBLY.md
+  - Parte III — Canais lógicos:
+      - Telemetria, arrays e schemas: TELEMETRY.md
+      - Comandos, manifesto, sessão e terminal: COMMANDS_AND_ACTIONS.md
+  - Parte IV — Perfis de transporte:
+      - Serial (COBS): TRANSPORT_SERIAL.md
+      - ESP-NOW: TRANSPORT_ESPNOW.md
+      - USB HID: TRANSPORT_USB_HID.md
+  - Parte V — Criptografia:
+      - Criptografia AEAD do payload: CRYPTO.md
+  - Parte VI — Processo e garantias:
+      - Vetores de conformidade: CONFORMANCE.md
+      - Versionamento: VERSIONING.md
+      - Como contribuir: CONTRIBUTING.md
+  - Apêndice A — Decisões de arquitetura:
+      - Registro de decisões (ADR): decisions/README.md
+      - 0001 · Fonte canônica e ausência de legado: decisions/0001-fonte-canonica-e-sem-legado.md
+      - 0002 · Modelo binário e serialização: decisions/0002-modelo-binario-e-serializacao.md
+      - 0003 · Canais, telemetria e tempo: decisions/0003-canais-telemetria-e-tempo.md
+      - 0004 · Gateway, catálogo e apresentação: decisions/0004-gateway-catalogo-e-apresentacao.md
+      - 0005 · Transportes, entrega e integridade: decisions/0005-transportes-entrega-e-integridade.md
+      - 0006 · Versionamento conjunto: decisions/0006-versionamento-conjunto.md
+      - 0007 · Wire format do envelope v1: decisions/0007-wire-format-btp-v1.md
+      - 0008 · Payloads e schemas de telemetria: decisions/0008-payloads-e-schemas-de-telemetria.md
+      - 0009 · Comandos, descoberta, sessão e terminal: decisions/0009-comandos-descoberta-sessao-terminal.md
+      - 0010 · Perfis ESP-NOW e Serial/COBS: decisions/0010-perfis-de-transporte-espnow-serial.md
+      - 0011 · Perfil USB HID: decisions/0011-perfil-de-transporte-usb-hid.md
+      - 0012 · Criptografia AEAD do payload: decisions/0012-criptografia-aead-payload.md
+  - Apêndice B — Capturas de integração: integration-captures/README.md

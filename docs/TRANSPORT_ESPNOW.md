@@ -6,11 +6,12 @@ Este documento define como frames BTP v1 atravessam o enlace ESP-NOW entre o
 robô e o dongle. O envelope, o CRC e a fragmentação continuam regidos por
 [`BTP_V1.md`](BTP_V1.md).
 
-As palavras **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** e **MAY** são
-requisitos normativos. "Aceito" significa que a API local aceitou uma
-tentativa de envio; "confirmado no enlace" significa que o callback de envio
-reportou sucesso; "concluído" significa que o protocolo de aplicação produziu
-a resposta esperada. Esses três eventos não são equivalentes.
+As convenções normativas deste documento estão em
+[`CONVENTIONS.md`](CONVENTIONS.md), inclusive a distinção entre "aceito"
+(a API local aceitou a tentativa de envio), "confirmado no enlace" (o
+callback de envio reportou sucesso) e "concluído" (o protocolo de aplicação
+produziu a resposta esperada). Esses três eventos não são equivalentes, e
+este capítulo depende dessa diferença o tempo todo.
 
 ## 2. Mapeamento para datagramas
 

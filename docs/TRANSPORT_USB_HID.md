@@ -6,12 +6,12 @@ Este documento define como frames BTP v1 atravessam uma interface USB HID
 vendor-defined entre o dongle e o cliente desktop. O envelope, o CRC e a
 fragmentação continuam regidos por [`BTP_V1.md`](BTP_V1.md).
 
-As palavras **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** e **MAY** são
-requisitos normativos. "Aceito" significa que a API HID local (`SendReport`/
-`hid_write`) aceitou a escrita; "confirmado no enlace" significa que a
-transferência USB completou sem erro de transporte; "concluído" significa que
-o protocolo de aplicação produziu a resposta esperada. Esses três eventos não
-são equivalentes -- mesma distinção de três níveis usada em
+As convenções normativas deste documento estão em
+[`CONVENTIONS.md`](CONVENTIONS.md), inclusive a distinção de três níveis
+entre "aceito", "confirmado no enlace" e "concluído". Neste perfil, "aceito"
+é a API HID local (`SendReport`/`hid_write`) ter aceitado a escrita e
+"confirmado no enlace" é a transferência USB ter completado sem erro de
+transporte -- a mesma distinção usada em
 [`TRANSPORT_ESPNOW.md`](TRANSPORT_ESPNOW.md) §1.
 
 Este perfil coexiste com `Serial` (`TRANSPORT_SERIAL.md`) no mesmo

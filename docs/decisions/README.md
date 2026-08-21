@@ -26,5 +26,5 @@ Estados permitidos: `Proposta`, `Aceita`, `Substituída` e `Rejeitada`.
 
 Um novo ADR deve registrar contexto, decisão, consequências e alternativas
 relevantes. Mudanças que afetem o wire também seguem
-[`CONTRIBUTING.md`](../../CONTRIBUTING.md) e a
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) e a
 [política de versionamento](../VERSIONING.md).

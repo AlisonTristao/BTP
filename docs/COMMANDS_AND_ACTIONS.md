@@ -2,10 +2,11 @@
 
 ## 1. Convenções e escopo
 
-As palavras **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** e **MAY** são
-requisitos normativos. Um octeto tem 8 bits. Inteiros multibyte são
-serializados em little-endian. Todo campo reservado **MUST** ser zero ao
-emitir e **MUST** causar rejeição quando recebido com outro valor.
+As convenções normativas — palavras **MUST**/**SHOULD**/**MAY**, octetos,
+notação de largura e ordem de bytes — estão em
+[`CONVENTIONS.md`](CONVENTIONS.md) e valem integralmente aqui. Todo campo
+reservado **MUST** ser zero ao emitir e **MUST** causar rejeição quando
+recebido com outro valor.
 
 Este documento especifica os payloads lógicos dos tipos `COMMAND`, `CONTROL`
 e `TERMINAL` do envelope BTP v1. Envelope, CRC, identidade, sequência,

@@ -1,0 +1,8 @@
+# Dependências apenas do livro em docs/ (mkdocs.yml). Nada aqui entra no build
+# da biblioteca C++ nem é exigido para rodar os testes de conformidade.
+#
+#   python -m venv .venv-docs
+#   .venv-docs/Scripts/pip install -r requirements-docs.txt   # Windows
+#   .venv-docs/bin/pip install -r requirements-docs.txt       # Linux/macOS
+#   mkdocs serve
+mkdocs-material==9.7.7

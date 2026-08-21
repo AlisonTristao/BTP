@@ -1,0 +1,64 @@
+# Publica o livro de docs/ no GitHub Pages.
+#
+# Requer, uma vez, em Settings > Pages do repositório: "Source" = "GitHub
+# Actions". Sem isso o job de deploy falha com "Pages is not enabled".
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - mkdocs_hooks.py
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - mkdocs_hooks.py
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Um deploy de Pages por vez, sem cancelar um que já esteja publicando.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - run: pip install -r requirements-docs.txt
+      # mkdocs.yml já traz strict: true; o flag aqui é redundante de propósito,
+      # para o build da CI falhar mesmo que alguém relaxe o strict localmente.
+      - run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # O build roda em pull request para validar links e sumário, mas só a push em
+  # main publica.
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -12,7 +12,7 @@
 
 ## Antes de alterar
 
-1. Leia os documentos em `docs/` e os ADRs relacionados à área que você vai
+1. Leia os documentos deste diretório e os ADRs relacionados à área que você vai
    alterar.
 2. Verifique o estado Git e preserve alterações existentes.
 3. Delimite se a mudança afeta documentação, API pública, wire format ou mais
@@ -29,7 +29,7 @@ incluir no mesmo conjunto de mudanças:
 1. motivação e impacto nos três consumidores;
 2. um ADR novo, ou a marcação de um ADR anterior como substituído;
 3. atualização da especificação canônica antes ou junto do código;
-4. classificação `MAJOR`, `MINOR` ou `PATCH` conforme `docs/VERSIONING.md`;
+4. classificação `MAJOR`, `MINOR` ou `PATCH` conforme [`VERSIONING.md`](VERSIONING.md);
 5. vetores de conformidade válidos e inválidos, legíveis por máquina;
 6. implementação e testes equivalentes nas plataformas afetadas;
 7. estratégia explícita de negociação para extensões compatíveis;
@@ -76,7 +76,7 @@ pio run -d tests/embedded
 
 O `ctest` inclui a validação das descrições JSON, a igualdade byte a byte dos
 `.bin`, o decode de todos os campos e os motivos exatos dos casos inválidos.
-Consulte [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) antes de alterar qualquer
+Consulte [`CONFORMANCE.md`](CONFORMANCE.md) antes de alterar qualquer
 vetor. Arquivo `.bin` alterado é mudança de contrato e nunca uma fixture local
 descartável.
 

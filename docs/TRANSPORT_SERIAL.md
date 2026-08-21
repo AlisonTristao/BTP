@@ -10,10 +10,10 @@ seguem [`COMMANDS_AND_ACTIONS.md`](COMMANDS_AND_ACTIONS.md).
 A API compartilhada que implementa COBS e os estados de recepção está descrita
 em [`STREAM_AND_REASSEMBLY.md`](STREAM_AND_REASSEMBLY.md).
 
-As palavras **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** e **MAY** são
-requisitos normativos. "Frame" abaixo é o frame BTP cru, incluindo header,
-payload e CRC. "Bloco codificado" é somente o resultado COBS, sem
-delimitadores.
+As convenções normativas deste documento estão em
+[`CONVENTIONS.md`](CONVENTIONS.md). "Frame" abaixo é o frame BTP cru,
+incluindo header, payload e CRC. "Bloco codificado" é somente o resultado
+COBS, sem delimitadores.
 
 ## 2. Framing no stream
 

@@ -2,9 +2,10 @@
 
 ## 1. Convenções normativas
 
-As palavras **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** e **MAY** são
-requisitos normativos. Um octeto tem 8 bits. Inteiros multibyte e valores de
-ponto flutuante são serializados em little-endian.
+As convenções normativas — palavras **MUST**/**SHOULD**/**MAY**, octetos e a
+notação de largura e ordem de bytes, incluindo os valores de ponto flutuante
+usados neste documento — estão em [`CONVENTIONS.md`](CONVENTIONS.md) e valem
+integralmente aqui.
 
 Este documento especifica o payload lógico de mensagens cujo `type` no
 envelope BTP v1 é `TELEMETRY`. Envelope, CRC, limites físicos e identificação

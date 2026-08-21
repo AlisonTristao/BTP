@@ -2,3 +2,6 @@
 /.pio/
 /tests/embedded/.pio/
 
+/site/
+/.venv-docs/
+__pycache__/
