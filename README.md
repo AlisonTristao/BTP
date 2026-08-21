@@ -117,9 +117,9 @@ e o framing do enlace são diferentes:
 
 | | ESP-NOW | Serial (modo protocolado) | USB HID |
 | --- | ---: | ---: | ---: |
-| Frame BTP máximo | 250 octetos | 4096 octetos | 63 octetos |
-| Payload máximo | 210 octetos | 4056 octetos | 23 octetos |
-| Framing do enlace | 1 datagrama = 1 frame completo | `0x00 \| COBS(frame) \| 0x00` | 1 relatório HID = 1 frame completo |
+| Frame BTP máximo | 250 octetos | 4096 octetos | 62 octetos |
+| Payload máximo | 210 octetos | 4056 octetos | 22 octetos |
+| Framing do enlace | 1 datagrama = 1 frame completo | `0x00 \| COBS(frame) \| 0x00` | relatório HID (report ID + prefixo de tamanho + frame) |
 
 Em ESP-NOW, cada datagrama contém exatamente um frame BTP, sem prefixo,
 delimitador ou padding — tamanho exato `40 + payload_size`. Na serial, o modo
@@ -127,15 +127,17 @@ protocolado aplica COBS ao frame inteiro (o bloco codificado nunca contém
 `0x00`) e alterna com um modo de console humano via um handshake textual
 (`BTP/1 ENTER <nonce>` / `BTP/1 READY <nonce>`); a posse exclusiva da porta e
 o encerramento de sessão são definidos no documento de transporte. Em USB
-HID, um relatório de 64 octetos (63 de frame BTP, 1 de Report ID) já é a
-unidade de framing entregue pelo host — sem COBS e sem modo console, a
-interface fica sempre em modo protocolado.
+HID, um relatório de 64 octetos (1 de Report ID, 1 de prefixo de tamanho —
+necessário porque um relatório de tamanho fixo sempre transmite os 63
+octetos de dado completos, preenchidos com zero quando a escrita é menor —,
+62 de frame BTP) já é a unidade de framing entregue pelo host — sem COBS e
+sem modo console, a interface fica sempre em modo protocolado.
 
 Mensagens lógicas maiores que o payload do transporte usam fragmentação:
 cada fragmento é um frame BTP completo e independente (CRC próprio), até 255
 fragmentos por mensagem, remontados na origem por `fragment_index` e
 `fragment_count`. Em USB HID isso vale até para mensagens de controle
-pequenas como `HELLO`, dado o teto de 23 octetos de payload por relatório.
+pequenas como `HELLO`, dado o teto de 22 octetos de payload por relatório.
 
 Detalhes normativos em [`docs/TRANSPORT_ESPNOW.md`](docs/TRANSPORT_ESPNOW.md),
 [`docs/TRANSPORT_SERIAL.md`](docs/TRANSPORT_SERIAL.md) e

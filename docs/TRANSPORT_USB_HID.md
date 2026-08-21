@@ -23,44 +23,58 @@ nenhuma forma de migrar uma sessão de uma interface para outra.
 ## 2. Mapeamento para relatórios HID
 
 Cada relatório HID físico tem exatamente 64 octetos: 1 octeto de Report ID
-seguido de 63 octetos de dados. Este perfil usa um único Report ID fixo (o
-mesmo em ambas as direções, IN e OUT) e dedica os 63 octetos restantes
-inteiramente ao frame BTP:
+seguido de 63 octetos de dados. Um relatório HID de tamanho fixo **sempre**
+transmite os 63 octetos completos -- uma escrita menor que isso é preenchida
+com zeros pela pilha USB (TinyUSB/`USBHIDVendor`) antes do envio, porque o
+endpoint de interrupt não tem como transmitir um relatório parcial. Sem mais
+nenhuma informação, o lado que recebe não teria como distinguir dado real de
+padding de zeros à direita.
+
+Por isso este perfil reserva o primeiro octeto dos 63 como um **prefixo de
+tamanho** (`USBHIDVendor(report_size, prepend_size=true)` do lado do
+firmware): esse octeto informa quantos dos octetos seguintes são dado válido
+(0 a 62); o restante do relatório é padding e **MUST** ser ignorado pelo
+receptor. Os 62 octetos remanescentes são dedicados inteiramente ao frame BTP:
 
 ```text
-relatorio HID = report_id (1) || frame BTP (ate 63)
+relatorio HID = report_id (1) || tamanho_valido (1) || frame BTP (ate 62, resto e padding)
 ```
 
-Um relatório **MUST** conter exatamente um frame BTP completo -- ou um
+Um relatório **MUST** conter no máximo um frame BTP completo -- ou um
 fragmento, que já é por si só um frame completo (`BTP_V1.md` §5). Diferente da
-serial, não há delimitador nem COBS: o próprio relatório HID já é a unidade de
-framing, entregue como uma transferência de interrupt discreta pelo host USB.
-Um relatório **MUST NOT** conter mais de um frame, um pedaço de frame, prefixo
-de tamanho adicional ou padding alem do que o frame BTP já define via
-`payload_size`.
+serial, não há COBS nem delimitador dentro dos 62 octetos de dado: o próprio
+relatório (mais o prefixo de tamanho) já é a unidade de framing, entregue como
+uma transferência de interrupt discreta pelo host USB. Um relatório **MUST
+NOT** conter mais de um frame nem um pedaço de frame.
 
-O BTP v1 adota o limite realmente suportado por um relatório HID Full-Speed:
+O BTP v1 adota o limite realmente suportado por um relatório HID Full-Speed
+com esse prefixo:
 
 | Limite | Valor |
 | --- | ---: |
-| `BTP_USB_HID_MAX_FRAME_SIZE` | 63 octetos |
-| `BTP_USB_HID_MAX_PAYLOAD_SIZE` | 23 octetos |
+| `BTP_USB_HID_MAX_FRAME_SIZE` | 62 octetos |
+| `BTP_USB_HID_MAX_PAYLOAD_SIZE` | 22 octetos |
 
-O transmissor **MUST** rejeitar um frame maior antes de escrever no relatório.
-O receptor **MUST** rejeitar um relatório cujo frame BTP seja menor que 40 ou
-maior que 63 octetos e, depois, exigir que seu tamanho seja exatamente o
+O transmissor **MUST** rejeitar um frame maior antes de escrever no relatório,
+e **MUST** escrever o octeto de tamanho válido corretamente (o firmware faz
+isso automaticamente via `USBHIDVendor::write()` com `prepend_size=true`; um
+cliente desktop usando `hidapi` **MUST** replicar o mesmo prefixo ao montar o
+relatório OUT). O receptor **MUST** truncar o relatório recebido no tamanho
+válido declarado antes de tratar o restante como dado, depois rejeitar um
+frame BTP cujo tamanho declarado (`payload_size` do header) seja menor que 40
+ou maior que 62 octetos e exigir que seu tamanho bata exatamente com o
 declarado no header BTP. Um dispositivo USB Full-Speed **MUST NOT** anunciar
-nem depender de um endpoint maior que 64 octetos para este perfil; High-Speed
-ou um report maior **MAY** ser adotado por uma extensão futura negociada, nunca
-implicitamente.
+nem depender de um endpoint maior que 64 octetos para este perfil; High-Speed,
+um report maior ou uma convenção de framing diferente **MAY** ser adotados por
+uma extensão futura negociada, nunca implicitamente.
 
 ## 3. Fragmentação e ordenação
 
-Uma mensagem lógica com mais de 23 octetos de payload **MUST** usar a
+Uma mensagem lógica com mais de 22 octetos de payload **MUST** usar a
 fragmentação de `BTP_V1.md`, com os mesmos `fragment_count`/`make_fragment` já
 compartilhados por ESP-NOW e Serial (`btp::fragment_count`/`make_fragment` são
 parametrizados por `TransportProfile` e não mudam de comportamento entre
-perfis, só a constante de limite usada). Por causa do teto de 23 octetos, até
+perfis, só a constante de limite usada). Por causa do teto de 22 octetos, até
 mesmo mensagens de controle pequenas como `HELLO` **MUST** esperar fragmentar
 em varios relatorios -- isso é uma característica normal deste perfil, não uma
 falha de negociação.
@@ -143,13 +157,15 @@ negociado encerram a sessão; ao encerrar, a interface volta a esperar um novo
 
 Uma implementação deste transporte deve demonstrar:
 
-- frame de 40 octetos (payload vazio) e de 63 octetos (payload máximo de 23);
-- rejeição de um frame de 64 octetos antes mesmo de ler `payload_size`;
+- frame de 40 octetos (payload vazio) e de 62 octetos (payload máximo de 22);
+- rejeição de um frame de 63 octetos antes mesmo de ler `payload_size`;
+- truncamento correto do relatório recebido pelo prefixo de tamanho antes de
+  tratar o restante como padding;
 - fragmentação de uma mensagem lógica de 50 octetos em 3 relatórios
-  (23 + 23 + 4);
+  (22 + 22 + 6);
 - payload contendo `00 0a 0d 7f 80 ff` recebido byte a byte sem alteração;
 - distinção entre retorno de `SendReport`/`hid_write` e confirmação de ACK do
   host;
-- `HELLO` fragmentado com sucesso quando maior que 23 octetos de payload;
+- `HELLO` fragmentado com sucesso quando maior que 22 octetos de payload;
 - fragmentos perdidos, duplicados e fora de ordem sem entrega parcial, mesma
   garantia de `TRANSPORT_ESPNOW.md`.

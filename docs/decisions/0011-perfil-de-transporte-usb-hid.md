@@ -28,17 +28,27 @@ O BTP v1 hoje só reconhece dois perfis de transporte normativos, `EspNow` e
 `btp/codec.hpp`/`btp/fragmentation.hpp`. Um relatório HID Full-Speed tem 64
 octetos, com 1 octeto reservado ao Report ID: isso é significativamente menor
 que os 210 octetos de payload do ESP-NOW, exigindo uma constante de limite
-própria em vez de reaproveitar um perfil existente.
+própria em vez de reaproveitar um perfil existente. Além disso, um relatório
+HID de tamanho fixo sempre transmite os 63 octetos completos -- uma escrita
+menor é preenchida com zeros pela pilha USB antes do envio -- então o
+receptor não tem, por si só, como distinguir dado real de padding.
 
 ## Decisão
 
 - Novo perfil `TransportProfile::UsbHid`: cada relatório HID contém no máximo
-  um frame BTP completo (ou um fragmento) de até 63 octetos, sem COBS nem
-  delimitador -- o próprio relatório já é a unidade de framing entregue pela
-  pilha USB do host.
-- Limites do novo perfil: `BTP_USB_HID_MAX_FRAME_SIZE = 63`,
-  `BTP_USB_HID_MAX_PAYLOAD_SIZE = 23` (64 menos 1 octeto de Report ID, menos
-  os 40 octetos fixos de header e CRC do envelope BTP v1).
+  um frame BTP completo (ou um fragmento) de até 62 octetos, sem COBS nem
+  delimitador dentro desses 62 -- o relatório mais um octeto de prefixo de
+  tamanho (ver abaixo) já é a unidade de framing entregue pela pilha USB do
+  host.
+- O firmware usa `USBHIDVendor(report_size, prepend_size=true)`: o primeiro
+  dos 63 octetos de dado do relatório passa a ser um prefixo de tamanho (0 a
+  62) que diz quantos octetos seguintes são dado real, permitindo ao receptor
+  descartar o padding de zeros à direita. Um cliente desktop (hidapi) precisa
+  replicar o mesmo prefixo ao montar o relatório OUT.
+- Limites do novo perfil: `BTP_USB_HID_MAX_FRAME_SIZE = 62`,
+  `BTP_USB_HID_MAX_PAYLOAD_SIZE = 22` (64 menos 1 octeto de Report ID, menos 1
+  octeto de prefixo de tamanho, menos os 40 octetos fixos de header e CRC do
+  envelope BTP v1).
 - Fragmentação e reassembly reaproveitam `btp::fragment_count`/
   `make_fragment`/`Reassembler` sem modificação de comportamento -- já eram
   parametrizados por `TransportProfile`; só ganham mais uma entrada na tabela
@@ -65,7 +75,7 @@ As regras normativas completas estão em
   característica normal deste perfil, não uma falha de negociação ou de
   implementação.
 - Uma mensagem lógica grande gera mais fragmentos por transporte HID do que
-  pelos outros dois perfis (até 255 fragmentos de 23 octetos cobrem 5865
+  pelos outros dois perfis (até 255 fragmentos de 22 octetos cobrem 5610
   octetos de payload lógico), aumentando a chance relativa de perda parcial
   sob tráfego pesado -- mitigado pelas mesmas garantias de reassembly
   tolerante a perda/duplicação/fora-de-ordem já exigidas para ESP-NOW.
@@ -81,7 +91,7 @@ As regras normativas completas estão em
 
 - **Reaproveitar o perfil `Serial` (COBS) sobre a interface HID:** rejeitado
   porque o relatório HID já é uma unidade de framing discreta entregue pela
-  pilha USB; aplicar COBS por cima desperdiçaria parte dos já escassos 23
+  pilha USB; aplicar COBS por cima desperdiçaria parte dos já escassos 22
   octetos de payload útil com bytes de escape sem necessidade.
 - **USB bulk/vendor-specific (WinUSB) em vez de HID:** rejeitado para este
   perfil porque exigiria driver/descriptor especial (WinUSB via Microsoft OS
@@ -95,6 +105,13 @@ As regras normativas completas estão em
   maior:** rejeitado porque não aumenta o teto de uma única transferência de
   interrupt (ainda 64 octetos cada); só adicionaria complexidade sem ganho de
   capacidade.
+- **Determinar o tamanho real do relatório inspecionando `payload_size` do
+  header BTP em vez de um prefixo de tamanho dedicado:** rejeitado porque
+  faria a camada de transporte (que deve mover bytes sem conhecer BTP,
+  mesmo princípio já aplicado a `SerialMux`/`EspNowManager` no lado do
+  dongle) depender da semântica do envelope só para descobrir onde o
+  padding começa -- o prefixo de tamanho mantém a camada de transporte
+  genuinamente agnóstica de protocolo, ao custo de 1 octeto por relatório.
 
 ## Impacto de versão
 

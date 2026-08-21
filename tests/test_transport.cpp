@@ -308,7 +308,7 @@ void test_usb_hid_transport() {
     std::uint8_t count = 0U;
     CHECK(btp::fragment_count(logical.size(), btp::TransportProfile::UsbHid,
                               &count) == btp::Error::Ok);
-    CHECK(count == 3U);  // 23 + 23 + 4
+    CHECK(count == 3U);  // 22 + 22 + 6
 
     const btp::Header logical_header = header(8U, 55U);
     for (std::uint8_t index = 0U; index < count; ++index) {
@@ -318,7 +318,7 @@ void test_usb_hid_transport() {
                                  &fragment) == btp::Error::Ok);
         CHECK(fragment.header.fragment_index == index);
         CHECK(fragment.header.fragment_count == count);
-        CHECK(fragment.payload.size == (index < 2U ? 23U : 4U));
+        CHECK(fragment.payload.size == (index < 2U ? 22U : 6U));
     }
 
     // The maximum logical message this profile can fragment: 255 reports of
