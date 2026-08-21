@@ -1,0 +1,13 @@
+{
+  "format": "btp-test-vector-manifest-v2",
+  "contract": "BTP v2.0 / encaixe de AEAD (docs/decisions/0012-criptografia-aead-payload.md, BTP_V1.md secao 8) / btp::codec 0.1.0",
+  "valid_vectors": [
+    "hello",
+    "aead_telemetry_gcm"
+  ],
+  "invalid_vectors": [
+    "encrypted_version_mismatch",
+    "crc_mismatch_encrypted",
+    "reserved_flag"
+  ]
+}

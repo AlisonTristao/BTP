@@ -1,0 +1,10 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "encrypted_version_mismatch",
+  "description": "ENCRYPTED permanece marcado, mas o octeto de versao e' rebaixado de 2 para 1 (BTP_V1.md secao 8, item 3: ENCRYPTED marcado MUST implicar version==2). O CRC e' recomputado porque decode() verifica o CRC do envelope antes de checar essa regra (src/codec.cpp); sem recomputar, este vetor cairia em CrcMismatch em vez de exercitar o erro sob teste.",
+  "base": "aead_telemetry_gcm",
+  "mutations": [
+    {"operation": "set_u8", "offset": 4, "value": "0x01", "recompute_crc": true}
+  ],
+  "expected_error": "EncryptedVersionMismatch"
+}

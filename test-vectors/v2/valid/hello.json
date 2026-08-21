@@ -1,0 +1,18 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "hello",
+  "description": "HELLO com ENCRYPTED limpo: mesmos campos e payload_hex de test-vectors/v1/valid/hello.json, produzindo o mesmo octeto de versao (1) e o mesmo .bin byte a byte. Prova que o caminho nao cifrado do BTP_V1.md secao 1-7 permanece intacto apos o encaixe de AEAD da secao 8 (ADR 0012): nenhum bit muda quando ENCRYPTED nao esta marcado.",
+  "transport": "serial",
+  "frame": {
+    "type": "CONTROL",
+    "flags": "0x0000",
+    "source_id": "0x0C0D0E0F",
+    "boot_id": "0x10203040",
+    "sequence": "0x00000001",
+    "timestamp_us": "0x00000000000003E8",
+    "object_id": "0x0001",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "03 01 00 00 2e d1 00 00 04 00 20 00 80 00 00 00 88 13 00 00 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00 00 00 00 01"
+  }
+}

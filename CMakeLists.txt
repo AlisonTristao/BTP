@@ -42,24 +42,42 @@ if(BTP_BUILD_TESTS)
         btp_conformance_tests
         PRIVATE BTP_VECTOR_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1"
     )
+    add_executable(btp_conformance_v2_tests tests/test_conformance_v2.cpp)
+    target_link_libraries(btp_conformance_v2_tests PRIVATE btp::codec)
+    target_compile_features(btp_conformance_v2_tests PRIVATE cxx_std_11)
+    target_compile_definitions(
+        btp_conformance_v2_tests
+        PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
+    )
     if(MSVC)
         target_compile_options(btp_codec_tests PRIVATE /W4 /WX)
         target_compile_options(btp_transport_tests PRIVATE /W4 /WX)
         target_compile_options(btp_conformance_tests PRIVATE /W4 /WX)
+        target_compile_options(btp_conformance_v2_tests PRIVATE /W4 /WX)
     else()
         target_compile_options(btp_codec_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
         target_compile_options(btp_transport_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
         target_compile_options(btp_conformance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_options(btp_conformance_v2_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME btp_codec_tests COMMAND btp_codec_tests)
     add_test(NAME btp_transport_tests COMMAND btp_transport_tests)
     add_test(NAME btp_conformance_tests COMMAND btp_conformance_tests)
+    add_test(NAME btp_conformance_v2_tests COMMAND btp_conformance_v2_tests)
     add_test(
         NAME btp_vector_descriptions
         COMMAND
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vectors.py
             --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1
+            --check
+    )
+    add_test(
+        NAME btp_vector_descriptions_v2
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vectors_v2.py
+            --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2
             --check
     )
 endif()

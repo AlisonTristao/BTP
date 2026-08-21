@@ -1,0 +1,10 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "crc_mismatch_encrypted",
+  "description": "Ultimo octeto do CRC do envelope invertido em um bit, sobre um frame ENCRYPTED valido. Prova que a checagem de framing (BTP_V1.md secao 7) continua funcionando identicamente independente da flag ENCRYPTED -- decode() rejeita por CrcMismatch antes mesmo de olhar para o octeto de versao ou para o payload cifrado.",
+  "base": "aead_telemetry_gcm",
+  "mutations": [
+    {"operation": "xor_u8", "offset": -1, "value": "0x01"}
+  ],
+  "expected_error": "CrcMismatch"
+}
