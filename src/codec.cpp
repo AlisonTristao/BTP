@@ -73,6 +73,31 @@ bool valid_type(MessageType type) noexcept {
            value <= static_cast<std::uint8_t>(MessageType::Control);
 }
 
+// Writes the 36-octet header for `header`/`payload_size`, selecting version 2
+// automatically when ENCRYPTED is set (BTP_V1.md section 8, §3). Shared by
+// encode() and encode_header() so both always produce identical bytes.
+void write_header(const Header& header,
+                  std::uint16_t payload_size,
+                  std::uint8_t out_header[36]) noexcept {
+    const bool encrypted = (header.flags & kFlagEncrypted) != 0U;
+    out_header[0] = kMagic[0];
+    out_header[1] = kMagic[1];
+    out_header[2] = kMagic[2];
+    out_header[3] = kMagic[3];
+    out_header[4] = encrypted ? kV2Version : kV1Version;
+    out_header[5] = static_cast<std::uint8_t>(header.type);
+    write_u16_le(out_header + 6U, header.flags);
+    write_u16_le(out_header + 8U, static_cast<std::uint16_t>(kV1HeaderSize));
+    write_u16_le(out_header + 10U, payload_size);
+    write_u32_le(out_header + 12U, header.source_id);
+    write_u32_le(out_header + 16U, header.boot_id);
+    write_u32_le(out_header + 20U, header.sequence);
+    write_u64_le(out_header + 24U, header.timestamp_us);
+    write_u16_le(out_header + 32U, header.object_id);
+    out_header[34] = header.fragment_index;
+    out_header[35] = header.fragment_count;
+}
+
 Error validate_header(const Header& header) noexcept {
     if (!valid_type(header.type)) {
         return Error::InvalidType;
@@ -166,22 +191,8 @@ Error encode(const Frame& frame,
         std::memmove(output + kV1HeaderSize, frame.payload.data, frame.payload.size);
     }
 
-    output[0] = kMagic[0];
-    output[1] = kMagic[1];
-    output[2] = kMagic[2];
-    output[3] = kMagic[3];
-    output[4] = kV1Version;
-    output[5] = static_cast<std::uint8_t>(frame.header.type);
-    write_u16_le(output + 6U, frame.header.flags);
-    write_u16_le(output + 8U, static_cast<std::uint16_t>(kV1HeaderSize));
-    write_u16_le(output + 10U, static_cast<std::uint16_t>(frame.payload.size));
-    write_u32_le(output + 12U, frame.header.source_id);
-    write_u32_le(output + 16U, frame.header.boot_id);
-    write_u32_le(output + 20U, frame.header.sequence);
-    write_u64_le(output + 24U, frame.header.timestamp_us);
-    write_u16_le(output + 32U, frame.header.object_id);
-    output[34] = frame.header.fragment_index;
-    output[35] = frame.header.fragment_count;
+    write_header(frame.header, static_cast<std::uint16_t>(frame.payload.size),
+                output);
 
     const std::uint32_t checksum =
         crc32(output, kV1HeaderSize + frame.payload.size);
@@ -208,7 +219,8 @@ Error decode(const std::uint8_t* input,
             return Error::InvalidMagic;
         }
     }
-    if (input[4] != kV1Version) {
+    const std::uint8_t version = input[4];
+    if (version != kV1Version && version != kV2Version) {
         return Error::UnsupportedVersion;
     }
     if (read_u16_le(input + 8U) != kV1HeaderSize) {
@@ -241,6 +253,12 @@ Error decode(const std::uint8_t* input,
     header.fragment_index = input[34];
     header.fragment_count = input[35];
 
+    // Section 8, §3: ENCRYPTED marked MUST imply version == 0x02. There is no
+    // inverse requirement: version == 0x02 with ENCRYPTED clear is valid.
+    if ((header.flags & kFlagEncrypted) != 0U && version != kV2Version) {
+        return Error::EncryptedVersionMismatch;
+    }
+
     const Error header_error = validate_header(header);
     if (header_error != Error::Ok) {
         return header_error;
@@ -252,6 +270,29 @@ Error decode(const std::uint8_t* input,
     result.payload.size = payload_size;
     result.crc32 = expected_crc;
     *decoded = result;
+    return Error::Ok;
+}
+
+void aead_nonce(const Header& header, std::uint8_t out_nonce[12]) noexcept {
+    write_u32_le(out_nonce, header.source_id);
+    write_u32_le(out_nonce + 4U, header.boot_id);
+    write_u32_le(out_nonce + 8U, header.sequence);
+}
+
+Error encode_header(const Header& header,
+                    std::uint16_t payload_size,
+                    std::uint8_t out_header[36]) noexcept {
+    if (out_header == nullptr) {
+        return Error::InvalidArgument;
+    }
+    // payload_size is already the wire's uint16_le width, so it is always
+    // representable; the same "fits in the field" criterion encoded_size()
+    // applies to a std::size_t input can never be violated here by type.
+    const Error header_error = validate_header(header);
+    if (header_error != Error::Ok) {
+        return header_error;
+    }
+    write_header(header, payload_size, out_header);
     return Error::Ok;
 }
 
@@ -273,6 +314,8 @@ const char* error_string(Error error) noexcept {
         case Error::InvalidSourceId: return "source ID must be nonzero";
         case Error::InvalidBootId: return "boot ID must be nonzero";
         case Error::InvalidFragmentation: return "invalid fragmentation fields";
+        case Error::EncryptedVersionMismatch:
+            return "ENCRYPTED flag set without version 2";
     }
     return "unknown error";
 }

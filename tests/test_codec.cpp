@@ -174,7 +174,7 @@ void test_encoder_rejections_are_atomic() {
     frame.header.type = btp::MessageType::Invalid;
     expect(btp::Error::InvalidType);
     frame.header = header;
-    frame.header.flags = 0x0002U;
+    frame.header.flags = 0x0004U;  // 0x0002 is now ENCRYPTED (valid); 0x0004 stays reserved.
     expect(btp::Error::InvalidFlags);
     frame.header = header;
     frame.header.source_id = 0U;
@@ -239,7 +239,7 @@ void test_decoder_structural_rejections() {
     changed[0] ^= 1U;
     CHECK(decode_serial(changed) == btp::Error::InvalidMagic);
     changed = valid;
-    changed[4] = 2U;
+    changed[4] = 3U;  // 2 is now kV2Version (valid, section 8); 3 stays unsupported.
     CHECK(decode_serial(changed) == btp::Error::UnsupportedVersion);
     changed = valid;
     changed[8] = 35U;
@@ -274,7 +274,7 @@ void test_decoder_semantic_rejections() {
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidType);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
-    changed[6] = 2U;
+    changed[6] = 4U;  // 0x0002 is now ENCRYPTED (valid); 0x0004 stays reserved.
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidFlags);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
@@ -331,6 +331,116 @@ void test_failure_does_not_publish_decoded_result() {
     CHECK(decoded.crc32 == 0x12345678U);
 }
 
+void test_aead_nonce_matches_header_fields() {
+    btp::Header header = {};
+    header.source_id = 0x11223344U;
+    header.boot_id = 0xA1B2C3D4U;
+    header.sequence = 0x05060708U;
+
+    std::uint8_t nonce[12] = {};
+    btp::aead_nonce(header, nonce);
+
+    const std::uint8_t expected[12] = {
+        0x44U, 0x33U, 0x22U, 0x11U,   // source_id, little-endian
+        0xD4U, 0xC3U, 0xB2U, 0xA1U,   // boot_id, little-endian
+        0x08U, 0x07U, 0x06U, 0x05U    // sequence, little-endian
+    };
+    CHECK(std::memcmp(nonce, expected, sizeof(expected)) == 0);
+}
+
+void test_encode_header_matches_encode_bytes() {
+    btp::Header header = empty_log_header();
+    header.type = btp::MessageType::Command;
+    header.flags = btp::kFlagEncrypted;
+    header.sequence = 0x0A0B0C0DU;
+
+    const std::uint8_t payload[] = {1U, 2U, 3U, 4U, 5U};
+    const btp::Frame frame = {header, {payload, sizeof(payload)}};
+    const std::vector<std::uint8_t> encoded =
+        encode_frame(frame, btp::TransportProfile::EspNow);
+
+    std::uint8_t header_bytes[36] = {};
+    CHECK(btp::encode_header(header, static_cast<std::uint16_t>(sizeof(payload)),
+                             header_bytes) == btp::Error::Ok);
+    CHECK(std::memcmp(encoded.data(), header_bytes, sizeof(header_bytes)) == 0);
+
+    // Same invariant with ENCRYPTED clear: both paths still must agree.
+    btp::Header plain_header = empty_log_header();
+    plain_header.sequence = 7U;
+    const btp::Frame plain_frame = {plain_header, {payload, sizeof(payload)}};
+    const std::vector<std::uint8_t> plain_encoded =
+        encode_frame(plain_frame, btp::TransportProfile::EspNow);
+    std::uint8_t plain_header_bytes[36] = {};
+    CHECK(btp::encode_header(plain_header, static_cast<std::uint16_t>(sizeof(payload)),
+                             plain_header_bytes) == btp::Error::Ok);
+    CHECK(std::memcmp(plain_encoded.data(), plain_header_bytes,
+                      sizeof(plain_header_bytes)) == 0);
+}
+
+void test_encrypted_round_trip_with_placeholder_cipher() {
+    btp::Header header = empty_log_header();
+    header.type = btp::MessageType::Telemetry;
+    header.flags = btp::kFlagEncrypted;
+    header.sequence = 0x0A0B0C0DU;
+
+    const std::uint8_t plaintext[] = {0x10U, 0x20U, 0x30U, 0x40U, 0x50U};
+    const std::uint16_t sealed_size =
+        static_cast<std::uint16_t>(sizeof(plaintext) + 16U);
+
+    std::uint8_t aad[36] = {};
+    CHECK(btp::encode_header(header, sealed_size, aad) == btp::Error::Ok);
+
+    // PLACEHOLDER ONLY: XOR "ciphertext" plus a fixed "tag" stand in for a
+    // real AES-128-GCM/ChaCha20-Poly1305 seal; this is not encryption and
+    // proves nothing about confidentiality or authenticity. Real AEAD wiring
+    // (mbedtls) is a future step outside btp::codec, in each consumer.
+    std::uint8_t sealed[sizeof(plaintext) + 16U];
+    for (std::size_t index = 0U; index < sizeof(plaintext); ++index) {
+        sealed[index] = static_cast<std::uint8_t>(plaintext[index] ^ 0xFFU);
+    }
+    for (std::size_t index = 0U; index < 16U; ++index) {
+        sealed[sizeof(plaintext) + index] = static_cast<std::uint8_t>(0xE0U + index);
+    }
+
+    const btp::Frame frame = {header, {sealed, sizeof(sealed)}};
+    const std::vector<std::uint8_t> encoded =
+        encode_frame(frame, btp::TransportProfile::EspNow);
+
+    CHECK(encoded[4] == btp::kV2Version);
+    CHECK(std::memcmp(encoded.data(), aad, sizeof(aad)) == 0);
+    const std::uint16_t header_payload_size = static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(encoded[10]) |
+        static_cast<std::uint16_t>(static_cast<std::uint16_t>(encoded[11]) << 8U));
+    CHECK(header_payload_size == sealed_size);
+
+    btp::DecodedFrame decoded = {};
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+                      &decoded) == btp::Error::Ok);
+    CHECK((decoded.header.flags & btp::kFlagEncrypted) != 0U);
+    CHECK(decoded.payload.size == sizeof(sealed));
+    CHECK(std::memcmp(decoded.payload.data, sealed, sizeof(sealed)) == 0);
+}
+
+void test_decoder_rejects_encrypted_flag_with_v1_version() {
+    btp::Header header = empty_log_header();
+    header.flags = btp::kFlagEncrypted;
+    const std::uint8_t payload[] = {0xAAU, 0xBBU};
+    const btp::Frame frame = {header, {payload, sizeof(payload)}};
+
+    std::vector<std::uint8_t> encoded =
+        encode_frame(frame, btp::TransportProfile::EspNow);
+    CHECK(encoded[4] == btp::kV2Version);
+
+    // Patch the version octet back to 1 while ENCRYPTED stays marked, then
+    // fix up the CRC so only that mismatch is under test.
+    encoded[4] = btp::kV1Version;
+    write_crc(&encoded);
+
+    btp::DecodedFrame decoded = {};
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+                      &decoded) == btp::Error::EncryptedVersionMismatch);
+}
+
 }  // namespace
 
 int main() {
@@ -343,6 +453,10 @@ int main() {
     test_decoder_semantic_rejections();
     test_corruption_of_every_field();
     test_failure_does_not_publish_decoded_result();
+    test_aead_nonce_matches_header_fields();
+    test_encode_header_matches_encode_bytes();
+    test_encrypted_round_trip_with_placeholder_cipher();
+    test_decoder_rejects_encrypted_flag_with_v1_version();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

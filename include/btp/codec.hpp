@@ -10,7 +10,7 @@ static const std::uint8_t kLibraryVersionMajor = 0U;
 static const std::uint8_t kLibraryVersionMinor = 1U;
 static const std::uint8_t kLibraryVersionPatch = 0U;
 static const std::uint8_t kMinimumProtocolVersion = 1U;
-static const std::uint8_t kMaximumProtocolVersion = 1U;
+static const std::uint8_t kMaximumProtocolVersion = 2U;
 
 static const std::size_t kV1HeaderSize = 36U;
 static const std::size_t kV1CrcSize = 4U;
@@ -23,8 +23,10 @@ static const std::size_t kUsbHidMaxFrameSize = 62U;
 static const std::size_t kUsbHidMaxPayloadSize = 22U;
 
 static const std::uint8_t kV1Version = 1U;
+static const std::uint8_t kV2Version = 2U;
 static const std::uint16_t kFlagFragmented = 0x0001U;
-static const std::uint16_t kKnownFlagsMask = kFlagFragmented;
+static const std::uint16_t kFlagEncrypted = 0x0002U;
+static const std::uint16_t kKnownFlagsMask = kFlagFragmented | kFlagEncrypted;
 
 enum class MessageType : std::uint8_t {
     Invalid = 0x00U,
@@ -57,7 +59,8 @@ enum class Error : std::uint8_t {
     InvalidFlags,
     InvalidSourceId,
     InvalidBootId,
-    InvalidFragmentation
+    InvalidFragmentation,
+    EncryptedVersionMismatch
 };
 
 struct ByteView {
@@ -110,6 +113,21 @@ Error decode(const std::uint8_t* input,
 
 // CRC-32/ISO-HDLC (CRC-32/IEEE), returned as a numeric host value.
 std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
+
+// Writes the 12-octet AEAD nonce of BTP_V1.md section 8.2:
+// source_id (4) || boot_id (4) || sequence (4), each little-endian.
+void aead_nonce(const Header& header, std::uint8_t out_nonce[12]) noexcept;
+
+// Serializes the 36-octet header that encode() would write for this header
+// and payload_size, selecting version 2 when ENCRYPTED is set exactly like
+// encode() does; callers use this to build the AAD (section 8.3) before the
+// payload is encrypted, since encode() itself expects an already-encrypted
+// payload. payload_size is already the wire's uint16_le width, so it always
+// fits; this fails only with whatever Error validate_header() would return
+// for an invalid header, or Error::InvalidArgument for a null out_header.
+Error encode_header(const Header& header,
+                    std::uint16_t payload_size,
+                    std::uint8_t out_header[36]) noexcept;
 
 const char* error_string(Error error) noexcept;
 
