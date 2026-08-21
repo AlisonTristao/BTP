@@ -1,0 +1,39 @@
+{
+  "format": "btp-test-vector-v1",
+  "id": "usb_hid_telemetry",
+  "description": "Amostra TELEMETRY ocupando o payload maximo de um relatorio HID (23 octetos, TRANSPORT_USB_HID.md).",
+  "transport": "usb_hid",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0000",
+    "source_id": "0x22334455",
+    "boot_id": "0xB2C3D4E5",
+    "sequence": "0x00000001",
+    "timestamp_us": "0x0000000000112233",
+    "object_id": "0x0301",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "00 0a 0d 7f 80 ff 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11"
+  },
+  "payload_model": {
+    "encoding": "PACKED_LE",
+    "schema_version": 1,
+    "fields": [
+      {
+        "field_id": 1,
+        "name": "edge_bytes",
+        "type": "uint8",
+        "element_count": 6,
+        "values_hex": ["00", "0a", "0d", "7f", "80", "ff"]
+      },
+      {
+        "field_id": 2,
+        "name": "filler",
+        "type": "uint8",
+        "element_count": 17,
+        "values_hex": ["01", "02", "03", "04", "05", "06", "07", "08", "09",
+                        "0a", "0b", "0c", "0d", "0e", "0f", "10", "11"]
+      }
+    ]
+  }
+}

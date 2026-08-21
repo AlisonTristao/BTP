@@ -47,19 +47,24 @@ std::uint64_t read_u64_le(const std::uint8_t* source) noexcept {
 
 bool valid_transport(TransportProfile transport) noexcept {
     return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial;
+           transport == TransportProfile::Serial ||
+           transport == TransportProfile::UsbHid;
 }
 
 std::size_t max_payload_size(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow
-               ? kEspNowMaxPayloadSize
-               : kSerialMaxPayloadSize;
+    switch (transport) {
+        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
+        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
+        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
+    }
 }
 
 std::size_t max_frame_size(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow
-               ? kEspNowMaxFrameSize
-               : kSerialMaxFrameSize;
+    switch (transport) {
+        case TransportProfile::EspNow: return kEspNowMaxFrameSize;
+        case TransportProfile::UsbHid: return kUsbHidMaxFrameSize;
+        case TransportProfile::Serial: default: return kSerialMaxFrameSize;
+    }
 }
 
 bool valid_type(MessageType type) noexcept {

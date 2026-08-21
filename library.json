@@ -1,6 +1,6 @@
 {
   "name": "btp",
-  "version": "1.0.2-beta",
+  "version": "1.1.0-beta",
   "description": "Portable, allocation-free codec and transport utilities for BTP (Binary Telemetry Protocol) v1 -- real-time communication and data plotting over ESP32/ESP-NOW",
   "keywords": ["btp", "telemetry", "protocol", "codec", "esp32", "esp-now"],
   "build": {

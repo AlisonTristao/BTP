@@ -7,13 +7,16 @@ namespace {
 
 bool valid_transport(TransportProfile transport) noexcept {
     return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial;
+           transport == TransportProfile::Serial ||
+           transport == TransportProfile::UsbHid;
 }
 
 std::size_t transport_payload_limit(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow
-               ? kEspNowMaxPayloadSize
-               : kSerialMaxPayloadSize;
+    switch (transport) {
+        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
+        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
+        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
+    }
 }
 
 bool valid_fragment_header(const Header& header) noexcept {

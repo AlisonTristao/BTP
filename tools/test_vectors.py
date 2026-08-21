@@ -22,6 +22,7 @@ TYPE_VALUES = {
 TRANSPORT_LIMITS = {
     "esp_now": (250, 210),
     "serial": (4096, 4056),
+    "usb_hid": (63, 23),
 }
 
 

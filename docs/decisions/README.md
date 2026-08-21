@@ -19,6 +19,7 @@ Estados permitidos: `Proposta`, `Aceita`, `Substituída` e `Rejeitada`.
 | [0008 - Payloads e schemas de telemetria](0008-payloads-e-schemas-de-telemetria.md) | Aceita | Identidade de tópicos, encodings, tipos, arrays e binding de telemetria |
 | [0009 - Comandos, descoberta, sessão e terminal](0009-comandos-descoberta-sessao-terminal.md) | Aceita | Correlação, deduplicação, manifesto, assinatura, status e terminal |
 | [0010 - Perfis de transporte ESP-NOW e Serial/COBS](0010-perfis-de-transporte-espnow-serial.md) | Aceita | Datagramas, entrega, retry, COBS, ressincronização, SerialMux e capacidade |
+| [0011 - Perfil de transporte USB HID](0011-perfil-de-transporte-usb-hid.md) | Aceita | Dispositivo composto CDC+HID, relatórios de 64 octetos, sessão sempre protocolada |
 
 ## Como criar uma decisão
 

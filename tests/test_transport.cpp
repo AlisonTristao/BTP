@@ -258,6 +258,80 @@ void test_fragmenter() {
           btp::Error::PayloadTooLarge);
 }
 
+void test_usb_hid_transport() {
+    // The whole BTP frame (header + payload + CRC) must fit one 64-byte HID
+    // report once the mandatory Report ID octet is set aside -- see
+    // docs/TRANSPORT_USB_HID.md.
+    std::vector<std::uint8_t> maximum_payload(btp::kUsbHidMaxPayloadSize);
+    for (std::size_t index = 0U; index < maximum_payload.size(); ++index) {
+        maximum_payload[index] = static_cast<std::uint8_t>(index);
+    }
+    const btp::Frame maximum_frame = {
+        header(7U), {maximum_payload.data(), maximum_payload.size()}};
+    std::size_t size = 0U;
+    CHECK(btp::encoded_size(maximum_payload.size(), btp::TransportProfile::UsbHid,
+                            &size) == btp::Error::Ok);
+    CHECK(size == btp::kUsbHidMaxFrameSize);
+    std::array<std::uint8_t, btp::kUsbHidMaxFrameSize> encoded;
+    std::size_t written = 0U;
+    CHECK(btp::encode(maximum_frame, btp::TransportProfile::UsbHid,
+                      encoded.data(), encoded.size(), &written) ==
+          btp::Error::Ok);
+    CHECK(written == btp::kUsbHidMaxFrameSize);
+
+    btp::DecodedFrame decoded = {};
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::UsbHid,
+                      &decoded) == btp::Error::Ok);
+    CHECK(decoded.payload.size == btp::kUsbHidMaxPayloadSize);
+
+    // One octet of payload beyond the report's usable capacity is rejected by
+    // the encoder before it ever builds a buffer...
+    CHECK(btp::encoded_size(btp::kUsbHidMaxPayloadSize + 1U,
+                            btp::TransportProfile::UsbHid, &size) ==
+          btp::Error::PayloadTooLarge);
+
+    // ...and a raw buffer one octet past the report ceiling is rejected by
+    // the decoder on total size alone, before payload_size is even read.
+    std::array<std::uint8_t, btp::kUsbHidMaxFrameSize + 1U> oversized = {};
+    std::memcpy(oversized.data(), encoded.data(), encoded.size());
+    CHECK(btp::decode(oversized.data(), oversized.size(),
+                      btp::TransportProfile::UsbHid, &decoded) ==
+          btp::Error::FrameTooLarge);
+
+    // A logical message that does not fit one report's 23 usable octets
+    // fragments the same way ESP-NOW does, just with a much smaller ceiling
+    // per fragment.
+    std::vector<std::uint8_t> logical(50U);
+    for (std::size_t index = 0U; index < logical.size(); ++index) {
+        logical[index] = static_cast<std::uint8_t>(index);
+    }
+    std::uint8_t count = 0U;
+    CHECK(btp::fragment_count(logical.size(), btp::TransportProfile::UsbHid,
+                              &count) == btp::Error::Ok);
+    CHECK(count == 3U);  // 23 + 23 + 4
+
+    const btp::Header logical_header = header(8U, 55U);
+    for (std::uint8_t index = 0U; index < count; ++index) {
+        btp::Frame fragment = {};
+        CHECK(btp::make_fragment(logical_header, {logical.data(), logical.size()},
+                                 btp::TransportProfile::UsbHid, index,
+                                 &fragment) == btp::Error::Ok);
+        CHECK(fragment.header.fragment_index == index);
+        CHECK(fragment.header.fragment_count == count);
+        CHECK(fragment.payload.size == (index < 2U ? 23U : 4U));
+    }
+
+    // The maximum logical message this profile can fragment: 255 reports of
+    // 23 usable octets each.
+    CHECK(btp::fragment_count(btp::kUsbHidMaxPayloadSize * 255U,
+                              btp::TransportProfile::UsbHid, &count) ==
+          btp::Error::Ok);
+    CHECK(count == 255U);
+    CHECK(btp::fragment_count(btp::kUsbHidMaxPayloadSize * 255U + 1U,
+                              btp::TransportProfile::UsbHid, &count) ==
+          btp::Error::PayloadTooLarge);
+}
+
 btp::Frame fragment(const btp::Header& logical_header,
                     const std::vector<std::uint8_t>& payload,
                     std::uint8_t index) {
@@ -381,6 +455,7 @@ int main() {
     test_cobs();
     test_incremental_serial_decoder();
     test_fragmenter();
+    test_usb_hid_transport();
     test_reassembly_interleaved_out_of_order();
     test_reassembly_conflicts_limits_and_timeout();
 

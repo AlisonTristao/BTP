@@ -115,26 +115,31 @@ objeto em [`docs/COMMANDS_AND_ACTIONS.md`](docs/COMMANDS_AND_ACTIONS.md).
 O envelope e o CRC não mudam entre transportes; apenas os limites de tamanho
 e o framing do enlace são diferentes:
 
-| | ESP-NOW | Serial (modo protocolado) |
-| --- | ---: | ---: |
-| Frame BTP máximo | 250 octetos | 4096 octetos |
-| Payload máximo | 210 octetos | 4056 octetos |
-| Framing do enlace | 1 datagrama = 1 frame completo | `0x00 \| COBS(frame) \| 0x00` |
+| | ESP-NOW | Serial (modo protocolado) | USB HID |
+| --- | ---: | ---: | ---: |
+| Frame BTP máximo | 250 octetos | 4096 octetos | 63 octetos |
+| Payload máximo | 210 octetos | 4056 octetos | 23 octetos |
+| Framing do enlace | 1 datagrama = 1 frame completo | `0x00 \| COBS(frame) \| 0x00` | 1 relatório HID = 1 frame completo |
 
 Em ESP-NOW, cada datagrama contém exatamente um frame BTP, sem prefixo,
 delimitador ou padding — tamanho exato `40 + payload_size`. Na serial, o modo
 protocolado aplica COBS ao frame inteiro (o bloco codificado nunca contém
 `0x00`) e alterna com um modo de console humano via um handshake textual
 (`BTP/1 ENTER <nonce>` / `BTP/1 READY <nonce>`); a posse exclusiva da porta e
-o encerramento de sessão são definidos no documento de transporte.
+o encerramento de sessão são definidos no documento de transporte. Em USB
+HID, um relatório de 64 octetos (63 de frame BTP, 1 de Report ID) já é a
+unidade de framing entregue pelo host — sem COBS e sem modo console, a
+interface fica sempre em modo protocolado.
 
 Mensagens lógicas maiores que o payload do transporte usam fragmentação:
 cada fragmento é um frame BTP completo e independente (CRC próprio), até 255
 fragmentos por mensagem, remontados na origem por `fragment_index` e
-`fragment_count`.
+`fragment_count`. Em USB HID isso vale até para mensagens de controle
+pequenas como `HELLO`, dado o teto de 23 octetos de payload por relatório.
 
-Detalhes normativos em [`docs/TRANSPORT_ESPNOW.md`](docs/TRANSPORT_ESPNOW.md)
-e [`docs/TRANSPORT_SERIAL.md`](docs/TRANSPORT_SERIAL.md); COBS, decoder
+Detalhes normativos em [`docs/TRANSPORT_ESPNOW.md`](docs/TRANSPORT_ESPNOW.md),
+[`docs/TRANSPORT_SERIAL.md`](docs/TRANSPORT_SERIAL.md) e
+[`docs/TRANSPORT_USB_HID.md`](docs/TRANSPORT_USB_HID.md); COBS, decoder
 incremental, fragmentação e reassembly compartilhados em
 [`docs/STREAM_AND_REASSEMBLY.md`](docs/STREAM_AND_REASSEMBLY.md).
 
@@ -227,14 +232,6 @@ PlatformIO [`library.json`](library.json). Um consumidor deve fixar uma
 versão publicada (tag ou revisão imutável) e executar os mesmos vetores de
 conformidade diretamente desta dependência; não é permitido manter cópias
 independentes da especificação, do codec ou dos vetores.
-
-## Pendências conhecidas
-
-- **Transporte USB nativo (full-speed).** BTP v1 sobre uma classe USB
-  dedicada (CDC ou vendor-specific), sem depender de porta serial virtual e
-  sem os limites de baudrate/framing do transporte Serial/COBS atual. Não
-  altera o envelope nem os payloads existentes; Serial/COBS continua
-  funcionando sem alteração para quem não usar USB nativo.
 
 ## Como contribuir
 

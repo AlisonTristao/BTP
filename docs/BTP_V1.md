@@ -217,6 +217,8 @@ As constantes abaixo fazem parte do contrato v1:
 | `BTP_ESPNOW_MAX_PAYLOAD_SIZE` | 210 |
 | `BTP_SERIAL_MAX_FRAME_SIZE` | 4096 |
 | `BTP_SERIAL_MAX_PAYLOAD_SIZE` | 4056 |
+| `BTP_USB_HID_MAX_FRAME_SIZE` | 63 |
+| `BTP_USB_HID_MAX_PAYLOAD_SIZE` | 23 |
 
 Um frame destinado a ESP-NOW **MUST** satisfazer `frame_size <= 250` e
 `payload_size <= 210`. Cada datagrama contém somente os 36 octetos do header,
@@ -230,6 +232,12 @@ da serial. A codificação COBS e seus delimitadores são definidos em
 [`TRANSPORT_SERIAL.md`](TRANSPORT_SERIAL.md) e não contam em `frame_size`. O
 mapeamento de um frame para ESP-NOW é definido em
 [`TRANSPORT_ESPNOW.md`](TRANSPORT_ESPNOW.md).
+
+Um frame destinado a USB HID **MUST** satisfazer `frame_size <= 63` e
+`payload_size <= 23`. O relatório HID físico tem 64 octetos; um octeto é
+reservado ao Report ID, restando exatamente 63 para o frame BTP inteiro. O
+mapeamento de um frame para relatórios HID é definido em
+[`TRANSPORT_USB_HID.md`](TRANSPORT_USB_HID.md).
 
 Uma mensagem lógica maior que o payload permitido pelo transporte **MUST** ser
 fragmentada. Um encoder **MUST** verificar o limite do transporte antes de

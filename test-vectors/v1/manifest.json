@@ -1,6 +1,6 @@
 {
   "format": "btp-test-vector-manifest-v1",
-  "contract": "BTP v1 / btp 1.0.2-beta",
+  "contract": "BTP v1 / btp 1.1.0-beta",
   "valid_vectors": [
     "hello",
     "log_utf8",
@@ -10,7 +10,8 @@
     "fragment_source_a_0",
     "fragment_source_a_1",
     "fragment_source_b_0",
-    "fragment_source_b_1"
+    "fragment_source_b_1",
+    "usb_hid_telemetry"
   ],
   "invalid_vectors": [
     "invalid_crc",
@@ -19,7 +20,8 @@
     "invalid_header_size",
     "invalid_payload_size",
     "invalid_fragment_index",
-    "invalid_fragment_count"
+    "invalid_fragment_count",
+    "invalid_usb_hid_payload_size"
   ],
   "scenarios": [
     {

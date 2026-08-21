@@ -19,6 +19,8 @@ static const std::size_t kEspNowMaxFrameSize = 250U;
 static const std::size_t kEspNowMaxPayloadSize = 210U;
 static const std::size_t kSerialMaxFrameSize = 4096U;
 static const std::size_t kSerialMaxPayloadSize = 4056U;
+static const std::size_t kUsbHidMaxFrameSize = 63U;
+static const std::size_t kUsbHidMaxPayloadSize = 23U;
 
 static const std::uint8_t kV1Version = 1U;
 static const std::uint16_t kFlagFragmented = 0x0001U;
@@ -35,7 +37,8 @@ enum class MessageType : std::uint8_t {
 
 enum class TransportProfile : std::uint8_t {
     EspNow,
-    Serial
+    Serial,
+    UsbHid
 };
 
 enum class Error : std::uint8_t {

@@ -130,6 +130,11 @@ std::vector<ValidVector> valid_vectors() {
     const std::uint8_t a1[] = {0x13U, 0x14U, 0x15U};
     const std::uint8_t b0[] = {0xa0U, 0xa1U, 0xa2U, 0xa3U};
     const std::uint8_t b1[] = {0xa4U, 0xa5U, 0xa6U, 0xa7U};
+    const std::uint8_t usb_hid_telemetry[] = {
+        0x00U, 0x0aU, 0x0dU, 0x7fU, 0x80U, 0xffU, 0x01U, 0x02U,
+        0x03U, 0x04U, 0x05U, 0x06U, 0x07U, 0x08U, 0x09U, 0x0aU,
+        0x0bU, 0x0cU, 0x0dU, 0x0eU, 0x0fU, 0x10U, 0x11U
+    };
 
     std::vector<ValidVector> result;
     result.push_back({
@@ -173,6 +178,12 @@ std::vector<ValidVector> valid_vectors() {
         header(btp::MessageType::Terminal, btp::kFlagFragmented,
                0xBBB00002U, 0xBBB10002U, 0x20U, 200000U, 2U, 1U, 2U),
         std::vector<std::uint8_t>(b1, b1 + sizeof(b1))});
+    result.push_back({
+        "valid/usb_hid_telemetry.bin", btp::TransportProfile::UsbHid,
+        header(btp::MessageType::Telemetry, 0U, 0x22334455U, 0xB2C3D4E5U,
+               1U, 0x112233U, 0x0301U, 0U, 1U),
+        std::vector<std::uint8_t>(usb_hid_telemetry,
+                                  usb_hid_telemetry + sizeof(usb_hid_telemetry))});
     return result;
 }
 
@@ -230,7 +241,9 @@ void test_invalid_vectors_fail_for_documented_reason() {
         {"invalid/fragment_index.bin", btp::TransportProfile::EspNow,
          btp::Error::InvalidFragmentation},
         {"invalid/fragment_count.bin", btp::TransportProfile::EspNow,
-         btp::Error::InvalidFragmentation}
+         btp::Error::InvalidFragmentation},
+        {"invalid/usb_hid_payload_size.bin", btp::TransportProfile::UsbHid,
+         btp::Error::PayloadTooLarge}
     };
     for (std::size_t index = 0U; index < sizeof(vectors) / sizeof(vectors[0]);
          ++index) {
