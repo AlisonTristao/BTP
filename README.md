@@ -6,6 +6,15 @@ enlaces de baixa banda e alta perda (ESP-NOW) ou de banda maior e orientados a
 byte-stream (USB Serial). Este repositório é a fonte canônica da
 especificação, do codec compartilhado e dos vetores binários de conformidade.
 
+> **Você está na branch `1.x`.**
+> Ela mantém a linha do wire `version == 0x01` e está congelada nesse formato:
+> a documentação e os exemplos abaixo descrevem o wire v1, não o v2.
+>
+> O desenvolvimento atual acontece na **`main`**, que carrega o wire
+> `version == 0x02` (payload autenticado e cifrado com AEAD), a versão `2.0.0`
+> e um livro de documentação reescrito. Veja
+> [Versionamento e branches](#versionamento-e-branches).
+
 ## Princípios de design
 
 - **Binário e de largura fixa.** Todo campo multi-byte é serializado
@@ -145,7 +154,7 @@ Detalhes normativos em [`docs/TRANSPORT_ESPNOW.md`](docs/TRANSPORT_ESPNOW.md),
 incremental, fragmentação e reassembly compartilhados em
 [`docs/STREAM_AND_REASSEMBLY.md`](docs/STREAM_AND_REASSEMBLY.md).
 
-## Versionamento
+## Versionamento e branches
 
 `version` no envelope identifica o wire format e permite rejeição explícita
 de incompatibilidade. O repositório publica `vMAJOR.MINOR.PATCH` cobrindo em
@@ -153,6 +162,41 @@ conjunto a especificação, a biblioteca e os vetores de conformidade daquela
 revisão, seguindo SemVer: mudança incompatível de bytes/semântica é `MAJOR`,
 extensão compatível e negociável é `MINOR`, correção sem efeito observável no
 wire é `PATCH`. Política completa em [`docs/VERSIONING.md`](docs/VERSIONING.md).
+
+### Como as branches se organizam
+
+A **`main` sempre carrega o major mais recente.** Quando um novo major entra,
+o anterior é cortado para uma branch `N.x` e mantido lá:
+
+| Branch | Wire | Linha |
+| --- | --- | --- |
+| `main` | `0x02` | Desenvolvimento atual, versão `2.0.0` |
+| `1.x` | `0x01` | Manutenção do wire v1 — **esta branch** |
+
+Se um dia surgir um wire v3, uma branch `2.x` será cortada da `main` de então,
+carregando o `2.0`, e a `main` passa a carregar o `3.0`. O nome da branch é
+sempre o major que ela guarda, nunca o que está por vir.
+
+### Quatro coisas chamadas "a versão"
+
+Elas não se misturam:
+
+| Conceito | Exemplo nesta branch | O que é |
+| --- | --- | --- |
+| Wire version | `wire 0x01` | O octeto no offset 4 do cabeçalho |
+| Release | `v1.1.0-beta` | A tag git sobre spec, biblioteca e vetores |
+| Branch | `1.x` | Guarda o major anterior; a `main` guarda o mais novo |
+| Biblioteca | `1.1.0-beta` | `library.json` (e `1.1.0` em `CMakeLists.txt`) |
+
+Nunca escreva "BTP v1" sem qualificar — é ambíguo entre três desses.
+
+O sufixo de pré-release pertence à linha que ainda está assentando: a `1.x`
+publicou `v1.1.0-beta`, enquanto a `main` declara um `2.0.0` limpo.
+
+> **Defasagem conhecida nesta branch.** `kLibraryVersionMajor/Minor/Patch` em
+> [`include/btp/codec.hpp`](include/btp/codec.hpp) ainda declaram `0.1.0`,
+> enquanto `CMakeLists.txt` e `library.json` dizem `1.1.0`. Corrigido na
+> `main`; aqui fica registrado em vez de mexer numa linha congelada.
 
 ## Organização do repositório
 
