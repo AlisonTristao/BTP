@@ -1,5 +1,7 @@
 #include "btp/codec.hpp"
 
+#include "detail.hpp"
+
 #include <cstring>
 
 namespace btp {
@@ -45,28 +47,6 @@ std::uint64_t read_u64_le(const std::uint8_t* source) noexcept {
     return value;
 }
 
-bool valid_transport(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial ||
-           transport == TransportProfile::UsbHid;
-}
-
-std::size_t max_payload_size(TransportProfile transport) noexcept {
-    switch (transport) {
-        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
-        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
-        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
-    }
-}
-
-std::size_t max_frame_size(TransportProfile transport) noexcept {
-    switch (transport) {
-        case TransportProfile::EspNow: return kEspNowMaxFrameSize;
-        case TransportProfile::UsbHid: return kUsbHidMaxFrameSize;
-        case TransportProfile::Serial: default: return kSerialMaxFrameSize;
-    }
-}
-
 bool valid_type(MessageType type) noexcept {
     const std::uint8_t value = static_cast<std::uint8_t>(type);
     return value >= static_cast<std::uint8_t>(MessageType::Telemetry) &&
@@ -98,10 +78,6 @@ void write_header(const Header& header,
     out_header[35] = header.fragment_count;
 }
 
-// docs/encryption.md section 3: with ENCRYPTED clear there is no cipher "in use",
-// so CIPHER_ID MUST be 0; with ENCRYPTED set, CIPHER_ID MUST be 0 or 1 (the
-// only assigned values) -- 2 and 3 are reserved for future ciphers and MUST
-// be rejected, the same principle already applied to reserved flag bits.
 // A 16-octet AEAD tag over the UsbHid payload ceiling of 22 octets is 73%
 // overhead, against ~7.6% on EspNow and ~0.4% on Serial, so
 // docs/encryption.md section 9 forbids ENCRYPTED on a UsbHid frame outright.
@@ -117,15 +93,6 @@ Error validate_encryption_for_transport(std::uint16_t flags,
     return Error::Ok;
 }
 
-bool valid_cipher_id_for_flags(std::uint16_t flags) noexcept {
-    const std::uint16_t raw_cipher_id =
-        static_cast<std::uint16_t>((flags & kCipherIdMask) >> kCipherIdShift);
-    if ((flags & kFlagEncrypted) == 0U) {
-        return raw_cipher_id == 0U;
-    }
-    return raw_cipher_id <= static_cast<std::uint16_t>(CipherId::ChaCha20Poly1305);
-}
-
 Error validate_header(const Header& header) noexcept {
     if (!valid_type(header.type)) {
         return Error::InvalidType;
@@ -133,7 +100,7 @@ Error validate_header(const Header& header) noexcept {
     if ((header.flags & static_cast<std::uint16_t>(~kKnownFlagsMask)) != 0U) {
         return Error::InvalidFlags;
     }
-    if (!valid_cipher_id_for_flags(header.flags)) {
+    if (!detail::valid_cipher_id_for_flags(header.flags)) {
         return Error::InvalidCipherId;
     }
     if (header.source_id == 0U) {
@@ -157,10 +124,26 @@ Error validate_header(const Header& header) noexcept {
 
 }  // namespace
 
+std::size_t max_frame_size(TransportProfile transport) noexcept {
+    switch (transport) {
+        case TransportProfile::EspNow: return kEspNowMaxFrameSize;
+        case TransportProfile::UsbHid: return kUsbHidMaxFrameSize;
+        case TransportProfile::Serial: default: return kSerialMaxFrameSize;
+    }
+}
+
+std::size_t max_payload_size(TransportProfile transport) noexcept {
+    switch (transport) {
+        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
+        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
+        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
+    }
+}
+
 Error encoded_size(std::size_t payload_size,
                    TransportProfile transport,
                    std::size_t* size_out) noexcept {
-    if (size_out == nullptr || !valid_transport(transport)) {
+    if (size_out == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
     }
     if (payload_size > max_payload_size(transport) || payload_size > 0xFFFFU) {
@@ -192,7 +175,7 @@ Error encode(const Frame& frame,
              std::uint8_t* output,
              std::size_t output_capacity,
              std::size_t* bytes_written) noexcept {
-    if (bytes_written == nullptr || !valid_transport(transport)) {
+    if (bytes_written == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
     }
 
@@ -241,7 +224,7 @@ Error decode(const std::uint8_t* input,
              std::size_t input_size,
              TransportProfile transport,
              DecodedFrame* decoded) noexcept {
-    if (input == nullptr || decoded == nullptr || !valid_transport(transport)) {
+    if (input == nullptr || decoded == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
     }
     if (input_size < kV1MinimumFrameSize) {

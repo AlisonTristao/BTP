@@ -113,6 +113,13 @@ struct DecodedFrame {
     std::uint32_t crc32;
 };
 
+// The frame and payload ceilings of a transport profile. A caller sizing a
+// receive buffer needs the first; a caller deciding whether to fragment needs
+// the second. Both return the Serial values for an unrecognized profile, since
+// every entry point validates the profile before asking.
+std::size_t max_frame_size(TransportProfile transport) noexcept;
+std::size_t max_payload_size(TransportProfile transport) noexcept;
+
 // Returns the exact wire size without writing. The transport limit is applied.
 Error encoded_size(std::size_t payload_size,
                    TransportProfile transport,

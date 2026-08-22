@@ -1,31 +1,19 @@
 #include "btp/fragmentation.hpp"
 
+#include "detail.hpp"
+
 #include <cstring>
 
 namespace btp {
 namespace {
-
-bool valid_transport(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial ||
-           transport == TransportProfile::UsbHid;
-}
-
-std::size_t transport_payload_limit(TransportProfile transport) noexcept {
-    switch (transport) {
-        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
-        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
-        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
-    }
-}
 
 // Every fragment carries FRAGMENTED, but a fragment of an encrypted message
 // also carries ENCRYPTED and its CIPHER_ID sub-field: make_fragment() copies
 // the logical flags and only ORs FRAGMENTED in. So this has to be a mask test.
 // An exact `flags == kFlagFragmented` rejects every fragment of a wire v2
 // message, making encrypted-and-fragmented unreceivable and defeating the AAD
-// canonicalization of docs/encryption.md section 5, whose entire purpose is to let a
-// fragmented encrypted message reassemble under one message-level tag.
+// canonicalization of docs/encryption.md section 5, whose whole purpose is to
+// let a fragmented encrypted message reassemble under one message-level tag.
 bool valid_fragment_flags(std::uint16_t flags) noexcept {
     if ((flags & kFlagFragmented) == 0U) {
         return false;
@@ -33,13 +21,7 @@ bool valid_fragment_flags(std::uint16_t flags) noexcept {
     if ((flags & static_cast<std::uint16_t>(~kKnownFlagsMask)) != 0U) {
         return false;
     }
-    const std::uint16_t raw_cipher_id =
-        static_cast<std::uint16_t>((flags & kCipherIdMask) >> kCipherIdShift);
-    if ((flags & kFlagEncrypted) == 0U) {
-        return raw_cipher_id == 0U;
-    }
-    return raw_cipher_id <=
-           static_cast<std::uint16_t>(CipherId::ChaCha20Poly1305);
+    return detail::valid_cipher_id_for_flags(flags);
 }
 
 bool valid_fragment_header(const Header& header) noexcept {
@@ -73,10 +55,10 @@ bool same_message_invariants(const Header& left,
 Error fragment_count(std::size_t logical_payload_size,
                      TransportProfile transport,
                      std::uint8_t* count_out) noexcept {
-    if (!valid_transport(transport) || count_out == nullptr) {
+    if (!detail::valid_transport(transport) || count_out == nullptr) {
         return Error::InvalidArgument;
     }
-    const std::size_t limit = transport_payload_limit(transport);
+    const std::size_t limit = max_payload_size(transport);
     std::size_t count = logical_payload_size / limit;
     if (logical_payload_size % limit != 0U) {
         ++count;
@@ -126,7 +108,7 @@ Error make_fragment(const Header& logical_header,
         return Error::InvalidFragmentation;
     }
 
-    const std::size_t limit = transport_payload_limit(transport);
+    const std::size_t limit = max_payload_size(transport);
     const std::size_t offset = static_cast<std::size_t>(fragment_index) * limit;
     const std::size_t remaining = logical_payload.size - offset;
     const std::size_t payload_size = remaining < limit ? remaining : limit;

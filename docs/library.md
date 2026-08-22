@@ -78,7 +78,9 @@ rc = btp::decode(buffer, written, btp::TransportProfile::EspNow, &decoded);
 ```
 
 `encoded_size()` computes the exact wire size without writing anything, which
-is how you size a buffer up front.
+is how you size a buffer for one specific payload. For the ceiling of a whole
+profile — sizing a receive buffer, or deciding whether a message needs
+fragmenting — use `max_frame_size()` and `max_payload_size()`.
 
 The `TransportProfile` argument is the whole transport abstraction. It is a
 plain enum that selects a size ceiling — there are no virtual interfaces, no
@@ -186,17 +188,46 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-To build the codec alone, without the crypto dependency:
+| Option | Default | Effect |
+| --- | --- | --- |
+| `BTP_ENABLE_AEAD` | `ON` | Build `btp::aead`. Off removes the crypto dependency entirely. |
+| `BTP_BUILD_TESTS` | on top-level only | Build the test suites. Off for a consumer, so it needs no Python. |
+| `BTP_INSTALL` | on top-level only | Generate install rules. |
+| `BTP_USE_SYSTEM_MBEDTLS` | `OFF` | Use an installed mbedtls instead of fetching one. |
+
+### As a dependency
+
+Three ways, in order of how self-contained they leave you.
+
+**Installed.** `cmake --install` puts the four headers, the static library and
+a CMake package config in your prefix, and nothing else:
 
 ```bash
-cmake -S . -B build -DBTP_ENABLE_AEAD=OFF
+cmake -S . -B build && cmake --build build
+cmake --install build --prefix /usr/local
 ```
 
-For PlatformIO, the repository is a library: `library.json` sets
-`includeDir: include` and `srcDir: src`, with `frameworks` and `platforms` both
-unrestricted. Note that PlatformIO compiles `src/aead.cpp` too, which includes
-mbedtls headers — fine on ESP32, where mbedtls ships with the SDK, and
-something to be aware of elsewhere.
+```cmake
+find_package(btp 2.0 REQUIRED)
+target_link_libraries(app PRIVATE btp::codec)
+```
+
+`btp::aead` joins the installed package only when mbedtls came from outside
+this build (`BTP_USE_SYSTEM_MBEDTLS=ON`, or a parent project that already
+defines `mbedcrypto`). A fetched mbedtls is never installed, so exporting a
+target that links it would hand you a package that configures and then fails at
+link time.
+
+**As a subproject.** `add_subdirectory()` or `FetchContent`. Tests and install
+rules switch themselves off, and if your project already defines an
+`mbedcrypto` target, BTP links that one instead of fetching a second copy.
+
+**PlatformIO.** The repository is a library as-is: `library.json` sets
+`includeDir: include` and `srcDir: src`. PlatformIO has no equivalent of
+`BTP_ENABLE_AEAD`, so `src/aead.cpp` guards itself on whether the mbedtls
+headers are reachable — it compiles fully on ESP32, where they ship with the
+SDK, and compiles to nothing on a board without them instead of breaking the
+build over a feature you may not want.
 
 The embedded compile-and-smoke target lives in `tests/embedded`:
 

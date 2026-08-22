@@ -467,6 +467,61 @@ void test_sealed_message_survives_fragmentation_and_reassembly() {
     CHECK(std::memcmp(opened.data(), plaintext.data(), plaintext.size()) == 0);
 }
 
+// The rest of the library rejects a null pointer rather than handing it to
+// something that will dereference it; the AEAD entry points used to check only
+// key.data and would have passed a null plaintext straight into mbedtls.
+void test_null_pointers_are_rejected() {
+    btp::Header header = {};
+    header.type = btp::MessageType::Telemetry;
+    header.flags = btp::kFlagEncrypted;
+    header.source_id = 1U;
+    header.boot_id = 1U;
+    header.sequence = 1U;
+    header.fragment_count = 1U;
+
+    std::uint8_t key_bytes[btp::kAesGcmKeySize] = {};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+    std::uint8_t plaintext[8] = {};
+    std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+    std::uint8_t opened[sizeof(plaintext)] = {};
+
+    // A null input with a non-zero size, and a null output, on all four
+    // entry points plus the two dispatchers.
+    CHECK(btp::aead_seal_aes_gcm(key, header, sizeof(plaintext), nullptr,
+                                 sealed) == btp::AeadError::InvalidArgument);
+    CHECK(btp::aead_seal_aes_gcm(key, header, sizeof(plaintext), plaintext,
+                                 nullptr) == btp::AeadError::InvalidArgument);
+    CHECK(btp::aead_open_aes_gcm(key, header, sizeof(sealed), nullptr,
+                                 opened) == btp::AeadError::InvalidArgument);
+    CHECK(btp::aead_open_aes_gcm(key, header, sizeof(sealed), sealed,
+                                 nullptr) == btp::AeadError::InvalidArgument);
+
+    std::uint8_t chacha_key_bytes[btp::kChaCha20Poly1305KeySize] = {};
+    const btp::AeadKey chacha_key = {chacha_key_bytes,
+                                     sizeof(chacha_key_bytes)};
+    btp::Header chacha_header = header;
+    chacha_header.flags = static_cast<std::uint16_t>(
+        btp::kFlagEncrypted | (1U << btp::kCipherIdShift));
+
+    CHECK(btp::aead_seal_chacha20poly1305(
+              chacha_key, chacha_header, sizeof(plaintext), nullptr,
+              sealed) == btp::AeadError::InvalidArgument);
+    CHECK(btp::aead_open_chacha20poly1305(
+              chacha_key, chacha_header, sizeof(sealed), sealed,
+              nullptr) == btp::AeadError::InvalidArgument);
+
+    CHECK(btp::aead_seal(key, header, sizeof(plaintext), nullptr, sealed) ==
+          btp::AeadError::InvalidArgument);
+    CHECK(btp::aead_open(key, header, sizeof(sealed), sealed, nullptr) ==
+          btp::AeadError::InvalidArgument);
+
+    // A null input IS allowed when the size is zero, matching how the codec
+    // treats an empty payload. Only the output stays mandatory.
+    std::uint8_t tag_only[16] = {};
+    CHECK(btp::aead_seal_aes_gcm(key, header, 0U, nullptr, tag_only) ==
+          btp::AeadError::Ok);
+}
+
 }  // namespace
 
 int main() {
@@ -484,6 +539,7 @@ int main() {
     test_dispatch_rejects_reserved_cipher_id();
     test_aad_ignores_fragmentation_fields();
     test_sealed_message_survives_fragmentation_and_reassembly();
+    test_null_pointers_are_rejected();
 
     if (failures != 0) {
         std::cerr << failures << " aead test(s) failed\n";

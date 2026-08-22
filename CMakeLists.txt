@@ -2,42 +2,36 @@ cmake_minimum_required(VERSION 3.16)
 
 project(btp VERSION 2.0.0 LANGUAGES CXX)
 
-option(BTP_BUILD_TESTS "Build the BTP codec unit tests" ON)
-option(BTP_ENABLE_AEAD "Build the btp::aead AEAD backend (requires mbedtls)" ON)
-
-if(BTP_ENABLE_AEAD)
-    include(FetchContent)
-    FetchContent_Declare(
-        mbedtls
-        GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
-        GIT_TAG v3.6.7 # newest 3.6.x LTS tag at time of pinning; pin to a tag, never a branch
-    )
-    # mbedtls defaults to building its own test suite and sample programs, and
-    # treating its own compiler warnings as errors. None of that should gate
-    # or slow down our build, so force these off before mbedtls configures.
-    set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-    set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(mbedtls)
-
-    add_library(btp_aead src/aead.cpp)
-    add_library(btp::aead ALIAS btp_aead)
-
-    target_include_directories(
-        btp_aead
-        PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-            $<INSTALL_INTERFACE:include>
-    )
-    target_compile_features(btp_aead PUBLIC cxx_std_11)
-    target_link_libraries(btp_aead PUBLIC btp::codec PRIVATE mbedcrypto)
-
-    if(MSVC)
-        target_compile_options(btp_aead PRIVATE /W4 /WX)
-    else()
-        target_compile_options(btp_aead PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    endif()
+# Tests are for developing BTP, not for consuming it. A parent project that
+# pulls this in with add_subdirectory() or FetchContent should not inherit the
+# test targets, and above all should not inherit the hard find_package(Python3)
+# they require. CMake 3.21 has PROJECT_IS_TOP_LEVEL; this works on 3.16.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(btp_is_top_level ON)
+else()
+    set(btp_is_top_level OFF)
 endif()
+
+option(BTP_BUILD_TESTS "Build the BTP test suites" ${btp_is_top_level})
+option(BTP_ENABLE_AEAD "Build the btp::aead backend (needs mbedtls)" ON)
+option(BTP_INSTALL "Generate install rules for BTP" ${btp_is_top_level})
+option(BTP_USE_SYSTEM_MBEDTLS
+       "Use an mbedtls found on the system instead of fetching one" OFF)
+
+# The same warning configuration was repeated once per target. One function
+# means a flag added here reaches every target, which is the point of having
+# -Werror at all.
+function(btp_strict_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# btp::codec -- the envelope, fragmentation and COBS. Zero dependencies.
+# ---------------------------------------------------------------------------
 
 add_library(
     btp_codec
@@ -51,54 +45,174 @@ target_include_directories(
     btp_codec
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_compile_features(btp_codec PUBLIC cxx_std_11)
+btp_strict_warnings(btp_codec)
 
-if(MSVC)
-    target_compile_options(btp_codec PRIVATE /W4 /WX)
-else()
-    target_compile_options(btp_codec PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# Without this the export namespace yields btp::btp_codec while the in-tree
+# alias above is btp::codec, so a consumer's find_package(btp) succeeds and
+# then fails to find the target it was told to link.
+set_target_properties(btp_codec PROPERTIES EXPORT_NAME codec)
+
+# ---------------------------------------------------------------------------
+# btp::aead -- optional wire v2 encryption, on top of mbedtls.
+# ---------------------------------------------------------------------------
+
+if(BTP_ENABLE_AEAD)
+    # Three ways to get mbedtls, in order of preference. Fetching it is the
+    # fallback, not the rule: it makes configuring require network access, and
+    # it silently duplicates a copy a parent project may already have.
+    if(TARGET mbedcrypto)
+        set(btp_mbedtls_source "target provided by the parent project")
+        set(btp_mbedtls_is_external ON)
+    elseif(BTP_USE_SYSTEM_MBEDTLS)
+        find_package(MbedTLS REQUIRED)
+        set(btp_mbedtls_source "system package")
+        set(btp_mbedtls_is_external ON)
+    else()
+        include(FetchContent)
+        # EXCLUDE_FROM_ALL keeps mbedtls's own install rules from running.
+        # Without it, `cmake --install` on this project deposits an entire TLS
+        # stack -- every mbedtls, psa and everest header, plus five static
+        # libraries -- into the consumer's prefix next to four BTP headers. We
+        # fetched it as a private implementation detail; it should not show up
+        # in anyone's install tree. The keyword landed in CMake 3.28, and the
+        # options below are the fallback for older ones.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+            FetchContent_Declare(
+                mbedtls
+                GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+                GIT_TAG v3.6.7 # newest 3.6.x LTS at time of pinning; a tag, never a branch
+                EXCLUDE_FROM_ALL
+            )
+        else()
+            FetchContent_Declare(
+                mbedtls
+                GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+                GIT_TAG v3.6.7
+            )
+        endif()
+        # mbedtls defaults to building its own test suite and sample programs,
+        # and to treating its own warnings as errors. None of that should gate
+        # or slow our build, so force it off before mbedtls configures.
+        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+        set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+        set(INSTALL_MBEDTLS_HEADERS OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(mbedtls)
+        set(btp_mbedtls_source "fetched at configure time")
+        set(btp_mbedtls_is_external OFF)
+    endif()
+    message(STATUS "BTP: mbedtls -- ${btp_mbedtls_source}")
+
+    add_library(btp_aead src/aead.cpp)
+    add_library(btp::aead ALIAS btp_aead)
+
+    target_include_directories(
+        btp_aead
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_compile_features(btp_aead PUBLIC cxx_std_11)
+    target_link_libraries(btp_aead PUBLIC btp::codec PRIVATE mbedcrypto)
+    btp_strict_warnings(btp_aead)
+    set_target_properties(btp_aead PROPERTIES EXPORT_NAME aead)
+    # aead.cpp compiles to nothing when it cannot find mbedtls, so that a
+    # PlatformIO build on a board without it still succeeds. Here we did ask
+    # for it, so a missing header must be an error rather than an empty target
+    # that fails at link time with a confusing message.
+    target_compile_definitions(btp_aead PRIVATE BTP_AEAD_REQUIRE_MBEDTLS=1)
 endif()
+
+# ---------------------------------------------------------------------------
+# Install and export
+# ---------------------------------------------------------------------------
+
+if(BTP_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+
+    set(btp_export_targets btp_codec)
+
+    # btp_aead joins the export set only when mbedtls came from outside this
+    # build. A fetched mbedcrypto is never installed, so exporting a target
+    # that links it would hand the consumer a btpTargets.cmake referencing a
+    # target that does not exist on their machine -- a install that configures
+    # and then fails at link time is worse than one that never claimed to work.
+    if(BTP_ENABLE_AEAD AND btp_mbedtls_is_external)
+        list(APPEND btp_export_targets btp_aead)
+    elseif(BTP_ENABLE_AEAD)
+        message(STATUS
+            "BTP: btp::aead is excluded from the install set because mbedtls "
+            "was fetched; configure with -DBTP_USE_SYSTEM_MBEDTLS=ON to "
+            "install it")
+    endif()
+
+    install(
+        TARGETS ${btp_export_targets}
+        EXPORT btpTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(
+        DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/btp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(
+        EXPORT btpTargets
+        FILE btpTargets.cmake
+        NAMESPACE btp::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/btp
+    )
+
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/btpConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/btpConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/btpConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/btp
+    )
+    install(
+        FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/btpConfig.cmake
+            ${CMAKE_CURRENT_BINARY_DIR}/btpConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/btp
+    )
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 if(BTP_BUILD_TESTS)
     enable_testing()
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    add_executable(btp_codec_tests tests/test_codec.cpp)
-    target_link_libraries(btp_codec_tests PRIVATE btp::codec)
-    target_compile_features(btp_codec_tests PRIVATE cxx_std_11)
-    add_executable(btp_transport_tests tests/test_transport.cpp)
-    target_link_libraries(btp_transport_tests PRIVATE btp::codec)
-    target_compile_features(btp_transport_tests PRIVATE cxx_std_11)
-    add_executable(btp_conformance_tests tests/test_conformance.cpp)
-    target_link_libraries(btp_conformance_tests PRIVATE btp::codec)
-    target_compile_features(btp_conformance_tests PRIVATE cxx_std_11)
+
+    # name -> source, all linking btp::codec with the same options.
+    foreach(suite codec transport conformance conformance_v2)
+        add_executable(btp_${suite}_tests tests/test_${suite}.cpp)
+        target_link_libraries(btp_${suite}_tests PRIVATE btp::codec)
+        target_compile_features(btp_${suite}_tests PRIVATE cxx_std_11)
+        btp_strict_warnings(btp_${suite}_tests)
+        add_test(NAME btp_${suite}_tests COMMAND btp_${suite}_tests)
+    endforeach()
+
     target_compile_definitions(
         btp_conformance_tests
         PRIVATE BTP_VECTOR_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1"
     )
-    add_executable(btp_conformance_v2_tests tests/test_conformance_v2.cpp)
-    target_link_libraries(btp_conformance_v2_tests PRIVATE btp::codec)
-    target_compile_features(btp_conformance_v2_tests PRIVATE cxx_std_11)
     target_compile_definitions(
         btp_conformance_v2_tests
         PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
     )
-    if(MSVC)
-        target_compile_options(btp_codec_tests PRIVATE /W4 /WX)
-        target_compile_options(btp_transport_tests PRIVATE /W4 /WX)
-        target_compile_options(btp_conformance_tests PRIVATE /W4 /WX)
-        target_compile_options(btp_conformance_v2_tests PRIVATE /W4 /WX)
-    else()
-        target_compile_options(btp_codec_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-        target_compile_options(btp_transport_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-        target_compile_options(btp_conformance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-        target_compile_options(btp_conformance_v2_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    endif()
-    add_test(NAME btp_codec_tests COMMAND btp_codec_tests)
-    add_test(NAME btp_transport_tests COMMAND btp_transport_tests)
-    add_test(NAME btp_conformance_tests COMMAND btp_conformance_tests)
-    add_test(NAME btp_conformance_v2_tests COMMAND btp_conformance_v2_tests)
+
     add_test(
         NAME btp_vector_descriptions
         COMMAND
@@ -115,30 +229,19 @@ if(BTP_BUILD_TESTS)
             --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2
             --check
     )
-endif()
 
-if(BTP_BUILD_TESTS AND BTP_ENABLE_AEAD)
-    add_executable(btp_aead_tests tests/test_aead.cpp)
-    target_link_libraries(btp_aead_tests PRIVATE btp::aead)
-    target_compile_features(btp_aead_tests PRIVATE cxx_std_11)
-    if(MSVC)
-        target_compile_options(btp_aead_tests PRIVATE /W4 /WX)
-    else()
-        target_compile_options(btp_aead_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    endif()
-    add_test(NAME btp_aead_tests COMMAND btp_aead_tests)
+    if(BTP_ENABLE_AEAD)
+        foreach(suite aead aead_conformance)
+            add_executable(btp_${suite}_tests tests/test_${suite}.cpp)
+            target_link_libraries(btp_${suite}_tests PRIVATE btp::aead)
+            target_compile_features(btp_${suite}_tests PRIVATE cxx_std_11)
+            btp_strict_warnings(btp_${suite}_tests)
+            add_test(NAME btp_${suite}_tests COMMAND btp_${suite}_tests)
+        endforeach()
 
-    add_executable(btp_aead_conformance_tests tests/test_aead_conformance.cpp)
-    target_link_libraries(btp_aead_conformance_tests PRIVATE btp::aead)
-    target_compile_features(btp_aead_conformance_tests PRIVATE cxx_std_11)
-    target_compile_definitions(
-        btp_aead_conformance_tests
-        PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
-    )
-    if(MSVC)
-        target_compile_options(btp_aead_conformance_tests PRIVATE /W4 /WX)
-    else()
-        target_compile_options(btp_aead_conformance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_definitions(
+            btp_aead_conformance_tests
+            PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
+        )
     endif()
-    add_test(NAME btp_aead_conformance_tests COMMAND btp_aead_conformance_tests)
 endif()

@@ -1,11 +1,34 @@
 #include "btp/aead.hpp"
 
+// btp::aead is optional. Under CMake it is a separate target behind
+// BTP_ENABLE_AEAD, so this file simply is not compiled when the option is off.
+// PlatformIO has no such switch -- library.json's srcDir pulls in every .cpp
+// unconditionally -- so on a platform whose SDK ships no mbedtls this would be
+// a hard build error for a feature the user may not even want. Compile the
+// implementation only when the backend headers are actually reachable, and let
+// CMake, which knows it asked for them, fail loudly if they are not.
+#if defined(__has_include)
+#  if __has_include(<mbedtls/gcm.h>) && __has_include(<mbedtls/chachapoly.h>)
+#    define BTP_AEAD_HAVE_MBEDTLS 1
+#  endif
+#endif
+
+#if defined(BTP_AEAD_REQUIRE_MBEDTLS) && !defined(BTP_AEAD_HAVE_MBEDTLS)
+#  error "btp::aead was requested but <mbedtls/gcm.h> was not found"
+#endif
+
+#if defined(BTP_AEAD_HAVE_MBEDTLS)
+
 #include <mbedtls/chachapoly.h>
 #include <mbedtls/gcm.h>
 
 namespace btp {
 
 namespace {
+
+const std::size_t kTagSize = 16U;
+const std::size_t kNonceSize = 12U;
+const std::size_t kAadSize = 36U;
 
 // The AAD is the header of the LOGICAL message, never of one fragment
 // (docs/encryption.md section 5). The tag is computed once, before
@@ -26,11 +49,56 @@ namespace {
 // keeps producing byte-identical AAD.
 Header aad_header(const Header& header) noexcept {
     Header canonical = header;
-    canonical.flags =
-        static_cast<std::uint16_t>(canonical.flags & static_cast<std::uint16_t>(~kFlagFragmented));
+    canonical.flags = static_cast<std::uint16_t>(
+        canonical.flags & static_cast<std::uint16_t>(~kFlagFragmented));
     canonical.fragment_index = 0U;
     canonical.fragment_count = 1U;
     return canonical;
+}
+
+// All four entry points validate the same arguments and build the same two
+// buffers. Doing it once keeps the AAD construction -- the subtle part, and
+// the one both peers must agree on byte for byte -- from being spelled out
+// four times and drifting in one of them.
+//
+// wire_payload_size is what the AAD records: the size of the whole logical
+// payload as it appears on the wire, ciphertext plus tag. A sealer therefore
+// passes plaintext_size + kTagSize, while an opener passes ciphertext_size
+// unchanged because it already includes the tag.
+//
+// Pointer rules follow the rest of the library: an input may be null only when
+// its size is zero, and an output buffer is always required.
+AeadError prepare(const AeadKey& key,
+                  std::size_t expected_key_size,
+                  const Header& header,
+                  std::uint16_t wire_payload_size,
+                  const std::uint8_t* input,
+                  std::size_t input_size,
+                  const std::uint8_t* output,
+                  std::uint8_t out_aad[kAadSize],
+                  std::uint8_t out_nonce[kNonceSize]) noexcept {
+    if (key.data == nullptr || key.size != expected_key_size) {
+        return AeadError::InvalidArgument;
+    }
+    if (input == nullptr && input_size != 0U) {
+        return AeadError::InvalidArgument;
+    }
+    if (output == nullptr) {
+        return AeadError::InvalidArgument;
+    }
+    if (encode_header(aad_header(header), wire_payload_size, out_aad) !=
+        Error::Ok) {
+        return AeadError::InvalidArgument;
+    }
+    aead_nonce(header, out_nonce);
+    return AeadError::Ok;
+}
+
+// Guards the plaintext_size + kTagSize sum a sealer has to compute: the size
+// is already a uint16, so a caller near the top of the range would wrap it
+// silently and authenticate a size no receiver can reproduce.
+bool seal_size_fits(std::uint16_t payload_size) noexcept {
+    return payload_size <= static_cast<std::uint16_t>(0xFFFFU - kTagSize);
 }
 
 }  // namespace
@@ -39,26 +107,19 @@ AeadError aead_seal_aes_gcm(const AeadKey& key, const Header& header,
                             std::uint16_t payload_size,
                             const std::uint8_t* plaintext,
                             std::uint8_t* out_ciphertext_and_tag) noexcept {
-    if (key.data == nullptr || key.size != kAesGcmKeySize) {
+    if (!seal_size_fits(payload_size)) {
         return AeadError::InvalidArgument;
     }
 
-    // The AAD records the WIRE payload size of the logical message --
-    // ciphertext plus the 16-octet tag (docs/encryption.md sections 2 and 5),
-    // not the plaintext size received here. Guard the sum: payload_size is
-    // already a uint16, so a caller near the top of the range would wrap it
-    // silently and authenticate a size that no receiver can reproduce.
-    if (payload_size > static_cast<std::uint16_t>(0xFFFFU - 16U)) {
-        return AeadError::InvalidArgument;
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    const AeadError prepared = prepare(
+        key, kAesGcmKeySize, header,
+        static_cast<std::uint16_t>(payload_size + kTagSize), plaintext,
+        payload_size, out_ciphertext_and_tag, aad, nonce);
+    if (prepared != AeadError::Ok) {
+        return prepared;
     }
-    std::uint8_t aad[36];
-    const std::uint16_t wire_payload_size = static_cast<std::uint16_t>(payload_size + 16U);
-    if (encode_header(aad_header(header), wire_payload_size, aad) != Error::Ok) {
-        return AeadError::InvalidArgument;
-    }
-
-    std::uint8_t nonce[12];
-    aead_nonce(header, nonce);
 
     mbedtls_gcm_context ctx;
     mbedtls_gcm_init(&ctx);
@@ -68,7 +129,7 @@ AeadError aead_seal_aes_gcm(const AeadKey& key, const Header& header,
     if (rc == 0) {
         rc = mbedtls_gcm_crypt_and_tag(
             &ctx, MBEDTLS_GCM_ENCRYPT, payload_size, nonce, sizeof(nonce),
-            aad, sizeof(aad), plaintext, out_ciphertext_and_tag, 16U,
+            aad, sizeof(aad), plaintext, out_ciphertext_and_tag, kTagSize,
             out_ciphertext_and_tag + payload_size);
     }
 
@@ -80,25 +141,21 @@ AeadError aead_open_aes_gcm(const AeadKey& key, const Header& header,
                             std::uint16_t ciphertext_size,
                             const std::uint8_t* ciphertext_and_tag,
                             std::uint8_t* out_plaintext) noexcept {
-    if (key.data == nullptr || key.size != kAesGcmKeySize) {
-        return AeadError::InvalidArgument;
-    }
-    if (ciphertext_size < 16U) {
+    if (ciphertext_size < kTagSize) {
         return AeadError::InvalidArgument;
     }
 
-    // ciphertext_size already includes the trailing tag, so it IS the wire
-    // payload size that went into the AAD at seal time -- no +16 here,
-    // unlike aead_seal_aes_gcm() above.
-    std::uint8_t aad[36];
-    if (encode_header(aad_header(header), ciphertext_size, aad) != Error::Ok) {
-        return AeadError::InvalidArgument;
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    const AeadError prepared =
+        prepare(key, kAesGcmKeySize, header, ciphertext_size,
+                ciphertext_and_tag, ciphertext_size, out_plaintext, aad, nonce);
+    if (prepared != AeadError::Ok) {
+        return prepared;
     }
 
-    std::uint8_t nonce[12];
-    aead_nonce(header, nonce);
-
-    const std::size_t plaintext_size = static_cast<std::size_t>(ciphertext_size) - 16U;
+    const std::size_t plaintext_size =
+        static_cast<std::size_t>(ciphertext_size) - kTagSize;
 
     mbedtls_gcm_context ctx;
     mbedtls_gcm_init(&ctx);
@@ -108,7 +165,7 @@ AeadError aead_open_aes_gcm(const AeadKey& key, const Header& header,
     if (rc == 0) {
         rc = mbedtls_gcm_auth_decrypt(
             &ctx, plaintext_size, nonce, sizeof(nonce), aad, sizeof(aad),
-            ciphertext_and_tag + plaintext_size, 16U, ciphertext_and_tag,
+            ciphertext_and_tag + plaintext_size, kTagSize, ciphertext_and_tag,
             out_plaintext);
     }
 
@@ -123,30 +180,23 @@ AeadError aead_open_aes_gcm(const AeadKey& key, const Header& header,
     return AeadError::InvalidArgument;
 }
 
-AeadError aead_seal_chacha20poly1305(const AeadKey& key, const Header& header,
-                                     std::uint16_t payload_size,
-                                     const std::uint8_t* plaintext,
-                                     std::uint8_t* out_ciphertext_and_tag) noexcept {
-    if (key.data == nullptr || key.size != kChaCha20Poly1305KeySize) {
+AeadError aead_seal_chacha20poly1305(
+    const AeadKey& key, const Header& header, std::uint16_t payload_size,
+    const std::uint8_t* plaintext,
+    std::uint8_t* out_ciphertext_and_tag) noexcept {
+    if (!seal_size_fits(payload_size)) {
         return AeadError::InvalidArgument;
     }
 
-    // The AAD records the WIRE payload size of the logical message --
-    // ciphertext plus the 16-octet tag (docs/encryption.md sections 2 and 5),
-    // not the plaintext size received here. Guard the sum: payload_size is
-    // already a uint16, so a caller near the top of the range would wrap it
-    // silently and authenticate a size that no receiver can reproduce.
-    if (payload_size > static_cast<std::uint16_t>(0xFFFFU - 16U)) {
-        return AeadError::InvalidArgument;
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    const AeadError prepared = prepare(
+        key, kChaCha20Poly1305KeySize, header,
+        static_cast<std::uint16_t>(payload_size + kTagSize), plaintext,
+        payload_size, out_ciphertext_and_tag, aad, nonce);
+    if (prepared != AeadError::Ok) {
+        return prepared;
     }
-    std::uint8_t aad[36];
-    const std::uint16_t wire_payload_size = static_cast<std::uint16_t>(payload_size + 16U);
-    if (encode_header(aad_header(header), wire_payload_size, aad) != Error::Ok) {
-        return AeadError::InvalidArgument;
-    }
-
-    std::uint8_t nonce[12];
-    aead_nonce(header, nonce);
 
     mbedtls_chachapoly_context ctx;
     mbedtls_chachapoly_init(&ctx);
@@ -166,25 +216,21 @@ AeadError aead_open_chacha20poly1305(const AeadKey& key, const Header& header,
                                      std::uint16_t ciphertext_size,
                                      const std::uint8_t* ciphertext_and_tag,
                                      std::uint8_t* out_plaintext) noexcept {
-    if (key.data == nullptr || key.size != kChaCha20Poly1305KeySize) {
-        return AeadError::InvalidArgument;
-    }
-    if (ciphertext_size < 16U) {
+    if (ciphertext_size < kTagSize) {
         return AeadError::InvalidArgument;
     }
 
-    // ciphertext_size already includes the trailing tag, so it IS the wire
-    // payload size that went into the AAD at seal time -- no +16 here,
-    // unlike aead_seal_chacha20poly1305() above.
-    std::uint8_t aad[36];
-    if (encode_header(aad_header(header), ciphertext_size, aad) != Error::Ok) {
-        return AeadError::InvalidArgument;
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    const AeadError prepared =
+        prepare(key, kChaCha20Poly1305KeySize, header, ciphertext_size,
+                ciphertext_and_tag, ciphertext_size, out_plaintext, aad, nonce);
+    if (prepared != AeadError::Ok) {
+        return prepared;
     }
 
-    std::uint8_t nonce[12];
-    aead_nonce(header, nonce);
-
-    const std::size_t plaintext_size = static_cast<std::size_t>(ciphertext_size) - 16U;
+    const std::size_t plaintext_size =
+        static_cast<std::size_t>(ciphertext_size) - kTagSize;
 
     mbedtls_chachapoly_context ctx;
     mbedtls_chachapoly_init(&ctx);
@@ -213,9 +259,12 @@ AeadError aead_seal(const AeadKey& key, const Header& header,
                     std::uint8_t* out_ciphertext_and_tag) noexcept {
     switch (cipher_id(header.flags)) {
         case CipherId::AesGcm:
-            return aead_seal_aes_gcm(key, header, payload_size, plaintext, out_ciphertext_and_tag);
+            return aead_seal_aes_gcm(key, header, payload_size, plaintext,
+                                     out_ciphertext_and_tag);
         case CipherId::ChaCha20Poly1305:
-            return aead_seal_chacha20poly1305(key, header, payload_size, plaintext, out_ciphertext_and_tag);
+            return aead_seal_chacha20poly1305(key, header, payload_size,
+                                              plaintext,
+                                              out_ciphertext_and_tag);
     }
     return AeadError::InvalidCipherId;
 }
@@ -226,11 +275,16 @@ AeadError aead_open(const AeadKey& key, const Header& header,
                     std::uint8_t* out_plaintext) noexcept {
     switch (cipher_id(header.flags)) {
         case CipherId::AesGcm:
-            return aead_open_aes_gcm(key, header, ciphertext_size, ciphertext_and_tag, out_plaintext);
+            return aead_open_aes_gcm(key, header, ciphertext_size,
+                                     ciphertext_and_tag, out_plaintext);
         case CipherId::ChaCha20Poly1305:
-            return aead_open_chacha20poly1305(key, header, ciphertext_size, ciphertext_and_tag, out_plaintext);
+            return aead_open_chacha20poly1305(key, header, ciphertext_size,
+                                              ciphertext_and_tag,
+                                              out_plaintext);
     }
     return AeadError::InvalidCipherId;
 }
 
 }  // namespace btp
+
+#endif  // BTP_AEAD_HAVE_MBEDTLS

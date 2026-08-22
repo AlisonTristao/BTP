@@ -89,7 +89,21 @@ Two targets: **`btp::codec`** (envelope, fragmentation, COBS) has zero
 dependencies. **`btp::aead`** (wire v2 encryption) links mbedcrypto and is
 behind `-DBTP_ENABLE_AEAD=OFF` if you do not want it.
 
-For PlatformIO the repository is a library as-is. The embedded compile target:
+To consume it as an installed package:
+
+```bash
+cmake --install build --prefix /usr/local
+```
+
+```cmake
+find_package(btp 2.0 REQUIRED)
+target_link_libraries(app PRIVATE btp::codec)
+```
+
+It also works as an `add_subdirectory()`/`FetchContent` subproject, where tests
+and install rules switch themselves off. For PlatformIO the repository is a
+library as-is. See [Using the library](https://alisontristao.github.io/BTP/library/)
+for the full option list. The embedded compile target:
 
 ```bash
 pio run -d tests/embedded
