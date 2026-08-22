@@ -79,7 +79,8 @@ enum class Error : std::uint8_t {
     InvalidBootId,
     InvalidFragmentation,
     EncryptedVersionMismatch,
-    InvalidCipherId
+    InvalidCipherId,
+    EncryptedNotAllowedOnTransport
 };
 
 struct ByteView {

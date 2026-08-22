@@ -514,6 +514,60 @@ void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
     }
 }
 
+// Section 8.7 forbids ENCRYPTED on UsbHid: a 16-octet tag over a 22-octet
+// payload ceiling is 73% overhead. The rule used to live only in prose, so an
+// encoder could emit a frame no conforming decoder was supposed to accept.
+void test_encrypted_is_rejected_on_usb_hid() {
+    btp::Header header = {};
+    header.type = btp::MessageType::Telemetry;
+    header.flags = btp::kFlagEncrypted;
+    header.source_id = 0x11223344U;
+    header.boot_id = 0xA1B2C3D4U;
+    header.sequence = 1U;
+    header.timestamp_us = 1000U;
+    header.object_id = 1U;
+    header.fragment_count = 1U;
+
+    const std::array<std::uint8_t, 4> payload = {{1, 2, 3, 4}};
+    const btp::Frame frame = {header, {payload.data(), payload.size()}};
+
+    std::array<std::uint8_t, 64> output = {};
+    std::size_t written = 12345U;
+    CHECK(btp::encode(frame, btp::TransportProfile::UsbHid, output.data(),
+                      output.size(),
+                      &written) == btp::Error::EncryptedNotAllowedOnTransport);
+    CHECK(written == 12345U);  // rejection stays atomic
+
+    // The same frame is legal on the two profiles with room for the tag, and a
+    // decoder on those profiles still accepts it.
+    std::size_t espnow_written = 0U;
+    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(),
+                      output.size(), &espnow_written) == btp::Error::Ok);
+
+    btp::DecodedFrame decoded = {};
+    CHECK(btp::decode(output.data(), espnow_written,
+                      btp::TransportProfile::EspNow,
+                      &decoded) == btp::Error::Ok);
+
+    // Those same octets, offered to a UsbHid decoder, must be refused -- a
+    // gateway must not relay an encrypted frame onto the HID profile.
+    CHECK(btp::decode(output.data(), espnow_written,
+                      btp::TransportProfile::UsbHid,
+                      &decoded) == btp::Error::EncryptedNotAllowedOnTransport);
+
+    // An unencrypted frame on UsbHid is unaffected.
+    btp::Header plain = header;
+    plain.flags = 0U;
+    const btp::Frame plain_frame = {plain, {payload.data(), payload.size()}};
+    std::size_t plain_written = 0U;
+    CHECK(btp::encode(plain_frame, btp::TransportProfile::UsbHid,
+                      output.data(), output.size(),
+                      &plain_written) == btp::Error::Ok);
+    CHECK(btp::decode(output.data(), plain_written,
+                      btp::TransportProfile::UsbHid,
+                      &decoded) == btp::Error::Ok);
+}
+
 }  // namespace
 
 int main() {
@@ -533,6 +587,7 @@ int main() {
     test_cipher_id_extraction();
     test_encoder_rejects_cipher_id_without_encrypted();
     test_decoder_rejects_reserved_cipher_id_with_encrypted();
+    test_encrypted_is_rejected_on_usb_hid();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

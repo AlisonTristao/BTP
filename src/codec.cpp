@@ -102,6 +102,20 @@ void write_header(const Header& header,
 // so CIPHER_ID MUST be 0; with ENCRYPTED set, CIPHER_ID MUST be 0 or 1 (the
 // only assigned values) -- 2 and 3 are reserved for future ciphers and MUST
 // be rejected, the same principle already applied to reserved flag bits.
+// A 16-octet AEAD tag over the UsbHid payload ceiling of 22 octets is 73%
+// overhead, against ~7.6% on EspNow and ~0.4% on Serial, so BTP_V1.md section
+// 8.7 forbids ENCRYPTED on a UsbHid frame outright. The rule lived only in
+// prose until now: an encoder that ignored it produced frames every conforming
+// decoder was supposed to refuse, and no decoder actually refused them.
+Error validate_encryption_for_transport(std::uint16_t flags,
+                                        TransportProfile transport) noexcept {
+    if ((flags & kFlagEncrypted) != 0U &&
+        transport == TransportProfile::UsbHid) {
+        return Error::EncryptedNotAllowedOnTransport;
+    }
+    return Error::Ok;
+}
+
 bool valid_cipher_id_for_flags(std::uint16_t flags) noexcept {
     const std::uint16_t raw_cipher_id =
         static_cast<std::uint16_t>((flags & kCipherIdMask) >> kCipherIdShift);
@@ -184,6 +198,11 @@ Error encode(const Frame& frame,
     const Error header_error = validate_header(frame.header);
     if (header_error != Error::Ok) {
         return header_error;
+    }
+    const Error transport_error =
+        validate_encryption_for_transport(frame.header.flags, transport);
+    if (transport_error != Error::Ok) {
+        return transport_error;
     }
     if (frame.payload.data == nullptr && frame.payload.size != 0U) {
         return Error::InvalidArgument;
@@ -275,6 +294,12 @@ Error decode(const std::uint8_t* input,
         return Error::EncryptedVersionMismatch;
     }
 
+    const Error transport_error =
+        validate_encryption_for_transport(header.flags, transport);
+    if (transport_error != Error::Ok) {
+        return transport_error;
+    }
+
     const Error header_error = validate_header(header);
     if (header_error != Error::Ok) {
         return header_error;
@@ -339,6 +364,8 @@ const char* error_string(Error error) noexcept {
             return "ENCRYPTED flag set without version 2";
         case Error::InvalidCipherId:
             return "CIPHER_ID inconsistent with ENCRYPTED or reserved";
+        case Error::EncryptedNotAllowedOnTransport:
+            return "ENCRYPTED not allowed on this transport";
     }
     return "unknown error";
 }
