@@ -173,6 +173,12 @@ def decode_error(data, transport):
     if encrypted and raw_cipher_id > 1:
         return "InvalidCipherId"
 
+    # Section 8.7: a 16-octet tag over the usb_hid payload ceiling of 22
+    # octets is 73% overhead, so ENCRYPTED is refused on that profile
+    # outright. btp::decode() enforces this; so must the reference decoder.
+    if encrypted and transport == "usb_hid":
+        return "EncryptedNotAllowedOnTransport"
+
     if source_id == 0:
         return "InvalidSourceId"
     if boot_id == 0:

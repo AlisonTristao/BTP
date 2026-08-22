@@ -1,0 +1,18 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "aead_fragmented_gcm_1",
+  "description": "Fragment 1 of 2 of a single AES-128-GCM sealed TELEMETRY message (BTP_V1.md section 8.3/8.4). The message is sealed ONCE, whole, and only then cut into ESP-NOW sized fragments, so the 16-octet tag lives at the end of fragment 1 and neither fragment can be opened on its own. The AAD is the canonicalized LOGICAL header: FRAGMENTED cleared, fragment_index 0, fragment_count 1, and payload_size set to the full 236-octet ciphertext-and-tag size. Because every field that re-fragmentation changes is excluded from the AAD, the tag is identical no matter how the message was cut, which is what lets a gateway reassemble from one transport and re-fragment onto another without holding the key. btp::decode() does not verify the tag; this vector proves the framing and gives an implementation the exact octets to reassemble and open.",
+  "transport": "esp_now",
+  "frame": {
+    "type": "TELEMETRY",
+    "flags": "0x0003",
+    "source_id": "0x0C0D0E0F",
+    "boot_id": "0x10203040",
+    "sequence": "0x00000008",
+    "timestamp_us": "0x0000000000002710",
+    "object_id": "0x0001",
+    "fragment_index": 1,
+    "fragment_count": 2,
+    "payload_hex": "28 8e a2 be 13 09 01 8a 82 44 83 59 53 4e 29 cf 17 e1 89 65 65 cf be cf ef da"
+  }
+}

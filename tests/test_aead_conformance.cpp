@@ -9,6 +9,7 @@
 // package produced is exactly what btp::aead recovers.
 #include "btp/aead.hpp"
 #include "btp/codec.hpp"
+#include "btp/fragmentation.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -197,12 +198,82 @@ void test_chacha20poly1305_vector_decrypts_real_ciphertext() {
                       sizeof(expected_plaintext)) == 0);
 }
 
+// The end-to-end interop proof for section 8.3: Python's `cryptography` sealed
+// one 220-octet message whole and cut it into two ESP-NOW fragments, which are
+// checked in as two separate .bin vectors. Here C++ decodes both frames,
+// reassembles them, and opens the result under mbedtls. Nothing re-derives the
+// tag, and neither fragment can be opened alone -- the tag only exists over the
+// whole logical message. This is what makes key-less gateway re-fragmentation
+// possible, and it is the case the reassembler used to reject outright.
+void test_aes_gcm_fragmented_vector_reassembles_and_decrypts() {
+    const std::vector<std::uint8_t> first =
+        read_binary("valid/aead_fragmented_gcm_0.bin");
+    const std::vector<std::uint8_t> second =
+        read_binary("valid/aead_fragmented_gcm_1.bin");
+    if (first.empty() || second.empty()) {
+        return;
+    }
+
+    btp::ReassemblySlot slots[1];
+    std::vector<std::uint8_t> storage(256U);
+    const btp::ReassemblyStorage storage_view = {storage.data(),
+                                                 storage.size()};
+    btp::Reassembler reassembler(slots, &storage_view, 1U, 1000U);
+    CHECK(reassembler.valid());
+
+    // Feed fragment 1 before fragment 0: arrival order must not matter.
+    const std::vector<std::uint8_t>* order[2] = {&second, &first};
+    btp::ReassembledMessage message = {};
+    btp::ReassemblyEvent last = btp::ReassemblyEvent::InvalidArgument;
+    for (std::size_t step = 0U; step < 2U; ++step) {
+        btp::DecodedFrame decoded = {};
+        CHECK(btp::decode(order[step]->data(), order[step]->size(),
+                          btp::TransportProfile::EspNow,
+                          &decoded) == btp::Error::Ok);
+        last = reassembler.push(decoded, 1U, &message);
+    }
+
+    CHECK(last == btp::ReassemblyEvent::Complete);
+    if (last != btp::ReassemblyEvent::Complete) {
+        return;
+    }
+    // 220 octets of plaintext plus the 16-octet tag.
+    CHECK(message.payload.size == 236U);
+    // Completion restores the logical header, which is what the AAD was built
+    // over: FRAGMENTED gone, ENCRYPTED kept, index 0 and count 1.
+    CHECK(message.header.flags == btp::kFlagEncrypted);
+    CHECK(message.header.fragment_index == 0U);
+    CHECK(message.header.fragment_count == 1U);
+    if (message.payload.size != 236U) {
+        return;
+    }
+
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
+        0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U,
+        0x08U, 0x09U, 0x0aU, 0x0bU, 0x0cU, 0x0dU, 0x0eU, 0x0fU
+    };
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    std::vector<std::uint8_t> recovered(220U, 0U);
+    CHECK(btp::aead_open(key, message.header,
+                         static_cast<std::uint16_t>(message.payload.size),
+                         message.payload.data,
+                         recovered.data()) == btp::AeadError::Ok);
+
+    // plaintext_note in the JSON: byte i is (i * 7) & 0xFF.
+    for (std::size_t index = 0U; index < recovered.size(); ++index) {
+        CHECK(recovered[index] ==
+              static_cast<std::uint8_t>((index * 7U) & 0xFFU));
+    }
+}
+
 }  // namespace
 
 int main() {
     test_aes_gcm_vector_decrypts_real_ciphertext();
     test_aes_gcm_vector_tag_corruption_is_rejected();
     test_chacha20poly1305_vector_decrypts_real_ciphertext();
+    test_aes_gcm_fragmented_vector_reassembles_and_decrypts();
 
     if (failures != 0) {
         std::cerr << failures << " aead conformance test(s) failed\n";

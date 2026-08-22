@@ -1,10 +1,12 @@
 {
   "format": "btp-test-vector-manifest-v2",
-  "contract": "BTP v2.0 / encaixe de AEAD (docs/decisions/0012-criptografia-aead-payload.md, BTP_V1.md secao 8) / btp::codec 0.1.0",
+  "contract": "BTP wire v2 / payload AEAD / btp::codec 2.0.0",
   "valid_vectors": [
     "hello",
     "aead_telemetry_gcm",
-    "aead_telemetry_chacha20poly1305"
+    "aead_telemetry_chacha20poly1305",
+    "aead_fragmented_gcm_0",
+    "aead_fragmented_gcm_1"
   ],
   "invalid_vectors": [
     "encrypted_version_mismatch",
