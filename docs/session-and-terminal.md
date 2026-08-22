@@ -37,19 +37,19 @@ order with no duplicates and no zero. Today those are `0x01` and `0x02`.
 
 ### Roles
 
-| Value | Wire identifier | Role in this book's vocabulary |
-| ---: | --- | --- |
-| `0x01` | `ROBOT` | producer |
-| `0x02` | `DONGLE` | gateway |
-| `0x03` | `DESKTOP` | consumer |
-| `0x04` | `DIAGNOSTIC_TOOL` | consumer |
+| Value | Role |
+| ---: | --- |
+| `0x01` | producer |
+| `0x02` | gateway |
+| `0x03` | consumer |
+| `0x04` | consumer, announcing itself as a diagnostic tool |
 
 Zero and `0x05`-`0xFF` are reserved.
 
-The identifier names in the middle column predate the role vocabulary this book
-uses and are frozen: they are numeric values baked into the conformance
-vectors, so renaming them would be a contract change rather than an edit. Read
-them as the right-hand column.
+What travels is the number, and the number is what the conformance vectors pin
+down. `0x03` and `0x04` are both consumers and the protocol defines no
+behavioral difference between them; the distinction exists so a producer can
+tell an ordinary client from a diagnostic one if it wants to.
 
 ## 2. `HELLO_RESULT`
 

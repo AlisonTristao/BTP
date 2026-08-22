@@ -1,5 +1,5 @@
-# Dependências apenas do livro em docs/ (mkdocs.yml). Nada aqui entra no build
-# da biblioteca C++ nem é exigido para rodar os testes de conformidade.
+# Dependencies of the book in docs/ (mkdocs.yml) only. Nothing here enters the
+# C++ library build, and nothing here is needed to run the conformance tests.
 #
 #   python -m venv .venv-docs
 #   .venv-docs/Scripts/pip install -r requirements-docs.txt   # Windows

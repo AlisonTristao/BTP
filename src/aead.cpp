@@ -17,9 +17,9 @@ namespace {
 // accepts the header decoded from any fragment of the message.
 //
 // It also keeps the tag independent of how the message got fragmented, which
-// matters because the dongle relays between transports with different payload
-// ceilings (BTP_ESPNOW_MAX_PAYLOAD_SIZE vs BTP_USB_HID_MAX_PAYLOAD_SIZE): a
-// gateway may re-fragment without holding the key.
+// matters whenever a gateway relays between transports with different payload
+// ceilings (kEspNowMaxPayloadSize vs kSerialMaxPayloadSize): it may
+// re-fragment without holding the key.
 //
 // For an unfragmented message this is a no-op -- FRAGMENTED is already clear
 // and the fields are already 0/1 -- so every existing conformance vector
