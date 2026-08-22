@@ -255,7 +255,7 @@ Error decode(const std::uint8_t* input,
         }
     }
     const std::uint8_t version = input[4];
-    if (version != kV1Version && version != kV2Version) {
+    if (version < kMinimumProtocolVersion || version > kMaximumProtocolVersion) {
         return Error::UnsupportedVersion;
     }
     if (read_u16_le(input + 8U) != kV1HeaderSize) {

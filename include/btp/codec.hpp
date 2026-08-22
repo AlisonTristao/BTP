@@ -6,8 +6,11 @@
 
 namespace btp {
 
-static const std::uint8_t kLibraryVersionMajor = 0U;
-static const std::uint8_t kLibraryVersionMinor = 1U;
+// Keep in step with CMakeLists.txt project(VERSION) and library.json. These
+// are the library's own version, which is a different thing from the wire
+// version a frame carries at octet 4.
+static const std::uint8_t kLibraryVersionMajor = 2U;
+static const std::uint8_t kLibraryVersionMinor = 0U;
 static const std::uint8_t kLibraryVersionPatch = 0U;
 static const std::uint8_t kMinimumProtocolVersion = 1U;
 static const std::uint8_t kMaximumProtocolVersion = 2U;
