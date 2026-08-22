@@ -190,7 +190,7 @@ void test_valid_vectors_encode_and_decode() {
             (static_cast<std::uint32_t>(expected[expected.size() - 1U]) << 24U);
         CHECK(decoded.crc32 == stored_crc);
 
-        // ENCRYPTED-specific plumbing (BTP_V1.md section 8): version 2 must
+        // ENCRYPTED-specific plumbing (docs/encryption.md): version 2 must
         // have been selected automatically, and encode_header()/aead_nonce()
         // must reproduce the exact AAD and nonce a future AEAD-capable
         // consumer needs, byte for byte, from the same Header.

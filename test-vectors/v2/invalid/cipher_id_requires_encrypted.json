@@ -1,10 +1,15 @@
 {
   "format": "btp-test-vector-v2",
   "id": "cipher_id_requires_encrypted",
-  "description": "ENCRYPTED permanece limpo, mas o sub-campo CIPHER_ID (bits 2-3 de flags, mascara 0x000C, BTP_V1.md secao 5/8.1) e' alterado de 0 para 1 (ChaCha20-Poly1305) sobre um frame sem ENCRYPTED. BTP_V1.md secao 8.1: com ENCRYPTED limpo nao ha cifra 'em uso' pelo frame, entao CIPHER_ID MUST ser 0; um valor diferente de zero, mesmo um valor atribuido como 1, MUST ser rejeitado. CRC recomputado porque flags faz parte do header coberto pelo CRC.",
+  "description": "ENCRYPTED stays clear, but the CIPHER_ID sub-field (bits 2-3 of flags, mask 0x000C) is changed from 0 to 1 (ChaCha20-Poly1305) on a frame that is not encrypted. With ENCRYPTED clear there is no cipher in use, so CIPHER_ID must be 0; any non-zero value, even an assigned one, is rejected. The CRC is recomputed because flags is part of the header the CRC covers.",
   "base": "hello",
   "mutations": [
-    {"operation": "xor_u8", "offset": 6, "value": "0x04", "recompute_crc": true}
+    {
+      "operation": "xor_u8",
+      "offset": 6,
+      "value": "0x04",
+      "recompute_crc": true
+    }
   ],
   "expected_error": "InvalidCipherId"
 }

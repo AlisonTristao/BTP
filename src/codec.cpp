@@ -74,7 +74,7 @@ bool valid_type(MessageType type) noexcept {
 }
 
 // Writes the 36-octet header for `header`/`payload_size`, selecting version 2
-// automatically when ENCRYPTED is set (BTP_V1.md section 8, §3). Shared by
+// automatically when ENCRYPTED is set (docs/frame.md section 2.1). Shared by
 // encode() and encode_header() so both always produce identical bytes.
 void write_header(const Header& header,
                   std::uint16_t payload_size,
@@ -98,15 +98,16 @@ void write_header(const Header& header,
     out_header[35] = header.fragment_count;
 }
 
-// BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in use",
+// docs/encryption.md section 3: with ENCRYPTED clear there is no cipher "in use",
 // so CIPHER_ID MUST be 0; with ENCRYPTED set, CIPHER_ID MUST be 0 or 1 (the
 // only assigned values) -- 2 and 3 are reserved for future ciphers and MUST
 // be rejected, the same principle already applied to reserved flag bits.
 // A 16-octet AEAD tag over the UsbHid payload ceiling of 22 octets is 73%
-// overhead, against ~7.6% on EspNow and ~0.4% on Serial, so BTP_V1.md section
-// 8.7 forbids ENCRYPTED on a UsbHid frame outright. The rule lived only in
-// prose until now: an encoder that ignored it produced frames every conforming
-// decoder was supposed to refuse, and no decoder actually refused them.
+// overhead, against ~7.6% on EspNow and ~0.4% on Serial, so
+// docs/encryption.md section 9 forbids ENCRYPTED on a UsbHid frame outright.
+// The rule lived only in prose until now: an encoder that ignored it produced
+// frames every conforming decoder was supposed to refuse, and no decoder
+// actually refused them.
 Error validate_encryption_for_transport(std::uint16_t flags,
                                         TransportProfile transport) noexcept {
     if ((flags & kFlagEncrypted) != 0U &&

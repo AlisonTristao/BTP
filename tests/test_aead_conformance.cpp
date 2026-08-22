@@ -2,9 +2,9 @@
 //
 // Deliberately separate from tests/test_conformance_v2.cpp: that suite is
 // framing-only by design (it proves magic/version/CRC/flags and never calls
-// a real cipher -- see test-vectors/v2/README.md's "O que esta suite
-// deliberadamente NAO cobre"). This file is the "future step" that README
-// section used to point at: it links btp::aead and actually decrypts the
+// a real cipher -- see test-vectors/v2/README.md's "What these vectors do and
+// do not prove"). This file is what that README section points at: it links
+// btp::aead and actually decrypts the
 // real ciphertexts, proving byte-for-byte that what Python's `cryptography`
 // package produced is exactly what btp::aead recovers.
 #include "btp/aead.hpp"
@@ -198,7 +198,8 @@ void test_chacha20poly1305_vector_decrypts_real_ciphertext() {
                       sizeof(expected_plaintext)) == 0);
 }
 
-// The end-to-end interop proof for section 8.3: Python's `cryptography` sealed
+// The end-to-end interop proof for docs/encryption.md section 5: Python's
+// `cryptography` sealed
 // one 220-octet message whole and cut it into two ESP-NOW fragments, which are
 // checked in as two separate .bin vectors. Here C++ decodes both frames,
 // reassembles them, and opens the result under mbedtls. Nothing re-derives the

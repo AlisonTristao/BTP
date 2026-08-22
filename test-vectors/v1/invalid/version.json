@@ -1,10 +1,14 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_version",
-  "description": "Versão do envelope alterada de 1 para a versão não suportada 3.",
+  "description": "Envelope version changed from 1 to the unsupported value 3.",
   "base": "hello",
   "mutations": [
-    {"operation": "set_u8", "offset": 4, "value": "0x03"}
+    {
+      "operation": "set_u8",
+      "offset": 4,
+      "value": "0x03"
+    }
   ],
   "expected_error": "UnsupportedVersion"
 }

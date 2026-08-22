@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "telemetry_packed_le",
-  "description": "Amostra PACKED_LE com array contendo os seis octetos de fronteira obrigatórios.",
+  "description": "PACKED_LE sample whose array holds the six required boundary octets.",
   "transport": "esp_now",
   "frame": {
     "type": "TELEMETRY",
@@ -24,7 +24,14 @@
         "name": "edge_bytes",
         "type": "uint8",
         "element_count": 6,
-        "values_hex": ["00", "0a", "0d", "7f", "80", "ff"]
+        "values_hex": [
+          "00",
+          "0a",
+          "0d",
+          "7f",
+          "80",
+          "ff"
+        ]
       }
     ]
   }

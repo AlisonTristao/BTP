@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v2",
   "id": "aead_fragmented_gcm_0",
-  "description": "Fragment 0 of 2 of a single AES-128-GCM sealed TELEMETRY message (BTP_V1.md section 8.3/8.4). The message is sealed ONCE, whole, and only then cut into ESP-NOW sized fragments, so the 16-octet tag lives at the end of fragment 1 and neither fragment can be opened on its own. The AAD is the canonicalized LOGICAL header: FRAGMENTED cleared, fragment_index 0, fragment_count 1, and payload_size set to the full 236-octet ciphertext-and-tag size. Because every field that re-fragmentation changes is excluded from the AAD, the tag is identical no matter how the message was cut, which is what lets a gateway reassemble from one transport and re-fragment onto another without holding the key. btp::decode() does not verify the tag; this vector proves the framing and gives an implementation the exact octets to reassemble and open.",
+  "description": "Fragment 0 of 2 of a single AES-128-GCM sealed TELEMETRY message (docs/encryption.md sections 2 and 5). The message is sealed ONCE, whole, and only then cut into ESP-NOW sized fragments, so the 16-octet tag lives at the end of fragment 1 and neither fragment can be opened on its own. The AAD is the canonicalized LOGICAL header: FRAGMENTED cleared, fragment_index 0, fragment_count 1, and payload_size set to the full 236-octet ciphertext-and-tag size. Because every field that re-fragmentation changes is excluded from the AAD, the tag is identical no matter how the message was cut, which is what lets a gateway reassemble from one transport and re-fragment onto another without holding the key. btp::decode() does not verify the tag; this vector proves the framing and gives an implementation the exact octets to reassemble and open.",
   "transport": "esp_now",
   "frame": {
     "type": "TELEMETRY",
@@ -23,9 +23,9 @@
     "key_hex": "00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f",
     "key_note": "Fixed, public, sequential test key (0x00..0x0f), documented only so this vector can be reproduced. NEVER use in production: a real key never travels and is never written down in the clear.",
     "nonce_hex": "0f 0e 0d 0c 40 30 20 10 08 00 00 00",
-    "nonce_construction": "source_id || boot_id || sequence, each 4 octets little-endian (section 8.2, btp::aead_nonce). Derivable from the frame fields above; spelled out here only for convenience.",
+    "nonce_construction": "source_id || boot_id || sequence, each 4 octets little-endian (btp::aead_nonce). Derivable from the frame fields above; spelled out here only for convenience.",
     "aad_hex": "42 54 50 00 02 01 02 00 24 00 ec 00 0f 0e 0d 0c 40 30 20 10 08 00 00 00 10 27 00 00 00 00 00 00 01 00 00 01",
-    "aad_construction": "The 36 octets btp::encode_header() writes for the CANONICALIZED logical header: version octet 2 because ENCRYPTED is set, flags 0x0002 with FRAGMENTED cleared, payload_size 236 (the whole ciphertext and tag), fragment_index 0, fragment_count 1. This differs from either fragment's own on-wire header, which is the entire point of section 8.3.",
+    "aad_construction": "The 36 octets btp::encode_header() writes for the CANONICALIZED logical header: version octet 2 because ENCRYPTED is set, flags 0x0002 with FRAGMENTED cleared, payload_size 236 (the whole ciphertext and tag), fragment_index 0, fragment_count 1. This differs from either fragment's own on-wire header, which is the entire point of the canonicalization.",
     "plaintext_hex": "00 07 0e 15 1c 23 2a 31 38 3f 46 4d 54 5b 62 69 70 77 7e 85 8c 93 9a a1 a8 af b6 bd c4 cb d2 d9 e0 e7 ee f5 fc 03 0a 11 18 1f 26 2d 34 3b 42 49 50 57 5e 65 6c 73 7a 81 88 8f 96 9d a4 ab b2 b9 c0 c7 ce d5 dc e3 ea f1 f8 ff 06 0d 14 1b 22 29 30 37 3e 45 4c 53 5a 61 68 6f 76 7d 84 8b 92 99 a0 a7 ae b5 bc c3 ca d1 d8 df e6 ed f4 fb 02 09 10 17 1e 25 2c 33 3a 41 48 4f 56 5d 64 6b 72 79 80 87 8e 95 9c a3 aa b1 b8 bf c6 cd d4 db e2 e9 f0 f7 fe 05 0c 13 1a 21 28 2f 36 3d 44 4b 52 59 60 67 6e 75 7c 83 8a 91 98 9f a6 ad b4 bb c2 c9 d0 d7 de e5 ec f3 fa 01 08 0f 16 1d 24 2b 32 39 40 47 4e 55 5c 63 6a 71 78 7f 86 8d 94 9b a2 a9 b0 b7 be c5 cc d3 da e1 e8 ef f6 fd",
     "plaintext_note": "220 octets, byte i = (i*7) & 0xFF. Chosen so ciphertext+tag is 236 octets and needs exactly two ESP-NOW fragments (210 + 26).",
     "tag_size_octets": 16,
@@ -38,6 +38,6 @@
       "fragment_0_size_octets": 210,
       "fragment_1_size_octets": 26
     },
-    "reproduction_note": "sealed = AESGCM(key).encrypt(nonce, plaintext, aad); the library appends the 16-octet tag, matching the logical payload layout of section 8.4. Fragment 0 is sealed[0:210], fragment 1 is sealed[210:236]. Reassembling the two payloads in index order reproduces `sealed` exactly, and aead_open over the reassembled message must return the plaintext above."
+    "reproduction_note": "sealed = AESGCM(key).encrypt(nonce, plaintext, aad); the library appends the 16-octet tag, matching the logical payload layout required by the logical payload. Fragment 0 is sealed[0:210], fragment 1 is sealed[210:236]. Reassembling the two payloads in index order reproduces `sealed` exactly, and aead_open over the reassembled message must return the plaintext above."
   }
 }

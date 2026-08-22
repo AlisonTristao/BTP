@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "protocol_test",
-  "description": "Primeira amostra canonica protocol.test PACKED_LE; o float32 contem NUL, LF e CR como dados.",
+  "description": "First canonical protocol.test PACKED_LE sample; the float32 contains NUL, LF and CR as ordinary data.",
   "transport": "esp_now",
   "frame": {
     "type": "TELEMETRY",

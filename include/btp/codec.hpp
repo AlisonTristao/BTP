@@ -29,7 +29,7 @@ static const std::uint8_t kV1Version = 1U;
 static const std::uint8_t kV2Version = 2U;
 static const std::uint16_t kFlagFragmented = 0x0001U;
 static const std::uint16_t kFlagEncrypted = 0x0002U;
-// CIPHER_ID sub-field, bits 2-3 of flags (BTP_V1.md section 5 / section 8.1):
+// CIPHER_ID sub-field, bits 2-3 of flags (docs/frame.md section 3 and docs/encryption.md section 3):
 // a 2-bit enum, not two independent boolean flags, so the wire cannot
 // represent an ambiguous "both ciphers marked" combination. 0 == AES-128-GCM
 // (default), 1 == ChaCha20-Poly1305, 2/3 reserved and rejected by decode().
@@ -53,8 +53,7 @@ enum class TransportProfile : std::uint8_t {
     UsbHid
 };
 
-// Values assigned to the CIPHER_ID sub-field of flags (BTP_V1.md section
-// 8.1). Only AesGcm (0) and ChaCha20Poly1305 (1) are assigned; the raw
+// Values assigned to the CIPHER_ID sub-field of flags (docs/encryption.md section 3). Only AesGcm (0) and ChaCha20Poly1305 (1) are assigned; the raw
 // values 2 and 3 are reserved for future ciphers. cipher_id() below is a
 // pure extraction and returns those reserved values cast into this enum
 // too -- rejecting them is validate_header()'s job inside decode()/encode(),
@@ -138,7 +137,7 @@ Error decode(const std::uint8_t* input,
 std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
 
 // Extracts the 2-bit CIPHER_ID sub-field of flags (bits 2-3, mask
-// kCipherIdMask, shift kCipherIdShift; BTP_V1.md section 5 / section 8.1),
+// kCipherIdMask, shift kCipherIdShift; docs/frame.md section 3 and docs/encryption.md section 3),
 // already shifted down to a plain 0-3 value cast into CipherId. This is a
 // pure, unchecked read: if the sub-field holds a reserved raw value (2 or
 // 3), it is returned as-is cast to CipherId rather than rejected here --
@@ -146,13 +145,14 @@ std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
 // inside encode()/decode(), not this extraction function's.
 CipherId cipher_id(std::uint16_t flags) noexcept;
 
-// Writes the 12-octet AEAD nonce of BTP_V1.md section 8.2:
+// Writes the 12-octet AEAD nonce of docs/encryption.md section 4:
 // source_id (4) || boot_id (4) || sequence (4), each little-endian.
 void aead_nonce(const Header& header, std::uint8_t out_nonce[12]) noexcept;
 
 // Serializes the 36-octet header that encode() would write for this header
 // and payload_size, selecting version 2 when ENCRYPTED is set exactly like
-// encode() does; callers use this to build the AAD (section 8.3) before the
+// encode() does; callers use this to build the AAD
+// (docs/encryption.md section 5) before the
 // payload is encrypted, since encode() itself expects an already-encrypted
 // payload. payload_size is already the wire's uint16_le width, so it always
 // fits; this fails only with whatever Error validate_header() would return

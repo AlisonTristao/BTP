@@ -1,10 +1,14 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_crc",
-  "description": "CRC armazenado difere em um bit; os demais bytes são os do vetor LOG válido.",
+  "description": "The stored CRC differs by one bit; every other octet is the valid LOG vector.",
   "base": "log_utf8",
   "mutations": [
-    {"operation": "xor_u8", "offset": -1, "value": "0x01"}
+    {
+      "operation": "xor_u8",
+      "offset": -1,
+      "value": "0x01"
+    }
   ],
   "expected_error": "CrcMismatch"
 }

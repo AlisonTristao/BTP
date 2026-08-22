@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "usb_hid_telemetry",
-  "description": "Amostra TELEMETRY ocupando o payload maximo de um relatorio HID (22 octetos, TRANSPORT_USB_HID.md -- 63 octetos utilizaveis do relatorio menos 1 octeto do prefixo de tamanho de USBHIDVendor(prepend_size=true)).",
+  "description": "TELEMETRY sample filling the maximum payload of one HID report: 22 octets, which is the report's 63 usable octets minus the one-octet length prefix (docs/fragmentation-and-transports.md section 3.3).",
   "transport": "usb_hid",
   "frame": {
     "type": "TELEMETRY",
@@ -24,15 +24,38 @@
         "name": "edge_bytes",
         "type": "uint8",
         "element_count": 6,
-        "values_hex": ["00", "0a", "0d", "7f", "80", "ff"]
+        "values_hex": [
+          "00",
+          "0a",
+          "0d",
+          "7f",
+          "80",
+          "ff"
+        ]
       },
       {
         "field_id": 2,
         "name": "filler",
         "type": "uint8",
         "element_count": 16,
-        "values_hex": ["01", "02", "03", "04", "05", "06", "07", "08", "09",
-                        "0a", "0b", "0c", "0d", "0e", "0f", "10"]
+        "values_hex": [
+          "01",
+          "02",
+          "03",
+          "04",
+          "05",
+          "06",
+          "07",
+          "08",
+          "09",
+          "0a",
+          "0b",
+          "0c",
+          "0d",
+          "0e",
+          "0f",
+          "10"
+        ]
       }
     ]
   }

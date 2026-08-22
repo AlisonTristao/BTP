@@ -1,10 +1,14 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_payload_size",
-  "description": "payload_size declara um octeto a mais do que existe no arquivo.",
+  "description": "payload_size declares one octet more than the file actually contains.",
   "base": "telemetry_packed_le",
   "mutations": [
-    {"operation": "set_u16_le", "offset": 10, "value": 9}
+    {
+      "operation": "set_u16_le",
+      "offset": 10,
+      "value": 9
+    }
   ],
   "expected_error": "SizeMismatch"
 }

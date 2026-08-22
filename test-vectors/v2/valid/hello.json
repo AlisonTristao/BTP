@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v2",
   "id": "hello",
-  "description": "HELLO com ENCRYPTED limpo: mesmos campos e payload_hex de test-vectors/v1/valid/hello.json, produzindo o mesmo octeto de versao (1) e o mesmo .bin byte a byte. Prova que o caminho nao cifrado do BTP_V1.md secao 1-7 permanece intacto apos o encaixe de AEAD da secao 8 (ADR 0012): nenhum bit muda quando ENCRYPTED nao esta marcado.",
+  "description": "A plain CONTROL frame carrying HELLO, unchanged from wire v1. It is present in the v2 set to show that an unencrypted frame is unaffected by the v2 extension.",
   "transport": "serial",
   "frame": {
     "type": "CONTROL",

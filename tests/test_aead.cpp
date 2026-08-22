@@ -350,7 +350,7 @@ void test_dispatch_rejects_reserved_cipher_id() {
 // A fragmented message is sealed once, before fragmenting, and opened once,
 // after reassembly -- but the header the receiver has in hand came off one
 // fragment, with that fragment's FRAGMENTED bit, index and count. The AAD is
-// the logical message's header (BTP_V1.md section 8.3), so none of those three
+// the logical message's header (docs/encryption.md section 5), so none of those three
 // fields may reach it: if they did, every fragmented message would fail to
 // authenticate, and a gateway re-fragmenting between transports with different
 // payload ceilings would break the tag it cannot recompute.
@@ -396,7 +396,8 @@ void test_aad_ignores_fragmentation_fields() {
                          sealed_logical, recovered) == btp::AeadError::TagMismatch);
 }
 
-// The end-to-end claim behind the AAD canonicalization of section 8.3: the tag
+// The end-to-end claim behind the AAD canonicalization
+// (docs/encryption.md section 5): the tag
 // is computed once over the logical message, so a message sealed whole, cut
 // into transport-sized fragments and reassembled on the far side still opens.
 // Nothing fragmentation touches -- per-fragment size, index, count, per-frame

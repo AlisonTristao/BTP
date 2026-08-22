@@ -2,7 +2,7 @@
 """Generate or verify the canonical BTP v2 conformance vectors.
 
 This is a sibling of tools/test_vectors.py, not a wrapper around it: BTP v2
-adds the ENCRYPTED flag and the version-2 octet (BTP_V1.md section 8), and
+adds the ENCRYPTED flag and the version-2 octet (docs/encryption.md), and
 this script's decode_error() is an independent reimplementation of the
 current btp::decode() rules for that extension, exactly as tools/test_vectors.py
 independently reimplements the v1 rules. Keeping the two scripts separate
@@ -32,7 +32,7 @@ V1_VERSION = 1
 V2_VERSION = 2
 FLAG_FRAGMENTED = 0x0001
 FLAG_ENCRYPTED = 0x0002
-# CIPHER_ID sub-field, bits 2-3 of flags (BTP_V1.md section 5 / section 8.1):
+# CIPHER_ID sub-field, bits 2-3 of flags (docs/frame.md section 3 and docs/encryption.md section 3):
 # 0 == AES-128-GCM (default), 1 == ChaCha20-Poly1305, 2/3 reserved.
 FLAG_CIPHER_ID_MASK = 0x000C
 FLAG_CIPHER_ID_SHIFT = 2
@@ -152,7 +152,7 @@ def decode_error(data, transport):
     source_id, boot_id = struct.unpack_from("<II", data, 12)
     fragment_index, fragment_count = data[34], data[35]
 
-    # BTP_V1.md section 8, section 3: ENCRYPTED marked MUST imply version 2.
+    # docs/frame.md section 2.1: ENCRYPTED marked MUST imply version 2.
     # No inverse requirement: version 2 with ENCRYPTED clear is valid.
     if (flags & FLAG_ENCRYPTED) and version != V2_VERSION:
         return "EncryptedVersionMismatch"
@@ -162,7 +162,7 @@ def decode_error(data, transport):
     if flags & ~KNOWN_FLAGS_MASK:
         return "InvalidFlags"
 
-    # BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in
+    # docs/encryption.md section 3: with ENCRYPTED clear there is no cipher "in
     # use", so CIPHER_ID must be 0; with ENCRYPTED set, CIPHER_ID must be 0
     # or 1 (the only assigned values) -- 2 and 3 are reserved and rejected,
     # the same principle already applied to reserved flag bits above.
@@ -173,7 +173,7 @@ def decode_error(data, transport):
     if encrypted and raw_cipher_id > 1:
         return "InvalidCipherId"
 
-    # Section 8.7: a 16-octet tag over the usb_hid payload ceiling of 22
+    # docs/encryption.md section 9: a 16-octet tag over the usb_hid payload ceiling of 22
     # octets is 73% overhead, so ENCRYPTED is refused on that profile
     # outright. btp::decode() enforces this; so must the reference decoder.
     if encrypted and transport == "usb_hid":

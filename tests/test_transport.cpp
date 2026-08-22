@@ -261,7 +261,7 @@ void test_fragmenter() {
 void test_usb_hid_transport() {
     // The whole BTP frame (header + payload + CRC) must fit one 64-byte HID
     // report once the mandatory Report ID octet is set aside -- see
-    // docs/TRANSPORT_USB_HID.md.
+    // docs/fragmentation-and-transports.md section 3.3.
     std::vector<std::uint8_t> maximum_payload(btp::kUsbHidMaxPayloadSize);
     for (std::size_t index = 0U; index < maximum_payload.size(); ++index) {
         maximum_payload[index] = static_cast<std::uint8_t>(index);

@@ -1,10 +1,14 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_usb_hid_payload_size",
-  "description": "payload_size declara 23 octetos, um a mais que o limite do perfil usb_hid (22, TRANSPORT_USB_HID.md).",
+  "description": "payload_size declares 23 octets, one over the usb_hid profile ceiling of 22 (docs/fragmentation-and-transports.md section 3.3).",
   "base": "usb_hid_telemetry",
   "mutations": [
-    {"operation": "set_u16_le", "offset": 10, "value": 23}
+    {
+      "operation": "set_u16_le",
+      "offset": 10,
+      "value": 23
+    }
   ],
   "expected_error": "PayloadTooLarge"
 }

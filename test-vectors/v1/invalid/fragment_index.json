@@ -1,10 +1,15 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_fragment_index",
-  "description": "fragment_index é igual a fragment_count e portanto está fora do intervalo.",
+  "description": "fragment_index equals fragment_count and is therefore out of range.",
   "base": "fragment_source_a_1",
   "mutations": [
-    {"operation": "set_u8", "offset": 34, "value": 2, "recompute_crc": true}
+    {
+      "operation": "set_u8",
+      "offset": 34,
+      "value": 2,
+      "recompute_crc": true
+    }
   ],
   "expected_error": "InvalidFragmentation"
 }

@@ -1,10 +1,14 @@
 {
   "format": "btp-test-vector-v1",
   "id": "invalid_header_size",
-  "description": "header_size declara 35 em vez dos 36 octetos obrigatórios do BTP v1.",
+  "description": "header_size declares 35 instead of the required 36 octets.",
   "base": "hello",
   "mutations": [
-    {"operation": "set_u16_le", "offset": 8, "value": 35}
+    {
+      "operation": "set_u16_le",
+      "offset": 8,
+      "value": 35
+    }
   ],
   "expected_error": "InvalidHeaderSize"
 }

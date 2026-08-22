@@ -1,82 +1,65 @@
-# BTP: protocolo binário de telemetria e controle
+# BTP — Binary Telemetry Protocol
 
-O BTP transporta telemetria, logs, comandos e terminal entre um produtor
-embarcado e um consumidor, atravessando enlaces com características opostas:
-rádio de banda baixa, datagrama curto e perda alta, e barramento local de banda
-maior, orientado a byte-stream. Cada mensagem carrega a identidade e o instante
-criados na origem, e nenhum intermediário os reescreve.
+BTP moves telemetry, logs, commands and terminal traffic between an embedded
+producer and a consumer, across links with opposite characteristics: a
+low-bandwidth radio with short datagrams and high loss, and a local bus with
+more bandwidth and a byte-stream shape. Every message carries an identity and
+an instant created at the source, and no intermediary rewrites either.
 
-Este repositório é a fonte canônica de três coisas ao mesmo tempo: a
-especificação do wire format, a biblioteca C++ que a implementa e os vetores
-binários que provam que uma implementação está correta. Este livro é a leitura
-sequencial desse conjunto — do modelo de papéis até o octeto no enlace.
+This repository is three things at once — the wire specification, the C++11
+library that implements it, and the binary vectors that prove an implementation
+is correct. They ship as one version.
 
-## Estado atual
+## Current state
 
-| Componente | Estado |
+| Component | State |
 | --- | --- |
-| Wire `version == 0x01` | Especificado, implementado e coberto por vetores em `test-vectors/v1/`. |
-| Wire `version == 0x02` (payload AEAD) | Especificado em [§8 do frame no wire](BTP_V1.md#8-criptografia-aead-do-payload) e implementado na biblioteca (`btp::aead`, duas cifras), com vetores em `test-vectors/v2/`. |
-| Última release publicada | `v1.1.0-beta`. Nenhuma tag do wire `0x02` foi publicada; a versão do artefato vive em [`library.json`](../library.json). |
-| Branch `1.x` | Linha de manutenção do wire `0x01`, cortada antes de a `main` avançar para o wire `0x02`. |
-| [ADR 0012](decisions/0012-criptografia-aead-payload.md) (criptografia) | `Proposta` — vira `Aceita` quando implementações reais chamarem a cifra, não só a biblioteca. |
+| Wire `version == 0x01` | Specified, implemented, covered by `test-vectors/v1/`. |
+| Wire `version == 0x02` (AEAD payload) | Specified, implemented in `btp::aead` with two ciphers, covered by `test-vectors/v2/`. |
+| Library | `2.0.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
+| Latest published tag | `v1.1.0-beta`. No wire `0x02` tag has been published yet. |
+| Branch `1.x` | Maintenance line for wire `0x01`, cut before `main` moved to wire `0x02`. |
 
-As quatro formas de se referir a uma versão — wire, release, branch e biblioteca
-— são coisas diferentes e não se misturam. A notação canônica de cada uma está em
-[Versionamento](VERSIONING.md).
+Wire version, release tag, branch and library version are four different things
+and do not mix. [Versioning](library.md#10-versioning) says how to refer to each.
 
-## Como ler
+## Where to start
 
-Quatro caminhos, dependendo do que você veio fazer:
+**Deciding whether BTP fits your problem** — read
+[Why BTP exists](why-btp.md). It is the only chapter that stands on its own,
+and it answers what the design buys, what it costs, and where it does not
+belong.
 
-**Vim avaliar se o BTP serve para o meu caso** — leia
-[Vantagens, limites e aplicabilidade](TRADEOFFS.md). É o único capítulo que pode
-ser lido isolado, e responde o que os capítulos normativos não respondem: o que
-o desenho compra, o que cobra, e onde ele não cabe.
+**Integrating BTP into a project** — read [The model](model.md), then
+[The datagram](frame.md), then [Using the library](library.md). Come back for
+the payload chapters when you need a specific channel.
 
-**Vou integrar o BTP em um projeto** — comece por
-[O protocolo: modelo e garantias](ARCHITECTURE.md), siga para
-[Do sensor à tela](WALKTHROUGH.md), leia o [Codec portátil](CODEC.md) e o
-capítulo do transporte que você vai usar. Só volte à especificação normativa
-quando precisar do layout exato de um campo.
+**Reimplementing BTP on another platform** — read [The datagram](frame.md) and
+[Getting it across the link](fragmentation-and-transports.md) in full, then the
+payload chapters for the channels you need, then
+[the conformance vectors](library.md#9-conformance-vectors). Your implementation
+is not finished when you believe you understood the prose; it is finished when
+it produces and consumes the same octets as the vectors.
 
-**Vou implementar o protocolo em outra plataforma** (outra linguagem, outro
-chip) — leia [Convenções e glossário](CONVENTIONS.md), depois
-[O frame no wire](BTP_V1.md) inteiro, os payloads lógicos de
-[Telemetria](TELEMETRY.md) e [Comandos](COMMANDS_AND_ACTIONS.md), o perfil de
-transporte aplicável e, obrigatoriamente,
-[Vetores de conformidade](CONFORMANCE.md): sua implementação não está pronta
-antes de produzir e consumir os mesmos octetos dos vetores.
+## The chapters
 
-**Vim entender por que uma decisão é assim** — vá direto ao
-[registro de decisões](decisions/README.md). Cada ADR guarda contexto,
-alternativas rejeitadas e consequências; os capítulos de especificação descrevem
-o que vale hoje, os ADRs descrevem por que passou a valer.
-
-## As seis partes
-
-| Parte | O que cobre |
+| Chapter | What it covers |
 | --- | --- |
-| I — Panorama | O modelo de papéis e as garantias por canal; o que o desenho compra e cobra; o caminho completo de uma amostra; o vocabulário usado no resto do livro. |
-| II — O contrato no wire | O frame octeto a octeto, a API do codec e o que COBS, fragmentação e reassembly fazem. |
-| III — Canais lógicos | O payload de cada canal: amostras e schemas de telemetria; comandos, manifesto, sessão e terminal. |
-| IV — Perfis de transporte | O que muda entre Serial, ESP-NOW e USB HID — limites, enquadramento e posse do enlace. |
-| V — Criptografia | O modelo de segurança do payload cifrado, as decisões por trás dele e a API `btp::aead`. |
-| VI — Processo e garantias | Os vetores canônicos, a política de versão conjunta e as regras para mudar o wire. |
+| [Why BTP exists](why-btp.md) | The problem, what the design buys, what it costs, where it fits. |
+| [The model](model.md) | Roles, the five logical channels, identity, time, delivery. |
+| [The datagram](frame.md) | The 36-octet header octet by octet, flags, CRC, validation. |
+| [Getting it across the link](fragmentation-and-transports.md) | Fragmentation, reassembly, and the three transport profiles. |
+| [Encryption](encryption.md) | Wire v2 AEAD: ciphers, nonce, the canonicalized AAD, and the limits. |
+| [Telemetry payloads](telemetry.md) | Topics, schemas, encodings, and how a client binds a field. |
+| [Commands and discovery](commands.md) | Requests, results, deduplication, the manifest, subscriptions, status. |
+| [Session and terminal](session-and-terminal.md) | `HELLO`, session lifetime, the opaque terminal, priority under load. |
+| [Using the library](library.md) | The API, its guarantees, build, vectors, versioning, known limits. |
 
-O apêndice traz os ADRs.
+## Scope
 
-## Escopo
+This book covers what two implementations must agree on: the wire format, the
+shared library and the conformance vectors.
 
-O livro cobre o que duas implementações precisam concordar entre si: o wire
-format, a biblioteca compartilhada e os vetores de conformidade.
-
-Fora de escopo, por decisão: a implementação interna de qualquer consumidor,
-tutorial de toolchain, e o provisionamento de identidade e de chave — que é
-requisito operacional real, mas fica fora do wire (ver
-[Criptografia](CRYPTO.md)).
-
-Quando um capítulo de leitura e a especificação normativa divergirem, a
-especificação vence: [O frame no wire](BTP_V1.md) é a fonte canônica, e
-[Convenções e glossário](CONVENTIONS.md) explica como as palavras
-**MUST**/**SHOULD** devem ser lidas nela.
+Deliberately out of scope: the internals of any particular consumer, toolchain
+tutorials, and the provisioning of identity and keys — a real operational
+requirement that stays off the wire, as [Encryption](encryption.md) explains.

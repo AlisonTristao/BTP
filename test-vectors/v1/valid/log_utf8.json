@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "log_utf8",
-  "description": "Evento LOG com texto UTF-8, sem terminador implícito.",
+  "description": "A LOG event carrying UTF-8 text, with no implicit terminator.",
   "transport": "esp_now",
   "frame": {
     "type": "LOG",

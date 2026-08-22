@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "command_request",
-  "description": "COMMAND_REQUEST com parâmetros binários e todos os comprimentos explícitos.",
+  "description": "COMMAND_REQUEST with binary parameters and every length explicit.",
   "transport": "serial",
   "frame": {
     "type": "COMMAND",

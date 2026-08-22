@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "hello",
-  "description": "HELLO de um cliente desktop que oferece apenas o envelope BTP v1.",
+  "description": "HELLO from a desktop client offering only the wire v1 envelope.",
   "transport": "serial",
   "frame": {
     "type": "CONTROL",
@@ -18,7 +18,9 @@
   "payload_model": {
     "name": "HELLO",
     "role": "DESKTOP",
-    "versions": [1],
+    "versions": [
+      1
+    ],
     "max_logical_payload": 53550,
     "max_inflight_reassemblies": 4,
     "max_subscriptions": 32,

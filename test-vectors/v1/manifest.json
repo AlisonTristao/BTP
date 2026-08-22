@@ -1,6 +1,6 @@
 {
   "format": "btp-test-vector-manifest-v1",
-  "contract": "BTP v1 / btp 1.1.0-beta",
+  "contract": "BTP wire v1 / btp::codec 2.0.0",
   "valid_vectors": [
     "hello",
     "log_utf8",
@@ -32,7 +32,10 @@
         "fragment_source_a_0",
         "fragment_source_b_1"
       ],
-      "expected_completed_order": ["fragment_source_a", "fragment_source_b"],
+      "expected_completed_order": [
+        "fragment_source_a",
+        "fragment_source_b"
+      ],
       "expected_logical_payloads": {
         "fragment_source_a": "10 11 12 13 14 15",
         "fragment_source_b": "a0 a1 a2 a3 a4 a5 a6 a7"

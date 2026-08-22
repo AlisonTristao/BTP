@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "fragment_source_a_0",
-  "description": "Primeiro fragmento lógico da fonte A; chega depois do índice 1 no cenário intercalado.",
+  "description": "First fragment of a logical message from source A; in the interleaved scenario it arrives after index 1.",
   "transport": "esp_now",
   "frame": {
     "type": "TELEMETRY",

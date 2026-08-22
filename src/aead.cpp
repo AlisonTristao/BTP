@@ -8,9 +8,10 @@ namespace btp {
 namespace {
 
 // The AAD is the header of the LOGICAL message, never of one fragment
-// (BTP_V1.md section 8.3). The tag is computed once, before fragmenting, so
-// the fragmentation fields cannot be part of what it authenticates: they
-// differ per fragment, and the sealing side has no single value to put there.
+// (docs/encryption.md section 5). The tag is computed once, before
+// fragmenting, so the fragmentation fields cannot be part of what it
+// authenticates: they differ per fragment, and the sealing side has no single
+// value to put there.
 // Canonicalizing them here -- FRAGMENTED cleared, index 0, count 1 -- makes
 // both sides agree by construction instead of by convention, so aead_open()
 // accepts the header decoded from any fragment of the message.
@@ -43,9 +44,9 @@ AeadError aead_seal_aes_gcm(const AeadKey& key, const Header& header,
     }
 
     // The AAD records the WIRE payload size of the logical message --
-    // ciphertext plus the 16-octet tag (BTP_V1.md section 8.3/8.4) -- not the
-    // plaintext size received here. Guard the sum: payload_size is already a
-    // uint16, so a caller near the top of the range would otherwise wrap it
+    // ciphertext plus the 16-octet tag (docs/encryption.md sections 2 and 5),
+    // not the plaintext size received here. Guard the sum: payload_size is
+    // already a uint16, so a caller near the top of the range would wrap it
     // silently and authenticate a size that no receiver can reproduce.
     if (payload_size > static_cast<std::uint16_t>(0xFFFFU - 16U)) {
         return AeadError::InvalidArgument;
@@ -131,9 +132,9 @@ AeadError aead_seal_chacha20poly1305(const AeadKey& key, const Header& header,
     }
 
     // The AAD records the WIRE payload size of the logical message --
-    // ciphertext plus the 16-octet tag (BTP_V1.md section 8.3/8.4) -- not the
-    // plaintext size received here. Guard the sum: payload_size is already a
-    // uint16, so a caller near the top of the range would otherwise wrap it
+    // ciphertext plus the 16-octet tag (docs/encryption.md sections 2 and 5),
+    // not the plaintext size received here. Guard the sum: payload_size is
+    // already a uint16, so a caller near the top of the range would wrap it
     // silently and authenticate a size that no receiver can reproduce.
     if (payload_size > static_cast<std::uint16_t>(0xFFFFU - 16U)) {
         return AeadError::InvalidArgument;

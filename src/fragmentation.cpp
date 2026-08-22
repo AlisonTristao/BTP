@@ -24,7 +24,7 @@ std::size_t transport_payload_limit(TransportProfile transport) noexcept {
 // the logical flags and only ORs FRAGMENTED in. So this has to be a mask test.
 // An exact `flags == kFlagFragmented` rejects every fragment of a wire v2
 // message, making encrypted-and-fragmented unreceivable and defeating the AAD
-// canonicalization of BTP_V1.md section 8.3, whose entire purpose is to let a
+// canonicalization of docs/encryption.md section 5, whose entire purpose is to let a
 // fragmented encrypted message reassemble under one message-level tag.
 bool valid_fragment_flags(std::uint16_t flags) noexcept {
     if ((flags & kFlagFragmented) == 0U) {

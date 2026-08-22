@@ -1,7 +1,7 @@
 {
   "format": "btp-test-vector-v1",
   "id": "fragment_source_b_1",
-  "description": "Segundo fragmento lógico da fonte B no cenário intercalado.",
+  "description": "Second fragment of a logical message from source B in the interleaved scenario.",
   "transport": "esp_now",
   "frame": {
     "type": "TERMINAL",

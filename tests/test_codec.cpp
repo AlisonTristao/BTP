@@ -467,7 +467,7 @@ void test_cipher_id_extraction() {
 }
 
 void test_encoder_rejects_cipher_id_without_encrypted() {
-    // BTP_V1.md section 8.1: with ENCRYPTED clear there is no cipher "in
+    // docs/encryption.md section 3: with ENCRYPTED clear there is no cipher "in
     // use", so CIPHER_ID MUST be 0; a nonzero value MUST be rejected even
     // though 1 (ChaCha20-Poly1305) is otherwise an assigned value.
     const std::uint8_t payload[] = {1U, 2U, 3U};
@@ -485,7 +485,7 @@ void test_encoder_rejects_cipher_id_without_encrypted() {
 }
 
 void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
-    // BTP_V1.md section 8.1: with ENCRYPTED marked, CIPHER_ID MUST be 0 or 1
+    // docs/encryption.md section 3: with ENCRYPTED marked, CIPHER_ID MUST be 0 or 1
     // -- the only assigned values; 2 and 3 are reserved for future ciphers
     // and MUST be rejected, the same principle already applied to reserved
     // flag bits.
@@ -514,7 +514,7 @@ void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
     }
 }
 
-// Section 8.7 forbids ENCRYPTED on UsbHid: a 16-octet tag over a 22-octet
+// docs/encryption.md section 9 forbids ENCRYPTED on UsbHid: a 16-octet tag over a 22-octet
 // payload ceiling is 73% overhead. The rule used to live only in prose, so an
 // encoder could emit a frame no conforming decoder was supposed to accept.
 void test_encrypted_is_rejected_on_usb_hid() {
