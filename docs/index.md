@@ -21,7 +21,8 @@ is correct. They ship as one version.
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 
 Wire version, release tag, branch and library version are four different things
-and do not mix. [Versioning](library.md#10-versioning) says how to refer to each.
+and do not mix. [Versioning and branches](library.md#10-versioning-and-branches) says how to
+refer to each, and which branch holds which.
 
 ## Where to start
 

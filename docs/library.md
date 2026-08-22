@@ -273,33 +273,43 @@ error, round-trip fragmentation, and reassemble the fragmented AEAD vectors.
 **Changing a vector is changing the contract.** It is not a test edit — it is a
 wire change, with the version process in section 10 attached to it.
 
-## 10. Versioning
+## 10. Versioning and branches
 
-Four things get called "the version" and they are different:
+Specification, library and vectors ship as **one SemVer line**. MAJOR is an
+incompatible wire change, MINOR is a backward-compatible addition, PATCH is a
+correction that does not change the octets.
+
+### The branch layout
+
+`main` always carries the newest major. When a new one lands, the previous is
+cut to an `N.x` branch and maintained there:
+
+| Branch | Wire | Line |
+| --- | --- | --- |
+| `main` | `0x02` | Current development, library `2.0.0` |
+| `1.x` | `0x01` | Maintenance of the wire v1 line, released as `v1.1.0-beta` |
+
+If a wire v3 ever arrives, a `2.x` branch is cut from the `main` of that
+moment carrying `2.0`, and `main` moves on to `3.0`. A branch is named after
+the major it holds, never after the one still coming.
+
+### Four things called "the version"
 
 | Concept | Notation | What it means |
 | --- | --- | --- |
 | Wire version | `wire 0x01`, `wire 0x02` | The octet at offset 4 of the header |
 | Release | `v1.1.0-beta` | The git tag covering spec, library and vectors together |
-| Branch | `1.x` | Holds the previous major; `main` always holds the newest |
+| Branch | `1.x` | Holds the previous major; `main` holds the newest |
 | Library | `2.0.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
 
 Never write "BTP v1" unqualified — it is ambiguous between at least three of
 those.
 
-`main` always carries the newest major. When a new major lands, the previous
-one is cut to an `N.x` branch and maintained there — `1.x` holds the wire v1
-line today, and a `2.x` branch would be cut from the current `main` if a wire
-v3 ever arrived.
-
 A pre-release suffix belongs to the line that is still settling, not to `main`:
 the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.0.0`.
-
-
-Specification, library and vectors ship as **one SemVer line**. MAJOR is an
-incompatible wire change, MINOR is a backward-compatible addition, PATCH is a
-correction that does not change the octets. A `-beta` suffix applies while the
-contract is still moving.
+Only `library.json` can spell a suffix at all — CMake's `project(VERSION)` is
+numeric-only and `kLibraryVersion*` are three `uint8`, so neither could carry
+one even if `main` wanted it.
 
 A consumer pins an immutable version or revision and does not keep its own copy
 of the spec, the codec or the vectors. Because there is no legacy mode, an
