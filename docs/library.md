@@ -281,11 +281,20 @@ Four things get called "the version" and they are different:
 | --- | --- | --- |
 | Wire version | `wire 0x01`, `wire 0x02` | The octet at offset 4 of the header |
 | Release | `v1.1.0-beta` | The git tag covering spec, library and vectors together |
-| Branch | `1.x` | A maintenance line, cut only at a MAJOR change |
+| Branch | `1.x` | Holds the previous major; `main` always holds the newest |
 | Library | `2.0.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
 
 Never write "BTP v1" unqualified — it is ambiguous between at least three of
 those.
+
+`main` always carries the newest major. When a new major lands, the previous
+one is cut to an `N.x` branch and maintained there — `1.x` holds the wire v1
+line today, and a `2.x` branch would be cut from the current `main` if a wire
+v3 ever arrived.
+
+A pre-release suffix belongs to the line that is still settling, not to `main`:
+the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.0.0`.
+
 
 Specification, library and vectors ship as **one SemVer line**. MAJOR is an
 incompatible wire change, MINOR is a backward-compatible addition, PATCH is a
