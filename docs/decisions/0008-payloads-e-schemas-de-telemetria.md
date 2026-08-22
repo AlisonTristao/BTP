@@ -2,7 +2,7 @@
 
 - Estado: Aceita
 - Data: 2026-08-09
-- Impacto SemVer: baseline inicial destinada a `v1.0.0`; não altera release publicada
+- Impacto SemVer: baseline do wire v1, anterior à primeira release publicada (`v1.1.0-beta`)
 
 ## Contexto
 

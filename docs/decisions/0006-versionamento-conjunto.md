@@ -13,8 +13,8 @@ que implementam.
 
 O repositório usa uma linha de releases SemVer `vMAJOR.MINOR.PATCH` para a
 especificação, a biblioteca compartilhada e os vetores correspondentes. O wire
-format inicial congelado será `v1.0.0`; antes disso, o trabalho usa versões
-`0.y.z`.
+format inicial congelado é o wire v1; enquanto o contrato estiver em elaboração,
+as releases carregam sufixo `-beta`.
 
 Mudança incompatível incrementa `MAJOR`; extensão compatível incrementa
 `MINOR`; correção sem mudança de bytes ou semântica incrementa `PATCH`. A

@@ -77,7 +77,7 @@ As regras normativas completas estão em
 
 ## Impacto de versão
 
-Esta decisão completa o contrato ainda não publicado do BTP v1 e integrará a
-primeira release `v1.0.0`; não há release anterior a incrementar. Depois da
-publicação, mudança incompatível no framing, nos limites ou nas garantias de
-entrega exige incremento `MAJOR`.
+Esta decisão completa o contrato do wire v1 e integrou a primeira release da
+linha `1`; não havia release anterior a incrementar. Depois da publicação,
+mudança incompatível no framing, nos limites ou nas garantias de entrega exige
+incremento `MAJOR`.

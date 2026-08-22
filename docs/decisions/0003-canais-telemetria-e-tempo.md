@@ -14,14 +14,14 @@ impediria outros consumidores e layouts.
 - `LOG`, `TELEMETRY`, `COMMAND` e `TERMINAL` são canais lógicos distintos.
 - O ID de telemetria identifica um tópico, nunca um gráfico.
 - Uma visualização seleciona dados por `source + topic + field`.
-- O timestamp é criado na origem e nunca substituído pelo dongle.
-- `Logger` é destinado a eventos e diagnósticos; amostras frequentes são
-  publicadas por um `TelemetryPublisher` separado.
+- O timestamp é criado na origem e nunca substituído por um gateway.
+- O canal de log é destinado a eventos e diagnósticos; amostras frequentes
+  são publicadas pelo canal de telemetria, com schema próprio.
 
 ## Consequências
 
 - Logs não são analisados como fonte de gráfico.
-- O TraceView pode criar várias visualizações do mesmo campo sem alterar o
+- Um consumidor pode criar várias visualizações do mesmo campo sem alterar o
   produtor.
 - Roteamento e retransmissão preservam identidade e tempo da amostra.
 - Schema, representação exata da identidade e unidade do timestamp ainda

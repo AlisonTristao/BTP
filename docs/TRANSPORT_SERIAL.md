@@ -1,4 +1,4 @@
-# BTP v1 sobre serial
+# Perfil de transporte serial (COBS)
 
 ## 1. Escopo e termos normativos
 
@@ -52,7 +52,7 @@ no primeiro octeto do payload; CR e LF permanecem dados comuns.
 
 ## 3. Limites de memória
 
-Os limites do BTP v1 são:
+Os limites do BTP são:
 
 | Item | Limite |
 | --- | ---: |
@@ -102,22 +102,22 @@ e os bytes codificados seguintes formam um novo candidato.
 
 ## 5. Entrada no modo protocolado
 
-A porta inicia em modo console. Nesse modo, o dongle reconhece como controle
-somente uma linha ASCII completa com 16 dígitos hexadecimais:
+A porta inicia em modo console. Nesse modo, o dispositivo reconhece como
+controle somente uma linha ASCII completa com 16 dígitos hexadecimais:
 
 ```text
 BTP/1 ENTER NNNNNNNNNNNNNNNN\r\n
 ```
 
-Ao aceitá-la, o dongle termina toda saída de console já iniciada e responde,
-repetindo o nonce em minúsculas:
+Ao aceitá-la, o dispositivo termina toda saída de console já iniciada e
+responde, repetindo o nonce em minúsculas:
 
 ```text
 BTP/1 READY nnnnnnnnnnnnnnnn\r\n
 ```
 
-O dongle entra no modo protocolado somente depois de escrever o `\n` final de
-`READY`. Nesse instante ele limpa o estado do decoder COBS. O cliente **MUST**
+O dispositivo entra no modo protocolado somente depois de escrever o `\n` final
+de `READY`. Nesse instante ele limpa o estado do decoder COBS. O cliente **MUST**
 esperar a linha `READY` completa antes de transmitir o delimitador inicial do
 primeiro frame. Bytes recebidos entre a aceitação de `ENTER` e o fim de
 `READY` **MAY** ser descartados e **MUST NOT** ser interpretados como BTP.
@@ -134,7 +134,7 @@ ausência do `HELLO` no prazo inicial ou quando nenhum frame BTP válido é
 recebido durante o `session_timeout_ms` negociado. Bytes recebidos, frames
 COBS inválidos e frames BTP inválidos não renovam o watchdog.
 
-Ao encerrar, o dongle **MUST**:
+Ao encerrar, o dispositivo **MUST**:
 
 1. parar de aceitar novo trabalho protocolado;
 2. respeitar a drenagem limitada definida para `SESSION_CLOSE`;
@@ -173,7 +173,7 @@ direto à porta física.
 
 ## 8. Baud configurada e capacidade real
 
-O BTP v1 não fixa uma baud universal. A baud é necessária antes que qualquer
+O BTP não fixa uma baud universal. A baud é necessária antes que qualquer
 handshake possa ser decodificado e, por isso, é configuração do enlace fora
 do wire BTP. Em USB CDC, a line coding solicitada pelo host **MAY** ser apenas
 informativa; isso não transforma a taxa nominal em capacidade garantida.
@@ -186,7 +186,7 @@ artefato. Números copiados em documentação não são fonte de configuração.
 O diagnóstico do firmware **MUST** anunciar ao menos:
 
 - `serial.configured_baud`;
-- `serial.max_decoded_frame` (4096 no BTP v1);
+- `serial.max_decoded_frame` (4096 no wire v1);
 - `serial.rx_encoded_capacity` (ao menos 4113);
 - controle de fluxo habilitado, se houver.
 

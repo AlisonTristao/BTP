@@ -19,7 +19,7 @@ varredura do texto e não dependa de interpretação de tradução.
 | **SHOULD** / **SHOULD NOT** | Recomendação forte. Desviar exige razão concreta e documentada; não torna a implementação não conforme. |
 | **MAY** | Permissão. As duas escolhas são conformes, e nenhum peer pode assumir uma delas. |
 
-Uma frase escrita em tom descritivo ("o dongle roteia", "o payload cresce 16
+Uma frase escrita em tom descritivo ("o gateway roteia", "o payload cresce 16
 octetos") não é requisito: descreve consequência do que as regras já exigem
 em outro lugar.
 
@@ -156,9 +156,10 @@ Schema
     anunciados fora da amostra, nunca repetidos em cada mensagem.
 
 Gateway
-:   O dongle, que roteia entre ESP-NOW e USB. Valida envelopes, encaminha
-    canais e é dono do catálogo de ações — mas não converte payload binário
-    em texto nem redefine identidade, tempo ou schema.
+:   Papel que encaminha mensagens entre dois enlaces. Valida envelopes,
+    encaminha canais e reenquadra entre perfis — mas não converte payload
+    binário em texto nem redefine identidade, tempo ou schema. Um caminho BTP
+    pode não ter gateway nenhum, ou ter mais de um.
 
 Perfil de transporte
 :   `EspNow`, `Serial` ou `UsbHid`. Muda o framing do enlace e os limites de

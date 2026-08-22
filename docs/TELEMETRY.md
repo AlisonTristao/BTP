@@ -1,4 +1,4 @@
-# BTP v1: telemetria, arrays e schemas
+# Telemetria, arrays e schemas
 
 ## 1. Convenções normativas
 
@@ -8,7 +8,7 @@ usados neste documento — estão em [`CONVENTIONS.md`](CONVENTIONS.md) e valem
 integralmente aqui.
 
 Este documento especifica o payload lógico de mensagens cujo `type` no
-envelope BTP v1 é `TELEMETRY`. Envelope, CRC, limites físicos e identificação
+envelope BTP é `TELEMETRY`. Envelope, CRC, limites físicos e identificação
 de fragmentos continuam regidos por [`BTP_V1.md`](BTP_V1.md).
 
 ## 2. Identidade de tópico e schema
@@ -96,7 +96,7 @@ NOT** ser aplicados a `bool` e são opcionais para enums; quando usados em enum,
 não alteram a seleção do rótulo, que sempre usa o valor inteiro bruto.
 
 Um campo escalar usa `element_count = 1`. Em um array, `nullable` se refere ao
-campo inteiro, não a elementos individuais. Um schema v1 **MUST NOT** declarar
+campo inteiro, não a elementos individuais. Um schema de wire v1 **MUST NOT** declarar
 elementos nullable dentro de um array.
 
 Alterações de tipo, ordem, quantidade, unidade, escala, offset, nulabilidade,
@@ -156,7 +156,7 @@ as políticas da seção 6.
 O corpo contém exatamente um registro UTF-8, sem cabeçalho e sem terminador de
 linha. Campos seguem a ordem do schema, são separados por vírgula (`0x2C`) e
 podem ser cercados por aspas duplas; uma aspa dentro de campo com aspas é
-duplicada. CR ou LF fora de aspas são inválidos. `CSV_UTF8` v1 admite somente
+duplicada. CR ou LF fora de aspas são inválidos. `CSV_UTF8` no wire v1 admite somente
 campos escalares. Inteiros e enums usam dígitos decimais, com sinal `-`
 somente para tipos signed; floats usam a gramática decimal de números JSON; e
 bool usa `true` ou `false`. O literal sem aspas `null` representa campo
@@ -251,7 +251,7 @@ little-endian. Um `bool` diferente de `0x00` e `0x01` é inválido.
 ### 6.1 Valores não finitos
 
 NaN positivo ou negativo, infinito positivo ou negativo e qualquer resultado
-não finito são inválidos em telemetria BTP v1. Um produtor **MUST NOT**
+não finito são inválidos em telemetria BTP. Um produtor **MUST NOT**
 emiti-los. Um receptor **MUST** rejeitar a amostra lógica que os contenha e
 reportar o motivo. Ausência de medição deve usar um campo nullable, não NaN.
 
@@ -415,11 +415,12 @@ Tabela de `quality`: `0=invalid`, `1=low`, `2=good`, `3=saturated`. Como
 seguida vêm `element_count:uint16_le`, os elementos de `reflectance`, o
 `centroid` somente quando presente e `quality`.
 
-### 9.4 Tópicos iniciais do firmware Bally
+### 9.4 Tópicos de exemplo usados pelos vetores canônicos
 
-O firmware `bally_OS` registra estaticamente estes schemas `PACKED_LE`
-versão 1. Os IDs são locais à fonte do robô, mas permanecem estáveis entre
-boots:
+Estes schemas `PACKED_LE` versão 1 são os que os
+[vetores de conformidade](CONFORMANCE.md) exercitam, e servem como exemplo de
+um produtor que registra tópicos estaticamente. Os IDs são locais à fonte, mas
+permanecem estáveis entre boots:
 
 | topic_id | name | order / field_id / campo | tipo | unidade |
 | ---: | --- | --- | --- | --- |

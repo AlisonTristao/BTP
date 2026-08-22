@@ -1,10 +1,10 @@
-# BTP v1 sobre ESP-NOW
+# Perfil de transporte ESP-NOW
 
 ## 1. Escopo e termos normativos
 
-Este documento define como frames BTP v1 atravessam o enlace ESP-NOW entre o
-robô e o dongle. O envelope, o CRC e a fragmentação continuam regidos por
-[`BTP_V1.md`](BTP_V1.md).
+Este documento define como frames BTP atravessam o enlace ESP-NOW entre um
+produtor e um gateway. O envelope, o CRC e a fragmentação continuam regidos
+por [`BTP_V1.md`](BTP_V1.md).
 
 As convenções normativas deste documento estão em
 [`CONVENTIONS.md`](CONVENTIONS.md), inclusive a distinção entre "aceito"
@@ -26,7 +26,7 @@ ocupa sozinho um datagrama. Um datagrama **MUST NOT** conter mais de um frame,
 um pedaço de frame, prefixo de tamanho, delimitador, estrutura C/C++ ou
 padding. Seu tamanho é exatamente `40 + payload_size`.
 
-O BTP v1 adota o limite comum realmente suportado pelos firmwares atuais:
+O BTP adota o limite comum realmente suportado pelos firmwares atuais:
 
 | Limite | Valor |
 | --- | ---: |
@@ -40,7 +40,7 @@ header BTP. A integração com ESP-IDF **SHOULD** verificar em compilação que
 o limite configurado não excede `ESP_NOW_MAX_DATA_LEN`.
 
 Versões de ESP-NOW capazes de datagramas maiores não aumentam implicitamente
-o limite do BTP v1. Usá-las exige uma extensão negociada ou nova versão do
+o limite do BTP. Usá-las exige uma extensão negociada ou nova versão do
 contrato que todos os peers do caminho suportem.
 
 O segundo vetor de `BTP_V1.md`, cujo payload é `00 0a 0d ff`, ocupa um

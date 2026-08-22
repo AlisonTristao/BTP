@@ -1,4 +1,4 @@
-# BTP v1: formato binário no wire
+# O frame no wire
 
 ## 1. Convenções normativas
 
@@ -20,7 +20,7 @@ reunidos em [`CONVENTIONS.md`](CONVENTIONS.md).
 
 ## 2. Composição do frame
 
-Um frame BTP v1 é a concatenação exata abaixo:
+Um frame wire v1 é a concatenação exata abaixo:
 
 ```text
 +----------------------+--------------------------+-------------+
@@ -41,7 +41,7 @@ sequência opaca e **MAY** conter qualquer octeto, incluindo `0x00`, `0x0A` e
 
 ## 3. Cabeçalho fixo
 
-O cabeçalho v1 tem exatamente 36 octetos:
+O cabeçalho do wire v1 tem exatamente 36 octetos:
 
 | Offset | Tamanho | Campo | Tipo no wire | Valor ou significado |
 | ---: | ---: | --- | --- | --- |
@@ -73,10 +73,10 @@ octeto  0                                                    35
         24              32       34 35 36
 ```
 
-Para `version == 1`, `header_size` **MUST** ser 36. Um encoder v1 **MUST**
-emitir esse valor e um decoder v1 **MUST** rejeitar qualquer outro valor. O
+Para `version == 1`, `header_size` **MUST** ser 36. Um encoder de wire v1 **MUST**
+emitir esse valor e um decoder de wire v1 **MUST** rejeitar qualquer outro valor. O
 campo existe para tornar uma futura mudança de layout detectável, não para
-permitir extensões silenciosas do cabeçalho v1.
+permitir extensões silenciosas do cabeçalho do wire v1.
 
 Um encoder que implemente a criptografia AEAD do payload (seção 8) **MUST**
 emitir `version == 0x02` em qualquer frame com `ENCRYPTED` marcado; **MAY**
@@ -114,10 +114,10 @@ Os formatos internos desses payloads são especificados pelos documentos dos
 respectivos canais; eles não alteram o envelope desta página. `object_id` **MAY**
 ser zero quando o formato do tipo declarar que não existe objeto associado.
 
-Um endpoint ou gateway v1 que receba um tipo reservado ou desconhecido
+Um endpoint ou gateway de wire v1 que receba um tipo reservado ou desconhecido
 **MUST** validar tamanho e CRC, depois rejeitar o frame. Ele **MUST NOT**
 reinterpretá-lo como outro tipo nem encaminhá-lo como se fosse conhecido. Um
-encoder v1 **MUST NOT** emitir um tipo não atribuído.
+encoder de wire v1 **MUST NOT** emitir um tipo não atribuído.
 
 ## 5. Flags e fragmentação
 
@@ -137,7 +137,7 @@ independentes — extraído de `flags` com a máscara `0x000C` e o deslocamento
 ambígua do tipo "duas cifras marcadas ao mesmo tempo"; a seção 8.1 define os
 valores atribuídos e as regras de consistência com `ENCRYPTED`.
 
-Um decoder v1 **MUST** rejeitar um frame com qualquer bit reservado igual a
+Um decoder de wire v1 **MUST** rejeitar um frame com qualquer bit reservado igual a
 um. Flags desconhecidas não são ignoradas, pois podem mudar a interpretação do
 frame.
 
@@ -203,7 +203,7 @@ ele **SHOULD** representar o instante de aquisição; para outros tipos, o
 instante em que a mensagem lógica foi criada. Todos os fragmentos **MUST**
 preservar o mesmo valor.
 
-Um gateway, incluindo o dongle, **MUST NOT** substituir `timestamp_us` pela
+Um gateway **MUST NOT** substituir `timestamp_us` pela
 hora de chegada, retransmissão ou encaminhamento. A correlação desse relógio
 monotônico com tempo civil, se necessária, pertence ao protocolo de sessão e
 não modifica o campo original.
@@ -427,7 +427,7 @@ futura desta especificação.
 
 ## 9. Limites normativos por transporte
 
-As constantes abaixo fazem parte do contrato v1:
+As constantes abaixo fazem parte do contrato do wire v1:
 
 | Constante | Valor |
 | --- | ---: |
@@ -467,7 +467,7 @@ exceder o limite do transporte pelo qual ele foi recebido.
 
 ## 10. Validação de um frame
 
-Sem ler além do buffer fornecido, um decoder v1 **MUST**:
+Sem ler além do buffer fornecido, um decoder de wire v1 **MUST**:
 
 1. exigir ao menos 40 octetos;
 2. comparar `magic` com `42 54 50 00`;

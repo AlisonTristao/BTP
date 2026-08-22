@@ -1,9 +1,9 @@
-# BTP v1 sobre USB HID
+# Perfil de transporte USB HID
 
 ## 1. Escopo e termos normativos
 
-Este documento define como frames BTP v1 atravessam uma interface USB HID
-vendor-defined entre o dongle e o cliente desktop. O envelope, o CRC e a
+Este documento define como frames BTP atravessam uma interface USB HID
+vendor-defined entre um dispositivo e o host. O envelope, o CRC e a
 fragmentação continuam regidos por [`BTP_V1.md`](BTP_V1.md).
 
 As convenções normativas deste documento estão em
@@ -47,7 +47,7 @@ relatório (mais o prefixo de tamanho) já é a unidade de framing, entregue com
 uma transferência de interrupt discreta pelo host USB. Um relatório **MUST
 NOT** conter mais de um frame nem um pedaço de frame.
 
-O BTP v1 adota o limite realmente suportado por um relatório HID Full-Speed
+O BTP adota o limite realmente suportado por um relatório HID Full-Speed
 com esse prefixo:
 
 | Limite | Valor |
@@ -101,8 +101,9 @@ Para cada relatório, a implementação distingue obrigatoriamente:
 4. timeout de `SendReport` sem ACK do host, ou erro de transporte reportado
    pela pilha USB: a entrega permanece não confirmada.
 
-Diferente de ESP-NOW, este enlace é ponto a ponto (um dongle, um host) e não
-tem conceito de peer/MAC: cada relatório vai para o único endpoint HID ativo.
+Diferente de ESP-NOW, este enlace é ponto a ponto (um dispositivo, um host) e
+não tem conceito de peer/MAC: cada relatório vai para o único endpoint HID
+ativo.
 Diferente da serial, não há conceito de baud nem de line coding -- a
 capacidade do enlace é fixa pela topologia do barramento USB, não configurada
 pelo firmware.

@@ -1,4 +1,4 @@
-# BTP v1: comandos, manifesto, sessão e terminal
+# Comandos, manifesto, sessão e terminal
 
 ## 1. Convenções e escopo
 
@@ -9,7 +9,7 @@ reservado **MUST** ser zero ao emitir e **MUST** causar rejeição quando
 recebido com outro valor.
 
 Este documento especifica os payloads lógicos dos tipos `COMMAND`, `CONTROL`
-e `TERMINAL` do envelope BTP v1. Envelope, CRC, identidade, sequência,
+e `TERMINAL` do envelope BTP. Envelope, CRC, identidade, sequência,
 fragmentação e limites físicos continuam regidos por
 [`BTP_V1.md`](BTP_V1.md). Os schemas referenciados pelo manifesto obedecem a
 [`TELEMETRY.md`](TELEMETRY.md).
@@ -111,7 +111,7 @@ de cliente **MUST** depender dos códigos.
 | `0x0002` | `TERMINAL_OUT` |
 | demais | Reservados |
 
-Um receptor v1 **MUST** rejeitar `object_id` reservado sem reinterpretá-lo.
+Um receptor de wire v1 **MUST** rejeitar `object_id` reservado sem reinterpretá-lo.
 
 ## 4. Comandos
 
@@ -125,7 +125,7 @@ O envelope identifica o solicitante. O payload é:
 | 4 | 4 | `target_boot_id` | `uint32_le` |
 | 8 | 2 | `action_id` | `uint16_le` |
 | 10 | 2 | `action_version` | `uint16_le` |
-| 12 | 2 | `flags` | `uint16_le`, zero no v1 |
+| 12 | 2 | `flags` | `uint16_le`, zero no wire v1 |
 | 14 | 2 | `reserved` | `uint16_le`, zero |
 | 16 | 4 | `parameter_size` | `uint32_le` |
 | 20 | variável | `parameters` | exatamente `parameter_size` octetos |
@@ -206,7 +206,7 @@ nova sequência cria deliberadamente outro comando.
 | ---: | ---: | --- | --- |
 | 0 | 1 | `role` | `uint8` |
 | 1 | 1 | `version_count` | `uint8` |
-| 2 | 2 | `flags` | `uint16_le`, zero no v1 |
+| 2 | 2 | `flags` | `uint16_le`, zero no wire v1 |
 | 4 | 4 | `max_logical_payload` | `uint32_le` |
 | 8 | 2 | `max_inflight_reassemblies` | `uint16_le` |
 | 10 | 2 | `max_subscriptions` | `uint16_le` |
@@ -217,7 +217,12 @@ nova sequência cria deliberadamente outro comando.
 | 40 | V | `versions` | `version_count` valores `uint8` crescentes |
 
 Papéis: `0x01=ROBOT`, `0x02=DONGLE`, `0x03=DESKTOP` e
-`0x04=DIAGNOSTIC_TOOL`; zero e `0x05..0xFF` são reservados. UUID é uma
+`0x04=DIAGNOSTIC_TOOL`; zero e `0x05..0xFF` são reservados. Esses nomes são
+identificadores no wire, fixados pelos vetores de conformidade, e são anteriores
+ao vocabulário de papéis de [`ARCHITECTURE.md`](ARCHITECTURE.md): `ROBOT`
+corresponde a um produtor, `DONGLE` a um gateway, e `DESKTOP` e
+`DIAGNOSTIC_TOOL` a consumidores. Renomeá-los seria mudança de contrato, não
+edição de texto. UUID é uma
 identidade opaca e estável de 16 octetos, comparada byte a byte, e não pode ser
 toda zero; nenhuma conversão de endianness é aplicada. `config_revision=0`
 significa que o peer não publica manifesto; quando há catálogo, a revisão é
@@ -326,7 +331,7 @@ descritos, papel, flags, contagens e revisão são zero, UUID é todo zero,
 Cada registro começa com `record_size:uint32_le`, que conta os bytes depois do
 próprio tamanho. O decoder **MUST** limitar a leitura ao registro, consumir
 exatamente `record_size` e rejeitar o manifesto inteiro em qualquer
-inconsistência. O v1 não ignora sufixos desconhecidos.
+inconsistência. O wire v1 não ignora sufixos desconhecidos.
 
 Um registro de tópico contém, nesta ordem:
 
@@ -408,7 +413,7 @@ de `config_revision`. Uma revisão nunca é reutilizada para conteúdo diferente
 | 0 | 4 | `target_source_id` | `uint32_le` |
 | 4 | 4 | `target_boot_id` | `uint32_le` não zero |
 | 8 | 2 | `topic_id` | `uint16_le` não zero |
-| 10 | 2 | `flags` | zero no v1 |
+| 10 | 2 | `flags` | zero no wire v1 |
 | 12 | 4 | `requested_rate_millihz` | `uint32_le` não zero |
 | 16 | 4 | `requested_lease_ms` | `uint32_le` não zero |
 
@@ -434,7 +439,7 @@ referência à requisição, `status:uint8`, `reserved:uint8` e
 ## 8. Status
 
 `STATUS` é publicação espontânea e não possui resposta. `source_id` e
-`boot_id` do envelope definem o escopo dos contadores. O payload v1 fixo é:
+`boot_id` do envelope definem o escopo dos contadores. O payload fixo do wire v1 é:
 
 | Offset | Tamanho | Campo | Tipo no wire |
 | ---: | ---: | --- | --- |
@@ -531,9 +536,9 @@ terminal **MUST NOT** ser publicados como telemetria ou log.
 
 ## 10. Entrada e saída do modo protocolado serial
 
-No modo console, o dongle reconhece somente uma linha ASCII completa com esta
-forma, em que `NNNNNNNNNNNNNNNN` são 16 dígitos hexadecimais minúsculos ou
-maiúsculos escolhidos pelo cliente:
+No modo console, o lado que possui a porta reconhece somente uma linha ASCII
+completa com esta forma, em que `NNNNNNNNNNNNNNNN` são 16 dígitos hexadecimais
+minúsculos ou maiúsculos escolhidos pelo cliente:
 
 ```text
 BTP/1 ENTER NNNNNNNNNNNNNNNN\r\n
@@ -557,12 +562,12 @@ sequência de escape dentro dos bytes codificados. `SESSION_CLOSE` tem payload
 `0x03=PROTOCOL_ERROR`. `SESSION_CLOSE_RESULT` contém a referência à requisição,
 `status:uint8`, `reserved:uint8` e `error_code:uint16_le`.
 
-Ao receber um fechamento válido, o dongle para de aceitar novo trabalho,
+Ao receber um fechamento válido, o dono da porta para de aceitar novo trabalho,
 aguarda no máximo `min(drain_timeout_ms, 2000)` ms para transmitir o resultado,
 descarta reassemblies incompletos e só então volta ao console. Após a transição
 ele emite exatamente `BTP/1 CONSOLE\r\n`. Se nenhum frame BTP válido for
-recebido durante `session_timeout_ms`, ou se `HELLO` não chegar no prazo, o
-dongle faz a mesma limpeza e retorna ao console. Tráfego inválido não renova o
+recebido durante `session_timeout_ms`, ou se `HELLO` não chegar no prazo, ele
+faz a mesma limpeza e retorna ao console. Tráfego inválido não renova o
 watchdog. Perder o transporte não autoriza repetir comandos e não apaga o
 cache de deduplicação.
 
@@ -576,7 +581,7 @@ O emissor **MUST** concluir reassembly e cada operação dentro dos limites
 anunciados. O timeout de execução de uma ação vem do manifesto; ao expirar, o
 executor produz `TIMEOUT/EXECUTION_TIMEOUT` e impede que a ação continue
 gerando efeitos. Se isso não puder ser garantido, a ação **MUST NOT** ser
-anunciada como comando síncrono BTP v1.
+anunciada como comando síncrono BTP.
 
 Payload, versão de manifesto, encoding, tipo, ação ou campo desconhecido é
 rejeitado explicitamente. Não existe parser legado, fallback textual,
@@ -611,7 +616,7 @@ comando e sessão.
 
 ## 13. Limites e validação
 
-Para o BTP v1:
+Para o wire v1:
 
 | Limite | Valor |
 | --- | ---: |

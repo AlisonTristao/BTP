@@ -1,4 +1,4 @@
-# Codec BTP v1
+# Codec portátil
 
 ## API portátil
 
@@ -23,10 +23,13 @@ O payload de entrada pode estar no mesmo buffer da saída: o encoder suporta
 sobreposição e pode, por exemplo, deslocar bytes para prefixar o header no
 próprio buffer.
 
-As constantes `kLibraryVersion*`, `kMinimumProtocolVersion` e
-`kMaximumProtocolVersion` identificam a implementação `0.1.0` em elaboração e
-o intervalo de wire versions aceito, atualmente somente BTP v1. Esses números
-não representam uma release publicada ou uma tag Git.
+As constantes `kLibraryVersion*` identificam a versão da implementação e
+`kMinimumProtocolVersion`/`kMaximumProtocolVersion` delimitam o intervalo de
+versões de wire que este codec aceita. Nenhum desses valores é reproduzido aqui:
+a fonte da versão do artefato é [`library.json`](../library.json), e o intervalo
+aceito é o do [header](../include/btp/codec.hpp) da release que você está usando
+— copiá-los para o texto só cria uma segunda verdade que sai de sincronia. Ver
+[Como referir-se a uma versão](VERSIONING.md).
 
 ## Encode
 

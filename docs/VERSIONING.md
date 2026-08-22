@@ -9,8 +9,27 @@ em conjunto:
 - a biblioteca compartilhada correspondente;
 - os vetores de conformidade daquela revisão.
 
-Enquanto o contrato estiver em elaboração, as versões são `0.y.z` e podem
-mudar de forma incompatível. O primeiro wire format publicado será `v1.0.0`.
+Enquanto o contrato estiver em elaboração, as releases carregam sufixo `-beta`
+e podem mudar de forma incompatível. A release publicada mais recente é
+`v1.1.0-beta`.
+
+## Como referir-se a uma versão
+
+Quatro coisas diferentes têm número de versão neste repositório, e confundi-las
+é a origem mais comum de mal-entendido sobre o que está publicado. Cada uma tem
+uma notação canônica, e só ela deve ser usada:
+
+| Conceito | O que é | Notação canônica | Não escrever |
+| --- | --- | --- | --- |
+| **Versão do wire** | O octeto no offset 4 do header | `version == 0x01` / `version == 0x02` em texto normativo; **"wire v1" / "wire v2"** em prosa — nunca `v1` sozinho | `BTP v1` (ambíguo com release), `v1` sozinho, `version == 1`, `1.x` |
+| **Release** | Tag git que publica spec + biblioteca + vetores em conjunto | `v1.1.0-beta` — com `v`, `MAJOR.MINOR.PATCH` completa, sufixo quando houver | `1.1.0`, `2.0.0-beta`, `v1.0` |
+| **Branch** | Linha de manutenção de uma MAJOR | `branch 1.x` — sempre com a palavra "branch" | `1.x` solto, `v1.x` |
+| **Biblioteca** | Versão do artefato compilado | não citar valor em prosa; a fonte é [`library.json`](../library.json) | qualquer valor copiado no texto |
+
+Uma release **não** implica uma versão de wire, e vice-versa: uma `PATCH` pode
+corrigir a biblioteca sem tocar em octeto nenhum, e a `main` pode implementar um
+wire novo antes de existir tag para ele. Quando a distinção importar para o
+leitor, diga qual das quatro você está citando.
 
 ## SemVer aplicado ao BTP
 
@@ -51,9 +70,9 @@ Cada repositório consumidor deve registrar a versão exata do BTP utilizada em
 seu mecanismo de dependências e em seus artefatos de build. Durante
 desenvolvimento coordenado, uma revisão Git imutável também pode ser fixada.
 
-Não é permitido copiar a especificação ou o código da biblioteca para dentro
-de `Bally_OS`, `Bally_dongle` ou `TraceView`. Atualizações são feitas
-mudando a referência da dependência e executando os testes de conformidade.
+Não é permitido copiar a especificação ou o código da biblioteca para dentro de
+um repositório consumidor. Atualizações são feitas mudando a referência da
+dependência e executando os testes de conformidade.
 
 ## Branches de release
 

@@ -6,8 +6,8 @@
 
 ## Contexto
 
-O dongle já expõe BTP v1 sobre um único enlace físico: o periférico USB
-nativo do ESP32-S3 em modo CDC, carregando o perfil `Serial` (COBS,
+Um gateway já expõe o wire v1 sobre um único enlace físico: o periférico USB
+nativo do MCU em modo CDC, carregando o perfil `Serial` (COBS,
 console/protocolo compartilhando a mesma porta, `TRANSPORT_SERIAL.md`). Esse
 enlace é uma porta COM virtual: do ponto de vista do sistema operacional e de
 qualquer software de terceiros, ele é indistinguível de uma UART real, com
@@ -15,14 +15,14 @@ todo o overhead de driver serial que isso implica (framing byte a byte,
 COBS, sem fronteira nativa de mensagem).
 
 Passa a existir a necessidade de um segundo canal, mais rápido e sem esse
-overhead, para telemetria entre o dongle e o TraceView: uma interface USB HID
+overhead, para telemetria entre o gateway e o consumidor: uma interface USB HID
 vendor-specific, que enumera nativamente em qualquer sistema operacional sem
 driver dedicado e entrega dados já fragmentados em unidades discretas
-(relatórios), eliminando a necessidade de COBS. O dongle passa a ser um
+(relatórios), eliminando a necessidade de COBS. O gateway passa a ser um
 dispositivo USB composto: a interface CDC existente permanece inalterada,
 folhado por uma segunda interface HID.
 
-O BTP v1 hoje só reconhece dois perfis de transporte normativos, `EspNow` e
+O BTP hoje só reconhece dois perfis de transporte normativos, `EspNow` e
 `Serial` (ADR 0010) -- `TransportProfile` é um enum usado diretamente por
 `encode()`/`decode()`/`fragment_count()`/`make_fragment()` em
 `btp/codec.hpp`/`btp/fragmentation.hpp`. Um relatório HID Full-Speed tem 64
@@ -48,7 +48,7 @@ receptor não tem, por si só, como distinguir dado real de padding.
 - Limites do novo perfil: `BTP_USB_HID_MAX_FRAME_SIZE = 62`,
   `BTP_USB_HID_MAX_PAYLOAD_SIZE = 22` (64 menos 1 octeto de Report ID, menos 1
   octeto de prefixo de tamanho, menos os 40 octetos fixos de header e CRC do
-  envelope BTP v1).
+  envelope BTP).
 - Fragmentação e reassembly reaproveitam `btp::fragment_count`/
   `make_fragment`/`Reassembler` sem modificação de comportamento -- já eram
   parametrizados por `TransportProfile`; só ganham mais uma entrada na tabela
@@ -83,7 +83,7 @@ As regras normativas completas estão em
   permanece válido sem alteração: por ser o maior limite entre os três
   perfis, ele continua sendo um teto superior correto mesmo com o novo perfil
   menor.
-- Nenhuma mudança é necessária no wire format do envelope BTP v1 nem nos
+- Nenhuma mudança é necessária no wire format do envelope BTP nem nos
   perfis `EspNow`/`Serial` já publicados -- ambos permanecem byte a byte
   idênticos.
 
@@ -108,8 +108,8 @@ As regras normativas completas estão em
 - **Determinar o tamanho real do relatório inspecionando `payload_size` do
   header BTP em vez de um prefixo de tamanho dedicado:** rejeitado porque
   faria a camada de transporte (que deve mover bytes sem conhecer BTP,
-  mesmo princípio já aplicado a `SerialMux`/`EspNowManager` no lado do
-  dongle) depender da semântica do envelope só para descobrir onde o
+  mesmo princípio já aplicado às camadas de enquadramento do lado do
+  dispositivo) depender da semântica do envelope só para descobrir onde o
   padding começa -- o prefixo de tamanho mantém a camada de transporte
   genuinamente agnóstica de protocolo, ao custo de 1 octeto por relatório.
 
@@ -118,4 +118,4 @@ As regras normativas completas estão em
 Extensão compatível e opcional (`docs/VERSIONING.md`): novo perfil de
 transporte negociável, sem alterar bytes, interpretação ou garantias dos
 perfis `EspNow`/`Serial` já publicados. Classificada como `MINOR` --
-`v1.1.0`.
+`v1.1.0-beta`.

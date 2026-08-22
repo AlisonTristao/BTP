@@ -12,7 +12,7 @@ testes.
 
 ## Decisão
 
-`bally_protocol` é a única fonte da especificação, implementação compartilhada
+Este repositório é a única fonte da especificação, implementação compartilhada
 e vetores de conformidade. Consumidores fixam uma versão ou revisão imutável e
 não mantêm cópias independentes desses artefatos.
 

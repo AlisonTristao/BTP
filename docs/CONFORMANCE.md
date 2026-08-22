@@ -1,9 +1,9 @@
-# Vetores de conformidade BTP v1
+# Vetores de conformidade
 
 ## Contrato dos arquivos
 
 [`test-vectors/v1/`](../test-vectors/v1/) é a referência binária canônica do
-BTP v1. Cada vetor de frame possui dois arquivos com o mesmo nome:
+wire v1. Cada vetor de frame possui dois arquivos com o mesmo nome:
 
 - `.json`: descrição legível por máquina e por pessoa, com campos de largura
   fixa expressos por valor e payload expresso como octetos hexadecimais;

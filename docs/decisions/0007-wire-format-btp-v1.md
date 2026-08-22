@@ -1,8 +1,8 @@
-# ADR 0007: wire format do envelope BTP v1
+# ADR 0007: wire format do envelope `version == 0x01`
 
 - Estado: Aceita
 - Data: 2026-08-09
-- Impacto SemVer: baseline inicial destinada a `v1.0.0`; não altera release publicada
+- Impacto SemVer: baseline do wire v1, anterior à primeira release publicada (`v1.1.0-beta`)
 
 ## Contexto
 
@@ -13,7 +13,7 @@ binário e caber no datagrama ESP-NOW de 250 octetos.
 
 ## Decisão
 
-O BTP v1 usa o cabeçalho fixo de 36 octetos especificado em
+O BTP usa o cabeçalho fixo de 36 octetos especificado em
 [`../BTP_V1.md`](../BTP_V1.md), seguido do payload válido e de CRC-32/ISO-HDLC
 little-endian. O frame não possui padding.
 

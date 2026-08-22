@@ -2,7 +2,7 @@
 
 ## Escopo deste capítulo
 
-O BTP v2 acrescenta uma única capacidade ao protocolo: o payload lógico de
+O wire v2 acrescenta uma única capacidade ao protocolo: o payload lógico de
 uma mensagem pode ir cifrado e autenticado, sem que nada no envelope, no
 roteamento ou nos perfis de transporte mude de significado. Este capítulo
 explica o modelo por trás disso, o raciocínio de cada escolha e a API que
@@ -20,14 +20,13 @@ O CRC-32 de cada frame detecta corrupção acidental de transporte. Ele não faz
 — e nunca pretendeu fazer — nada contra alteração intencional: um atacante
 que muda um octeto do payload recalcula o CRC em uma linha de código.
 
-O que torna isso concreto é o enlace ESP-NOW entre robô e dongle: rádio
-aberto, onde qualquer um no alcance captura o tráfego passivamente e injeta
-frames válidos sem precisar de acesso físico a nada. Os perfis USB são
-diferentes na origem do risco — interceptar `Serial` ou `UsbHid` exige posse
-física do dongle —, e é por isso que a política de criptografia deles não
-mudou.
+O que torna isso concreto é o enlace ESP-NOW: rádio aberto, onde qualquer um no
+alcance captura o tráfego passivamente e injeta frames válidos sem precisar de
+acesso físico a nada. Os perfis USB são diferentes na origem do risco —
+interceptar `Serial` ou `UsbHid` exige posse física do dispositivo —, e é por
+isso que a política de criptografia deles não mudou.
 
-## O que a v2 garante, e o que não garante
+## O que o wire `0x02` garante, e o que não garante
 
 | Garantia | Estado |
 | --- | --- |
@@ -59,7 +58,7 @@ payload      plaintext  ->  ciphertext ‖ tag       (+16 octetos por mensagem)
 O header continua em claro, o CRC continua sendo calculado sobre o frame
 inteiro como antes, e a fragmentação continua operando sobre o payload lógico
 sem saber que ele está cifrado. Com `ENCRYPTED` limpo, o frame é byte a byte
-idêntico ao de um encoder v1.
+idêntico ao de um encoder de wire v1.
 
 ### As duas cifras
 
@@ -160,9 +159,9 @@ vetores de conformidade existentes seguem produzindo o mesmo AAD de antes.
 
 O ganho não é só evitar a ambiguidade: como o tag não depende do
 enquadramento, **o gateway pode refragmentar uma mensagem cifrada sem ter a
-chave**. Isso importa concretamente, porque o dongle roteia entre perfis com
+chave**. Isso importa concretamente, porque um gateway roteia entre perfis com
 tetos diferentes (210 octetos no ESP-NOW, 22 no USB HID). Se os campos de
-fragmentação entrassem no AAD, reenquadrar exigiria recifrar, e o dongle
+fragmentação entrassem no AAD, reenquadrar exigiria recifrar, e o gateway
 precisaria da chave apenas para trocar de enlace.
 
 ### O tag pertence à mensagem, não ao fragmento
@@ -315,7 +314,7 @@ desaparecem por completo, e `btp::codec` compila exatamente como antes.
 
 Dois testes cobrem esta camada: `btp_aead_tests` (round-trip das duas
 cifras, tag corrompido, AAD alterado, chave de tamanho errado, `CIPHER_ID`
-reservado) e `btp_aead_conformance_tests` (os vetores v2, abaixo).
+reservado) e `btp_aead_conformance_tests` (os vetores do wire v2, abaixo).
 
 ## Prova de interoperabilidade
 
@@ -343,18 +342,17 @@ aceita por definição — e vivem em `test_aead_conformance.cpp`.
 
 A [ADR 0012](decisions/0012-criptografia-aead-payload.md) segue como
 `Proposta`, e é correto que siga: a especificação está escrita, a biblioteca
-implementa as duas cifras e os vetores provam interoperabilidade, mas os três
-consumidores do protocolo — `bally_OS`, `bally_dongle` e `TraceView` — ainda
-não chamam cifra nenhuma. Enquanto isso não acontecer, a decisão não está
-concluída pelo critério do próprio
+implementa as duas cifras e os vetores provam interoperabilidade, mas nenhuma
+implementação consumidora chama cifra ainda. Enquanto isso não acontecer, a
+decisão não está concluída pelo critério do próprio
 [`CONTRIBUTING.md`](CONTRIBUTING.md): "uma mudança não está completa se
 apenas um consumidor consegue codificá-la".
 
 Ainda em aberto, em ordem de impacto:
 
 1. **Provisionamento de chave.** Obrigatório operacionalmente e fora do wire
-   por decisão: NVS/flash nos dois lados do ESP-NOW, configuração local no
-   TraceView. Sem isso, nada disso liga em produção.
+   por decisão: armazenamento não volátil nos dois lados do enlace de rádio e
+   configuração local no consumidor. Sem isso, nada disso liga em produção.
 2. **Um vetor de conformidade de mensagem fragmentada e cifrada.** A
    canonicalização do AAD está normativa, implementada e coberta por teste
    unitário, mas ainda não existe um par `.json`/`.bin` que a prove
@@ -364,7 +362,7 @@ Ainda em aberto, em ordem de impacto:
 4. **Anti-replay**, se e quando for considerado necessário — hoje não há
    requisito escrito.
 
-Classificação de versão: `MAJOR`, `v2.0.0`, porque um decoder v1.x **MUST**
-rejeitar frame com bit reservado marcado — logo a extensão não é
-seguramente ignorável por um peer antigo, mesmo sendo opcional em uso. A
-linha v1 continua na branch `1.x`.
+Classificação de versão: `MAJOR`, porque um decoder que só implementa o wire
+`0x01` **MUST** rejeitar frame com bit reservado marcado — logo a extensão não é
+seguramente ignorável por um peer antigo, mesmo sendo opcional em uso. O wire
+`0x01` continua mantido na branch `1.x`.

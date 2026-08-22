@@ -1,72 +1,82 @@
 # BTP: protocolo binário de telemetria e controle
 
-O BTP transporta telemetria, logs, comandos e terminal entre um firmware
-embarcado e uma aplicação de computador, atravessando enlaces com
-características opostas: ESP-NOW, de banda baixa e perda alta, e USB
-(Serial/HID), de banda maior e orientado a byte-stream. Cada mensagem carrega
-a identidade e o instante criados na origem, e nenhum intermediário os
-reescreve.
+O BTP transporta telemetria, logs, comandos e terminal entre um produtor
+embarcado e um consumidor, atravessando enlaces com características opostas:
+rádio de banda baixa, datagrama curto e perda alta, e barramento local de banda
+maior, orientado a byte-stream. Cada mensagem carrega a identidade e o instante
+criados na origem, e nenhum intermediário os reescreve.
 
 Este repositório é a fonte canônica de três coisas ao mesmo tempo: a
 especificação do wire format, a biblioteca C++ que a implementa e os vetores
 binários que provam que uma implementação está correta. Este livro é a leitura
-sequencial desse conjunto — do panorama de arquitetura até o octeto no
-enlace.
+sequencial desse conjunto — do modelo de papéis até o octeto no enlace.
 
 ## Estado atual
 
 | Componente | Estado |
 | --- | --- |
-| Wire format v1 (`version == 0x01`) | Especificado, implementado e coberto por vetores. Última release publicada: `v1.1.0-beta`. |
-| Wire format v2 (`version == 0x02`, payload AEAD) | Especificado em [BTP_V1.md §8](BTP_V1.md#8-criptografia-aead-do-payload) e implementado na biblioteca (`btp::aead`, duas cifras, vetores em `test-vectors/v2/`). O fonte declara `2.0.0-beta`; nenhuma tag v2 foi publicada. |
-| [ADR 0012](decisions/0012-criptografia-aead-payload.md) (criptografia) | `Proposta` — vira `Aceita` quando os três consumidores implementarem a cifra de verdade, não só a biblioteca. |
-| Linha 1.x | Mantida na branch `1.x`, cortada antes de a v2 avançar em `main`. |
+| Wire `version == 0x01` | Especificado, implementado e coberto por vetores em `test-vectors/v1/`. |
+| Wire `version == 0x02` (payload AEAD) | Especificado em [§8 do frame no wire](BTP_V1.md#8-criptografia-aead-do-payload) e implementado na biblioteca (`btp::aead`, duas cifras), com vetores em `test-vectors/v2/`. |
+| Última release publicada | `v1.1.0-beta`. Nenhuma tag do wire `0x02` foi publicada; a versão do artefato vive em [`library.json`](../library.json). |
+| Branch `1.x` | Linha de manutenção do wire `0x01`, cortada antes de a `main` avançar para o wire `0x02`. |
+| [ADR 0012](decisions/0012-criptografia-aead-payload.md) (criptografia) | `Proposta` — vira `Aceita` quando implementações reais chamarem a cifra, não só a biblioteca. |
+
+As quatro formas de se referir a uma versão — wire, release, branch e biblioteca
+— são coisas diferentes e não se misturam. A notação canônica de cada uma está em
+[Versionamento](VERSIONING.md).
 
 ## Como ler
 
-Três caminhos, dependendo do que você veio fazer:
+Quatro caminhos, dependendo do que você veio fazer:
 
-**Vou consumir o BTP em um projeto** (firmware, dongle, desktop) — comece por
-[Arquitetura e domínios](ARCHITECTURE.md), siga para
+**Vim avaliar se o BTP serve para o meu caso** — leia
+[Vantagens, limites e aplicabilidade](TRADEOFFS.md). É o único capítulo que pode
+ser lido isolado, e responde o que os capítulos normativos não respondem: o que
+o desenho compra, o que cobra, e onde ele não cabe.
+
+**Vou integrar o BTP em um projeto** — comece por
+[O protocolo: modelo e garantias](ARCHITECTURE.md), siga para
 [Do sensor à tela](WALKTHROUGH.md), leia o [Codec portátil](CODEC.md) e o
 capítulo do transporte que você vai usar. Só volte à especificação normativa
 quando precisar do layout exato de um campo.
 
 **Vou implementar o protocolo em outra plataforma** (outra linguagem, outro
 chip) — leia [Convenções e glossário](CONVENTIONS.md), depois
-[Frame BTP v1](BTP_V1.md) inteiro, os payloads lógicos de
+[O frame no wire](BTP_V1.md) inteiro, os payloads lógicos de
 [Telemetria](TELEMETRY.md) e [Comandos](COMMANDS_AND_ACTIONS.md), o perfil de
 transporte aplicável e, obrigatoriamente,
 [Vetores de conformidade](CONFORMANCE.md): sua implementação não está pronta
-antes de produzir e consumir os mesmos bytes dos vetores.
+antes de produzir e consumir os mesmos octetos dos vetores.
 
 **Vim entender por que uma decisão é assim** — vá direto ao
 [registro de decisões](decisions/README.md). Cada ADR guarda contexto,
-alternativas rejeitadas e consequências; os capítulos de especificação
-descrevem o que vale hoje, os ADRs descrevem por que passou a valer.
+alternativas rejeitadas e consequências; os capítulos de especificação descrevem
+o que vale hoje, os ADRs descrevem por que passou a valer.
 
 ## As seis partes
 
 | Parte | O que cobre |
 | --- | --- |
-| I — Panorama | Quem produz, roteia e apresenta os dados; o caminho completo de uma amostra; o vocabulário usado no resto do livro. |
-| II — O contrato no wire | O frame v1 octeto a octeto, a API do codec e o que COBS, fragmentação e reassembly fazem. |
+| I — Panorama | O modelo de papéis e as garantias por canal; o que o desenho compra e cobra; o caminho completo de uma amostra; o vocabulário usado no resto do livro. |
+| II — O contrato no wire | O frame octeto a octeto, a API do codec e o que COBS, fragmentação e reassembly fazem. |
 | III — Canais lógicos | O payload de cada canal: amostras e schemas de telemetria; comandos, manifesto, sessão e terminal. |
-| IV — Perfis de transporte | O que muda entre Serial, ESP-NOW e USB HID — limites, framing e posse do enlace. |
+| IV — Perfis de transporte | O que muda entre Serial, ESP-NOW e USB HID — limites, enquadramento e posse do enlace. |
 | V — Criptografia | O modelo de segurança do payload cifrado, as decisões por trás dele e a API `btp::aead`. |
 | VI — Processo e garantias | Os vetores canônicos, a política de versão conjunta e as regras para mudar o wire. |
 
-Os apêndices trazem os ADRs e as capturas de hardware guardadas para
-depuração.
+O apêndice traz os ADRs.
 
-## O que este livro não é
+## Escopo
 
-Não é tutorial de ESP-IDF, Arduino ou Qt, e não descreve a implementação
-interna de nenhum consumidor: `bally_OS` (firmware do robô), `bally_dongle`
-(gateway) e `TraceView` (apresentação) têm documentação própria. Aqui está só
-o que os três precisam concordar entre si.
+O livro cobre o que duas implementações precisam concordar entre si: o wire
+format, a biblioteca compartilhada e os vetores de conformidade.
+
+Fora de escopo, por decisão: a implementação interna de qualquer consumidor,
+tutorial de toolchain, e o provisionamento de identidade e de chave — que é
+requisito operacional real, mas fica fora do wire (ver
+[Criptografia](CRYPTO.md)).
 
 Quando um capítulo de leitura e a especificação normativa divergirem, a
-especificação vence: [BTP_V1.md](BTP_V1.md) é a fonte canônica do wire, e
-[CONVENTIONS.md](CONVENTIONS.md) explica como as palavras **MUST**/**SHOULD**
-devem ser lidas nela.
+especificação vence: [O frame no wire](BTP_V1.md) é a fonte canônica, e
+[Convenções e glossário](CONVENTIONS.md) explica como as palavras
+**MUST**/**SHOULD** devem ser lidas nela.

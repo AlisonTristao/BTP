@@ -6,21 +6,20 @@ caminho inverso com um comando. Nada aqui é normativo: é o mapa que amarra os
 capítulos seguintes, com um link em cada etapa para o documento que define as
 regras dela.
 
-O exemplo é o tópico `protocol.test`, o mesmo da
-[captura de hardware](integration-captures/README.md) guardada no
-repositório: dois campos, `counter` (`uint32`) e `value` (`float32`), em
-`PACKED_LE`, publicados a 50 Hz.
+O exemplo é o tópico `protocol.test`, o mesmo dos
+[vetores canônicos](../test-vectors/v1/): dois campos, `counter` (`uint32`) e
+`value` (`float32`), em `PACKED_LE`, publicados a 50 Hz.
 
 ```text
-bally_OS (robô)              bally_dongle (gateway)          TraceView (PC)
------------------            ----------------------          --------------
+produtor                     gateway                         consumidor
+--------                     -------                         ----------
 1 amostra + schema
 2 envelope
 3 (cifra opcional)
 4 fragmentação
 5 CRC + serialização
    ---- ESP-NOW ---->        6 valida e roteia
-                            7 framing do enlace USB
+                            7 enquadramento do enlace USB
                                ---- Serial/COBS ou HID ---->  8 decode
                                                              9 reassembly
                                                             10 tag AEAD
@@ -30,9 +29,9 @@ bally_OS (robô)              bally_dongle (gateway)          TraceView (PC)
 
 ## 1. A amostra e o schema
 
-O `TelemetryPublisher` monta o corpo da amostra segundo o schema do tópico:
-os dois campos em ordem declarada, larguras fixas, little-endian, sem nome de
-campo nem unidade dentro da amostra. O payload lógico é
+O produtor monta o corpo da amostra segundo o schema do tópico: os dois campos
+em ordem declarada, larguras fixas, little-endian, sem nome de campo nem
+unidade dentro da amostra. O payload lógico é
 `schema_version (uint16_le) ‖ encoded_body` — no exemplo, 2 + 8 = **10
 octetos**.
 
@@ -53,7 +52,7 @@ O payload ganha um header de 36 octetos que responde quem, quando e o quê:
 | --- | --- |
 | `type` | `TELEMETRY` (`0x01`) |
 | `object_id` | o `topic_id` de `protocol.test` |
-| `source_id` | identidade estável do robô, não nula |
+| `source_id` | identidade estável do produtor, não nula |
 | `boot_id` | identidade desta inicialização |
 | `sequence` | identifica esta amostra dentro do boot |
 | `timestamp_us` | instante monotônico criado **aqui**, na origem |
@@ -63,7 +62,7 @@ mensagem lógica, e é ela — não o frame físico — que o resto do caminho
 preserva. O timestamp é criado neste ponto e por ninguém mais: o gráfico do
 outro lado é plotado por ele, não pela hora de chegada.
 
-→ [Frame BTP v1](BTP_V1.md), [Convenções e glossário](CONVENTIONS.md)
+→ [O frame no wire](BTP_V1.md), [Convenções e glossário](CONVENTIONS.md)
 
 ## 3. Cifra do payload (opcional)
 
@@ -107,7 +106,7 @@ O CRC é por frame, não por mensagem: ele existe para descartar lixo de
 transporte barato, antes de gastar ciclos em reassembly ou cripto. Ele detecta
 corrupção acidental e **não** autentica nada.
 
-→ [Frame BTP v1](BTP_V1.md), [Codec portátil](CODEC.md)
+→ [O frame no wire](BTP_V1.md), [Codec portátil](CODEC.md)
 
 ## 6. O salto ESP-NOW e o gateway
 
@@ -116,18 +115,19 @@ delimitador ou padding — o tamanho do datagrama é exatamente
 `40 + payload_size`. O enlace é best effort: uma amostra perdida é uma
 amostra perdida, sem ACK por amostra e sem retransmissão do dado.
 
-O dongle valida o que chega — magic, versão, tamanhos, limite do transporte,
+O gateway valida o que chega — magic, versão, tamanhos, limite do transporte,
 CRC e invariantes de fragmentação — e roteia por canal. O que ele
 deliberadamente **não** faz: reescrever `source_id`, `boot_id`, `sequence` ou
 `timestamp_us`, interpretar o payload binário como texto, ou redefinir o
 schema. Ele é gateway, não tradutor.
 
-→ [ESP-NOW](TRANSPORT_ESPNOW.md), [Arquitetura e domínios](ARCHITECTURE.md)
+→ [ESP-NOW](TRANSPORT_ESPNOW.md),
+[O protocolo: modelo e garantias](ARCHITECTURE.md)
 
-## 7. O framing do enlace USB
+## 7. O enquadramento do enlace USB
 
 O mesmo frame, sem uma alteração de octeto no envelope, ganha do outro lado
-do dongle o framing do enlace escolhido:
+do gateway o enquadramento do enlace escolhido:
 
 | | Serial (modo protocolado) | USB HID |
 | --- | --- | --- |
@@ -189,7 +189,7 @@ fragmento não existe e não seria possível: o tag pertence à mensagem.
 
 Com o payload lógico em claro na mão, o cliente lê o `schema_version` dos
 dois primeiros octetos, resolve a tripla (`source_id`, `topic_id`,
-`schema_version`) contra o manifesto que descobriu do dongle e obtém a lista
+`schema_version`) contra o manifesto que descobriu e obtém a lista
 ordenada de campos — nome, tipo, unidade, escala, offset. Só então os 8
 octetos de corpo voltam a ser `counter` e `value`.
 
@@ -202,19 +202,19 @@ Um `schema_version` desconhecido não é adivinhado: sem schema, a amostra não
 ## 12. Apresentação
 
 O gráfico usa `timestamp_us` da origem, não o instante de chegada — é o que
-torna a série imune à latência do rádio, à fila do dongle e ao agendamento do
-desktop. A apresentação pode ter rótulo, cor e layout locais; identidade,
+torna a série imune à latência do rádio, à fila do gateway e ao agendamento do
+consumidor. A apresentação pode ter rótulo, cor e layout locais; identidade,
 unidade e semântica vêm do catálogo.
 
-→ [Arquitetura e domínios](ARCHITECTURE.md)
+→ [O protocolo: modelo e garantias](ARCHITECTURE.md)
 
 ## O caminho de volta: um comando
 
 ```text
-TraceView                    bally_dongle                    bally_OS
+consumidor                   gateway                         produtor
 1 escolhe a ação do manifesto
 2 COMMAND_REQUEST, sequence = request_id
-   ---------------------->   3 roteia (ou executa a ação persistida)
+   ---------------------->   3 roteia (ou executa a ação de que é dono)
                                -------------------------->   4 deduplica
                                                             5 executa
                             <--------------------------     6 COMMAND_RESULT
@@ -231,8 +231,8 @@ Três diferenças em relação à telemetria importam:
 - **Há deduplicação.** O executor precisa reconhecer uma requisição repetida
   e não executá-la duas vezes — a mesma tripla identifica a mesma
   requisição, e o resultado é reemitido em vez de a ação ser refeita.
-- **O catálogo é do gateway.** A ação existe porque o manifesto do dongle a
-  anunciou; o cliente envia parâmetros para algo descoberto, não para algo
+- **O catálogo é de quem o publica.** A ação existe porque um manifesto a
+  anunciou; o consumidor envia parâmetros para algo descoberto, não para algo
   que ele definiu localmente.
 
 → [Comandos, manifesto, sessão e terminal](COMMANDS_AND_ACTIONS.md)

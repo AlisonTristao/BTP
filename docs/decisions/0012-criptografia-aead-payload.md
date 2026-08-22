@@ -1,4 +1,4 @@
-# ADR 0012: Criptografia AEAD do payload (BTP v2.0)
+# ADR 0012: criptografia AEAD do payload (wire `0x02`)
 
 - Estado: Proposta
 - Data: 2026-08-21
@@ -8,10 +8,10 @@
 
 O CRC32 do envelope detecta corrupção acidental, mas explicitamente **não
 fornece autenticação** (`BTP_V1.md` §7, ADR 0005). O salto ESP-NOW
-(dongle↔robô) é rádio aberto: qualquer um no alcance pode capturar ou
+(produtor↔gateway) é rádio aberto: qualquer um no alcance pode capturar ou
 injetar tráfego passivamente, sem precisar de acesso físico a nada. Isso é
 diferente dos perfis USB (`Serial`/`UsbHid`, ADR 0010/0011), que exigem posse
-física do dongle para serem interceptados — por isso esta ADR não altera a
+física do dispositivo para serem interceptados — por isso esta ADR não altera a
 política desses dois perfis.
 
 O perfil `UsbHid` tem só 22 octetos de payload por fragmento
@@ -29,11 +29,10 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
    `ciphertext ‖ tag` em vez de dado em claro.
 
 2. **Algoritmo primário: AES-128-GCM.**
-   - `bally_dongle` e `bally_OS` rodam no mesmo chip, `esp32-s3-devkitc-1`
-     (`platformio.ini` de ambos), que tem acelerador AES em hardware; o
-     TraceView (Qt/C++, x86_64) tem AES-NI. Nos três consumidores atuais do
-     protocolo, GCM é hardware-acelerado via mbedtls — já embutido no core
-     `arduino-esp32`/ESP-IDF, sem dependência nova.
+   - Os endpoints embarcados de referência usam um MCU com acelerador AES em
+     hardware, e o lado desktop usa CPU x86_64 com AES-NI. Nos dois casos GCM
+     é hardware-acelerado via mbedtls — já embutido nos SDKs usados, sem
+     dependência nova.
    - Em qualquer chip **sem** acelerador AES, GCM cai para software: mais
      lento e, se a implementação não for constant-time, sujeito a
      side-channel de timing. Um endpoint futuro nessas condições **SHOULD**
@@ -79,7 +78,7 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
    - `boot_id` já **MUST** ser escolhido de novo a cada boot e nunca reusado
      enquanto frames do boot anterior possam existir (`BTP_V1.md` §6). É essa
      regra, já normativa, que impede o cenário catastrófico para GCM: sem
-     `boot_id` no nonce, um reboot do dongle ou do robô reiniciaria
+     `boot_id` no nonce, um reboot de qualquer dos endpoints reiniciaria
      `sequence` do zero e colidiria com nonces já usados sob a mesma chave em
      sessões anteriores (reuso de keystream, tag forjável). Com `boot_id`
      presente, cada boot ocupa uma faixa de nonce disjunta das anteriores.
@@ -105,7 +104,7 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
      de forma indistinguível de chave errada ou de ataque.
    - Canonicalizar em vez de fixar uma convenção qualquer (por exemplo
      "índice 0 e a contagem real") tem uma segunda razão, específica desta
-     topologia: o dongle é gateway entre perfis com limites de payload
+     topologia: um gateway roteia entre perfis com limites de payload
      diferentes (210 octetos no `EspNow`, 22 no `UsbHid` — ADR 0010/0011).
      Com os campos de fragmentação fora do AAD, ele **pode** reassemblar e
      refragmentar uma mensagem cifrada para o outro enlace sem possuir a
@@ -123,8 +122,8 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
    mudança de comportamento na fragmentação em si.
 
 6. **A chave nunca trafega no wire, em nenhum campo.** É provisionada fora de
-   banda — por par (dongle, robô) ou por rede — e vive em NVS/flash do
-   ESP32-S3 nos dois lados e em configuração local no TraceView.
+   banda — por par de endpoints ou por rede — e vive em armazenamento não
+   volátil nos dois lados do rádio e em configuração local no consumidor.
    `boot_id` **não deriva nem substitui** a chave: são conceitos
    independentes. A chave é o segredo estático de longo prazo; `boot_id` só
    contribui para a unicidade pública do nonce, exatamente como qualquer
@@ -190,17 +189,17 @@ fora do escopo desta ADR** e será tratada em revisão futura; por ora,
 Segue o processo obrigatório de `CONTRIBUTING.md` § "Processo para mudar o
 wire format" para mudanças de bytes/interpretação/garantias do wire:
 
-1. **Motivação e impacto nos três consumidores** — coberto nesta ADR;
-   `bally_dongle` e `bally_OS` ganham cripto acelerada por hardware, o
-   TraceView usa AES-NI via mbedtls/OpenSSL. Nenhum dos três perde
-   compatibilidade com tráfego não cifrado.
+1. **Motivação e impacto nas implementações consumidoras** — coberto nesta
+   ADR; os endpoints embarcados ganham cripto acelerada por hardware e o lado
+   desktop usa AES-NI via mbedtls/OpenSSL. Nenhum deles perde compatibilidade
+   com tráfego não cifrado.
 2. **ADR** — este documento (0012). Passa para `Aceita` quando os itens
    abaixo estiverem implementados e testados.
 3. **Atualização da especificação canônica** (`BTP_V1.md`) — pendente: nova
    seção normativa de criptografia AEAD, entrada `ENCRYPTED` na tabela de
-   flags, atualização de `version` do wire e do documento para `2.0.0`.
-4. **Classificação SemVer** — `MAJOR`, `v2.0.0`: decisores acordaram tratar
-   como incompatível porque um decoder v1.x **MUST** rejeitar qualquer frame
+   flags, atualização de `version` do wire para `0x02`.
+4. **Classificação SemVer** — `MAJOR`: decisores acordaram tratar
+   como incompatível porque um decoder de wire v1 **MUST** rejeitar qualquer frame
    com bit reservado marcado (`BTP_V1.md` §5), logo não é seguramente
    ignorável por um peer antigo mesmo sendo opcional em uso.
 5. **Vetores de conformidade** — pendente: casos válidos (round-trip
@@ -208,20 +207,19 @@ wire format" para mudanças de bytes/interpretação/garantias do wire:
    antes do tag) em um novo diretório `test-vectors/v2/`.
 6. **Implementação equivalente nas plataformas afetadas** — pendente:
    `btp::codec`/`btp::fragmentation` (biblioteca compartilhada), wiring de
-   `mbedtls_gcm_*` em `bally_dongle`/`bally_OS` (ESP-IDF/Arduino) e em
-   TraceView (Qt/C++).
+   `mbedtls_gcm_*` nos endpoints embarcados e na aplicação consumidora.
 7. **Estratégia de negociação** — pendente: confirmar se `ENCRYPTED` é
-   decisão estática de configuração por par (dongle/robô já provisionados
+   decisão estática de configuração por par (endpoints já provisionados
    com a mesma chave, sem negociação em runtime) ou se precisa de sinal
    explícito no handshake `HELLO` existente.
-8. **Notas de migração** — a linha v1.x continua servida pela branch `1.x`
-   (cortada do último commit da linha 1, `d736c50`, antes desta ADR). v2.0
-   não terá modo legado, parser alternativo nem fallback para payload em
+8. **Notas de migração** — a linha do wire v1 continua servida pela branch `1.x`
+   (cortada do último commit da linha `1`, `d736c50`, antes desta ADR). O wire
+   v2 não terá modo legado, parser alternativo nem fallback para payload em
    claro dentro do mesmo canal, por princípio já registrado em
    `CONTRIBUTING.md`.
 
 ## Impacto de versão
 
-Classificado como `MAJOR` — `v2.0.0` (`docs/VERSIONING.md`). Branch de
+Classificado como `MAJOR` (`docs/VERSIONING.md`). Branch de
 manutenção `1.x` cortada do commit `d736c50` antes desta mudança começar a
 avançar em `main`, conforme "Branches de release".
