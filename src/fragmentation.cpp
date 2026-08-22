@@ -19,11 +19,34 @@ std::size_t transport_payload_limit(TransportProfile transport) noexcept {
     }
 }
 
+// Every fragment carries FRAGMENTED, but a fragment of an encrypted message
+// also carries ENCRYPTED and its CIPHER_ID sub-field: make_fragment() copies
+// the logical flags and only ORs FRAGMENTED in. So this has to be a mask test.
+// An exact `flags == kFlagFragmented` rejects every fragment of a wire v2
+// message, making encrypted-and-fragmented unreceivable and defeating the AAD
+// canonicalization of BTP_V1.md section 8.3, whose entire purpose is to let a
+// fragmented encrypted message reassemble under one message-level tag.
+bool valid_fragment_flags(std::uint16_t flags) noexcept {
+    if ((flags & kFlagFragmented) == 0U) {
+        return false;
+    }
+    if ((flags & static_cast<std::uint16_t>(~kKnownFlagsMask)) != 0U) {
+        return false;
+    }
+    const std::uint16_t raw_cipher_id =
+        static_cast<std::uint16_t>((flags & kCipherIdMask) >> kCipherIdShift);
+    if ((flags & kFlagEncrypted) == 0U) {
+        return raw_cipher_id == 0U;
+    }
+    return raw_cipher_id <=
+           static_cast<std::uint16_t>(CipherId::ChaCha20Poly1305);
+}
+
 bool valid_fragment_header(const Header& header) noexcept {
     const std::uint8_t type = static_cast<std::uint8_t>(header.type);
     return type >= static_cast<std::uint8_t>(MessageType::Telemetry) &&
            type <= static_cast<std::uint8_t>(MessageType::Control) &&
-           header.flags == kFlagFragmented && header.source_id != 0U &&
+           valid_fragment_flags(header.flags) && header.source_id != 0U &&
            header.boot_id != 0U && header.fragment_count >= 2U &&
            header.fragment_index < header.fragment_count;
 }

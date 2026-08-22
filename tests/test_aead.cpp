@@ -1,8 +1,10 @@
 #include "btp/aead.hpp"
+#include "btp/fragmentation.hpp"
 
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -394,6 +396,76 @@ void test_aad_ignores_fragmentation_fields() {
                          sealed_logical, recovered) == btp::AeadError::TagMismatch);
 }
 
+// The end-to-end claim behind the AAD canonicalization of section 8.3: the tag
+// is computed once over the logical message, so a message sealed whole, cut
+// into transport-sized fragments and reassembled on the far side still opens.
+// Nothing fragmentation touches -- per-fragment size, index, count, per-frame
+// CRC -- enters the tag, which is what lets a gateway re-fragment an encrypted
+// message across transports without holding the key.
+void test_sealed_message_survives_fragmentation_and_reassembly() {
+    const std::uint16_t kPlaintextSize = 300U;  // forces 2 EspNow fragments
+
+    btp::Header logical = {};
+    logical.type = btp::MessageType::Telemetry;
+    logical.flags = btp::kFlagEncrypted;
+    logical.source_id = 0x0C0D0E0FU;
+    logical.boot_id = 0x10203040U;
+    logical.sequence = 7U;
+    logical.timestamp_us = 987654U;
+    logical.object_id = 42U;
+    logical.fragment_index = 0U;
+    logical.fragment_count = 1U;
+
+    std::uint8_t key_bytes[btp::kAesGcmKeySize];
+    for (std::size_t i = 0U; i < sizeof(key_bytes); ++i) {
+        key_bytes[i] = static_cast<std::uint8_t>(0xA0U + i);
+    }
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    std::vector<std::uint8_t> plaintext(kPlaintextSize);
+    for (std::size_t i = 0U; i < plaintext.size(); ++i) {
+        plaintext[i] = static_cast<std::uint8_t>((i * 7U) & 0xFFU);
+    }
+
+    std::vector<std::uint8_t> sealed(kPlaintextSize + 16U);
+    CHECK(btp::aead_seal(key, logical, kPlaintextSize, plaintext.data(),
+                         sealed.data()) == btp::AeadError::Ok);
+
+    std::uint8_t count = 0U;
+    CHECK(btp::fragment_count(sealed.size(), btp::TransportProfile::EspNow,
+                              &count) == btp::Error::Ok);
+    CHECK(count == 2U);
+
+    btp::ReassemblySlot slots[1];
+    std::vector<std::uint8_t> storage(sealed.size());
+    const btp::ReassemblyStorage storage_view = {storage.data(),
+                                                 storage.size()};
+    btp::Reassembler reassembler(slots, &storage_view, 1U, 1000U);
+    CHECK(reassembler.valid());
+
+    // Push the fragments out of order: reassembly must not depend on arrival
+    // order, and neither must the tag.
+    btp::ReassembledMessage message = {};
+    btp::ReassemblyEvent last = btp::ReassemblyEvent::InvalidArgument;
+    const std::uint8_t order[2] = {1U, 0U};
+    for (std::size_t step = 0U; step < 2U; ++step) {
+        btp::Frame fragment = {};
+        CHECK(btp::make_fragment(logical, {sealed.data(), sealed.size()},
+                                 btp::TransportProfile::EspNow, order[step],
+                                 &fragment) == btp::Error::Ok);
+        last = reassembler.push(fragment, 5U, &message);
+    }
+    CHECK(last == btp::ReassemblyEvent::Complete);
+    CHECK(message.payload.size == sealed.size());
+
+    std::vector<std::uint8_t> opened(kPlaintextSize);
+    CHECK(btp::aead_open(key, message.header,
+                         static_cast<std::uint16_t>(message.payload.size),
+                         message.payload.data,
+                         opened.data()) == btp::AeadError::Ok);
+    CHECK(std::memcmp(opened.data(), plaintext.data(), plaintext.size()) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -410,6 +482,7 @@ int main() {
     test_dispatch_aead_seal_open_chacha20poly1305_round_trip();
     test_dispatch_rejects_reserved_cipher_id();
     test_aad_ignores_fragmentation_fields();
+    test_sealed_message_survives_fragmentation_and_reassembly();
 
     if (failures != 0) {
         std::cerr << failures << " aead test(s) failed\n";

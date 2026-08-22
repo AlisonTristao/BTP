@@ -449,6 +449,64 @@ void test_reassembly_conflicts_limits_and_timeout() {
     CHECK(reassembler.expire(210U) == 1U);
 }
 
+// Regression test for the exact-equality flags gate that made every fragment
+// of a wire v2 message unreceivable: make_fragment() preserves ENCRYPTED and
+// CIPHER_ID and ORs FRAGMENTED in, so a fragment of an encrypted message
+// carries flags 0x0003 (AES-GCM) or 0x0007 (ChaCha20-Poly1305), never the
+// bare 0x0001 the old check demanded.
+void test_reassembly_accepts_encrypted_fragments() {
+    const std::uint16_t cases[2] = {
+        static_cast<std::uint16_t>(btp::kFlagEncrypted),
+        static_cast<std::uint16_t>(btp::kFlagEncrypted |
+                                   (1U << btp::kCipherIdShift))};
+
+    for (std::size_t index = 0U; index < 2U; ++index) {
+        std::vector<std::uint8_t> logical(btp::kEspNowMaxPayloadSize + 40U);
+        for (std::size_t byte = 0U; byte < logical.size(); ++byte) {
+            logical[byte] = static_cast<std::uint8_t>(byte & 0xFFU);
+        }
+
+        btp::Header logical_header = header(0x2000U + static_cast<std::uint32_t>(index));
+        logical_header.flags = cases[index];
+
+        std::uint8_t count = 0U;
+        CHECK(btp::fragment_count(logical.size(), btp::TransportProfile::EspNow,
+                                  &count) == btp::Error::Ok);
+        CHECK(count == 2U);
+
+        btp::ReassemblySlot slots[1];
+        std::vector<std::uint8_t> storage(logical.size());
+        const btp::ReassemblyStorage storage_view = {storage.data(),
+                                                     storage.size()};
+        btp::Reassembler reassembler(slots, &storage_view, 1U, 1000U);
+        CHECK(reassembler.valid());
+
+        btp::ReassembledMessage message = {};
+        btp::ReassemblyEvent last = btp::ReassemblyEvent::InvalidArgument;
+        for (std::uint8_t part = 0U; part < count; ++part) {
+            btp::Frame fragment = {};
+            CHECK(btp::make_fragment(logical_header,
+                                     {logical.data(), logical.size()},
+                                     btp::TransportProfile::EspNow, part,
+                                     &fragment) == btp::Error::Ok);
+            CHECK((fragment.header.flags & btp::kFlagFragmented) != 0U);
+            CHECK((fragment.header.flags & btp::kFlagEncrypted) != 0U);
+            last = reassembler.push(fragment, 10U, &message);
+        }
+
+        CHECK(last == btp::ReassemblyEvent::Complete);
+        CHECK(message.payload.size == logical.size());
+        CHECK(std::memcmp(message.payload.data, logical.data(),
+                          logical.size()) == 0);
+        // Completion normalizes back to the logical header, matching the AAD
+        // canonicalization, so ENCRYPTED and CIPHER_ID survive but FRAGMENTED
+        // does not.
+        CHECK(message.header.flags == cases[index]);
+        CHECK(message.header.fragment_index == 0U);
+        CHECK(message.header.fragment_count == 1U);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -458,6 +516,7 @@ int main() {
     test_usb_hid_transport();
     test_reassembly_interleaved_out_of_order();
     test_reassembly_conflicts_limits_and_timeout();
+    test_reassembly_accepts_encrypted_fragments();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
