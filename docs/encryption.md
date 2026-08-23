@@ -1,215 +1,879 @@
-# Encryption
+# Authenticated encryption
 
-Wire version `0x02` adds authenticated encryption of the payload. This chapter
-explains what it protects, how it is wired into the envelope, and — just as
-importantly — what it deliberately does not cover.
+BTP version 2 supports authenticated encryption of the application payload.
 
-## 1. Why a CRC is not enough
+Authenticated encryption provides two properties:
 
-The envelope's CRC-32 detects accidental corruption: a flipped bit on a radio
-hop, a truncated read. It is not a security mechanism and never was.
+* **confidentiality** — the payload cannot be read without the cryptographic key;
+* **authentication and integrity** — modification of the protected message is detected during authentication.
 
-Anyone who can modify a frame can recompute its CRC in a few lines of code. A
-valid CRC proves that the bytes arrived as they were sent by *whoever sent
-them*. It says nothing about who that was.
+BTP uses AEAD: **Authenticated Encryption with Associated Data**.
 
-AEAD — authenticated encryption with associated data — closes both gaps at
-once. The payload becomes unreadable to anyone without the key, and a 16-octet
-authentication tag makes any modification detectable, including modification of
-the header fields that are not themselves encrypted.
+The payload is encrypted, while selected header fields remain visible but are included in the authentication process.
 
-## 2. What changes on the wire
+Encryption is optional and configured outside the protocol.
 
-Exactly three things:
+---
 
-1. The `ENCRYPTED` flag (`0x0002`) is set.
-2. The version octet becomes `0x02`, because the encoder derives it from that
-   flag.
-3. The payload becomes `ciphertext || tag`, so `payload_size` grows by 16.
+## 1. Security model
 
-Both ciphers are stream constructions, so the ciphertext is the same length as
-the plaintext. The whole overhead is the 16-octet tag.
+A BTP communication channel may operate over a medium that cannot be considered trusted.
 
-Nothing else moves. The header keeps the same 36-octet layout at the same
-offsets, and the envelope CRC is computed over the encrypted payload exactly as
-it would be over a plaintext one.
+This is particularly relevant for wireless communication, where another device within radio range may be able to capture or inject frames.
 
-## 3. The two ciphers
+Without cryptographic protection, an attacker may attempt to:
 
-| `CIPHER_ID` | Cipher | Key size | Tag |
-| ---: | --- | ---: | ---: |
-| `0` | AES-128-GCM | 16 octets | 16 octets |
-| `1` | ChaCha20-Poly1305 | 32 octets | 16 octets |
+* read telemetry;
+* observe command parameters;
+* read terminal traffic;
+* modify transmitted payloads;
+* create forged messages;
+* inject frames into the communication channel.
 
-AES-128-GCM is the default and is the right choice where hardware AES exists.
-ChaCha20-Poly1305 is there for targets without it, where a software AES would
-be slow or would leak timing.
+CRC-32 does not protect against these attacks.
 
-The key sizes are **not interchangeable**, which is why the library takes a key
-as a pointer and a length rather than a fixed-size type, and rejects a length
-that does not match the selected cipher exactly.
+A CRC detects accidental corruption but can be recomputed by anyone capable of modifying the frame.
 
-`CIPHER_ID` lives in bits 2-3 of `flags` as a two-bit enum. It **identifies**
-which cipher produced this payload. It does not negotiate: see section 7.
+Authenticated encryption provides cryptographic protection for BTP messages when this threat model applies.
 
-## 4. The nonce is derived, not transmitted
+---
+
+## 2. Wire representation
+
+Encryption does not change the BTP header layout.
+
+An encrypted logical message uses:
 
 ```text
-nonce = source_id (4, LE) || boot_id (4, LE) || sequence (4, LE)
+version   = 0x02
+ENCRYPTED = 1
 ```
 
-Twelve octets, which is what both ciphers want, built entirely from header
-fields the frame already carries. No counter, no random value, no extra wire
-field.
-
-This works because nonce uniqueness falls out of rules the protocol already
-enforces for other reasons:
-
-- `source_id` is unique within a routing domain, so two producers cannot
-  collide.
-- `sequence` never repeats within a boot.
-- `boot_id` changes on every boot, so a restart cannot replay a range of
-  sequence numbers under the same key.
-
-That last point is what makes the construction safe rather than merely
-convenient. Without `boot_id`, a producer that rebooted and restarted its
-sequence at zero would reuse nonces — and nonce reuse in GCM is catastrophic,
-not merely untidy.
-
-`boot_id` is not a secret and is not a key derivation input. It travels in the
-clear like every other header field.
-
-## 5. The AAD is the canonicalized logical header
-
-This is the most interesting decision in the design, and the one that makes
-encryption compatible with a multi-transport path.
-
-The associated data is the 36-octet header — so the identity, the timestamp and
-the object id are authenticated even though they are not encrypted — but it is
-the header of the **logical message**, canonicalized:
+The logical payload becomes:
 
 ```text
-FRAGMENTED      cleared
-fragment_index  0
-fragment_count  1
-payload_size    the full ciphertext + tag size of the whole message
-version         2
+ciphertext || authentication_tag
 ```
 
-The tag is therefore computed **once per logical message, before fragmenting**,
-and every field that fragmentation touches is excluded from it.
+The authentication tag is always:
 
-The consequence is worth stating plainly: a gateway can reassemble an encrypted
-message that arrived over one transport and re-fragment it onto another with a
-different size ceiling, **without holding the key**, and the tag still
-verifies. The per-fragment sizes changed, the indices changed, the per-frame
-CRCs changed — none of it entered the tag.
+```text
+16 octets
+```
 
-Without this canonicalization, encryption and crossing transports would be
-mutually exclusive, and the protocol would have to pick one.
+Therefore, for a plaintext of size `P`:
 
-This is also why reassembly restores the logical header on completion: it hands
-back exactly the form the tag was computed over.
+```text
+ciphertext_size = P
+tag_size        = 16
 
-The conformance vectors `aead_fragmented_gcm_0` and `aead_fragmented_gcm_1`
-exist to pin this down. They are the two ESP-NOW fragments of one 220-octet
-message sealed whole, and the test suite reassembles them out of order and
-opens the result.
+logical_payload_size = P + 16
+```
 
-## 6. Encryption is layered outside the codec
+The `payload_size` represented in the canonical logical header includes both the ciphertext and the authentication tag.
 
-`btp::codec` never encrypts, decrypts or verifies a tag. It has no crypto
-dependency at all, and that is deliberate: an integrator who does not need
-encryption links a codec that pulls in nothing.
+For example:
 
-What `decode()` checks on an encrypted frame is only *framing* consistency —
-that the version matches the flag, that the size adds up, that the envelope CRC
-is right over the ciphertext. **A frame that passes `decode()` has not been
-authenticated.** Verifying the tag is a separate call the caller makes, against
-a key the library never sees.
+```text
+plaintext         = 100 octets
+ciphertext        = 100 octets
+authentication    =  16 octets
+--------------------------------
+encrypted payload = 116 octets
+```
 
-The order for a receiver is therefore: decode the frame, reassemble if
-fragmented, then open the reassembled message. The order for a sender is:
-seal the logical payload, then fragment, then encode each fragment.
+The encrypted logical payload may then be fragmented according to the selected transport profile.
 
-That sender order is why the library exposes a way to serialize a header
-without encoding a frame — the AAD has to exist before the payload is
-encrypted, but `encode()` expects a payload that is already encrypted.
+---
 
-### Two backends, one contract
+## 3. Supported algorithms
 
-`btp::aead` reaches its ciphers through one of two backends, picked at compile
-time by which headers the target actually has:
+BTP version 2 defines two AEAD algorithms.
 
-| Backend | Selected when | Seen on |
-|---|---|---|
-| classic | `<mbedtls/gcm.h>` and `<mbedtls/chachapoly.h>` are reachable | mbedtls 2.x/3.x — the Arduino ESP32 SDK, and the mbedtls this project's CMake build fetches |
-| PSA | they are not, but `<psa/crypto.h>` is | mbedtls 4.x / TF-PSA-Crypto — ESP-IDF 6.x, which moved those two headers under `mbedtls/private/` |
+| `CIPHER_ID` | Algorithm         | Key size  | Nonce size | Tag size  |
+| ----------- | ----------------- | --------- | ---------- | --------- |
+| `0`         | AES-128-GCM       | 16 octets | 12 octets  | 16 octets |
+| `1`         | ChaCha20-Poly1305 | 32 octets | 12 octets  | 16 octets |
+| `2`         | Reserved          | —         | —          | —         |
+| `3`         | Reserved          | —         | —          | —         |
 
-Classic is preferred where both would work, so a target that builds today keeps
-generating exactly the code it generated before PSA existed.
+Supporting two algorithms allows an implementation to select the cipher that better matches the capabilities of the target platform.
 
-The distinction does not reach the wire or the caller. Both compute the same
-AES-128-GCM and ChaCha20-Poly1305 over the same nonce and AAD, so a peer built
-against one interoperates with a peer built against the other, and the v2 AEAD
-conformance vectors are run against both. Neither asks the caller to initialize
-anything: PSA's process-wide `psa_crypto_init()` is made lazily by the backend
-itself, because requiring it of the caller fails in the worst possible shape —
-every operation, from the first, with an error that reads like a bad argument
-rather than a missing setup step.
+The cryptographic algorithm is part of the BTP wire contract, but the way the algorithm is executed internally is not.
 
-On a target with neither backend the translation unit is empty, so a call fails
-at link time. That is deliberate: a stub returning an error would let a build
-that believes it is encrypting ship without doing so.
+An implementation may therefore use:
 
-## 7. What v2 does not protect
+* a generic software implementation;
+* an optimized cryptographic library;
+* processor-specific instructions;
+* dedicated cryptographic hardware;
+* or a combination of hardware and software.
 
-Everything in this section is an accepted limitation, not a defect.
+This allows cryptographic processing to be optimized for embedded platforms without creating a platform-specific version of BTP.
 
-**No anti-replay.** A captured valid frame can be reinjected and will verify,
-because nothing in the protocol tracks which sequence numbers have been seen.
-If your threat model includes an attacker who can record and resend, you need a
-layer above BTP.
+For example, ESP32-class devices may provide hardware acceleration for AES through the cryptographic facilities exposed by ESP-IDF. On compatible devices, parts of AES-GCM processing may also be accelerated by hardware, while other operations may remain in software.
 
-**No metadata confidentiality.** Only the payload is encrypted. `source_id`,
-`boot_id`, `sequence`, `timestamp_us`, `type` and `object_id` travel in the
-clear even with `ENCRYPTED` set. An observer cannot read your samples but can
-see who is talking, how often, and on which channel. They are *authenticated*,
-so they cannot be modified undetected — but they are not hidden.
+A BTP implementation running on such a device can therefore use the hardware-supported AES path instead of performing every cryptographic operation directly on the main processor.
 
-**No key rotation and no forward secrecy.** There is one static key. Anyone who
-obtains it can read every message ever captured under it, past and future.
+On another target, ChaCha20-Poly1305 may provide a more appropriate software implementation when efficient AES acceleration is not available.
 
-**No per-peer identity.** Authentication is by possession of the shared key.
-Two peers holding the same key are indistinguishable to the cipher, so the tag
-proves the message came from *someone in the group*, not from a specific
-sender.
+The choice can therefore consider factors such as:
 
-**No key provisioning.** Distributing keys is out of scope, and a key must
-never appear in any field of any message. Before deploying you need your own
-mechanism, and the protocol will not help you build it.
+* processor architecture;
+* available cryptographic peripherals;
+* CPU utilization;
+* execution time;
+* memory usage;
+* power consumption.
 
-## 8. Encryption is a static decision
+BTP does not require a specific cryptographic backend.
 
-There is no negotiation of any kind. Not in `HELLO`, not anywhere.
+For example:
 
-Whether a channel is encrypted, and with which cipher, is configuration decided
-out of band before the first frame. `CIPHER_ID` tells a receiver how to open
-what it just got; it does not ask.
+```text
+Desktop
+    |
+    v
+optimized software library
+    |
+    v
+AES-128-GCM
 
-This means there is no wire case for "one side encrypts and the other does
-not". A mismatch is a deployment error and it fails visibly: the receiver
-rejects frames it cannot make sense of, rather than falling back to cleartext.
-There is no fallback within a channel, by design — a downgrade path is an
-attack surface, and this protocol does not have one.
 
-## 9. Not available on USB HID
+ESP32
+    |
+    v
+ESP-IDF / hardware AES
+    |
+    v
+AES-128-GCM
 
-An encoder is refused if it sets `ENCRYPTED` on a frame bound for the USB HID
-profile, and a decoder is refused if it is handed one. The reason is the
-arithmetic: 16 octets of tag over a 22-octet payload ceiling is 73% overhead,
-against roughly 7.6% on ESP-NOW and 0.4% on serial.
 
-The rule used to live only in prose, which meant an encoder could produce
-frames every conforming decoder was supposed to refuse while no decoder
-actually refused them. It is now enforced in both directions.
+Microcontroller without AES acceleration
+    |
+    v
+optimized software implementation
+    |
+    v
+ChaCha20-Poly1305
+```
+
+These implementations can communicate with each other because the internal implementation does not affect the BTP wire representation.
+
+As long as both sides use the same:
+
+* cipher;
+* key;
+* nonce;
+* associated data;
+* plaintext representation;
+
+they produce a compatible protected BTP message.
+
+Hardware acceleration is therefore an implementation optimization, not a protocol extension.
+
+`CIPHER_ID` is stored in bits 2 and 3 of the BTP `flags` field.
+
+It identifies the algorithm used to protect the payload.
+
+It does not negotiate the algorithm.
+
+The sender and receiver must already be configured with:
+
+* the same encryption state;
+* the same cipher;
+* the same cryptographic key.
+
+A key must have exactly the size required by the selected cipher.
+
+---
+
+## 4. Key configuration
+
+BTP does not define cryptographic key provisioning.
+
+Keys are expected to be established through an external mechanism, such as:
+
+* firmware configuration;
+* secure device provisioning;
+* protected configuration storage;
+* another trusted management system.
+
+Transporting cryptographic keys, passwords, or other provisioning secrets inside BTP application payloads is **not recommended**.
+
+BTP payloads are application-defined, and the protocol does not inspect or prohibit their contents. An application can therefore place credentials or cryptographic material inside a telemetry, command, terminal, or control payload.
+
+The protocol does not prevent this behavior.
+
+However, applications should avoid using normal BTP message exchange as a key-provisioning mechanism unless an appropriate external security model has been defined.
+
+In particular, a key used to protect a BTP connection cannot be securely provisioned by sending that same key through an unprotected BTP message.
+
+```text
+Unprotected BTP channel
+        |
+        | encryption key
+        v
+     Receiver
+
+        NOT RECOMMENDED
+```
+
+If cryptographic material must be transferred through BTP, its confidentiality and authenticity must already be protected by an independent trusted mechanism.
+
+BTP itself does not define:
+
+* key exchange;
+* password exchange;
+* key derivation;
+* credential provisioning;
+* key rotation;
+* key revocation.
+
+These functions belong to the surrounding security architecture.
+
+---
+
+## 5. Nonce derivation
+
+Both supported AEAD algorithms require a unique nonce for each message encrypted with the same key.
+
+BTP derives the nonce directly from the logical-message identity:
+
+```text
+nonce =
+    LE32(source_id)
+    || LE32(boot_id)
+    || LE32(sequence)
+```
+
+The resulting nonce contains 12 octets:
+
+```text
++-------------+-------------+-------------+
+| source_id   | boot_id     | sequence    |
+| 4 octets    | 4 octets    | 4 octets    |
++-------------+-------------+-------------+
+               12 octets
+```
+
+The nonce is not transmitted as a separate field because all values required to reconstruct it are already present in the BTP header.
+
+### 5.1 Nonce uniqueness requirement
+
+The tuple:
+
+```text
+(source_id, boot_id, sequence)
+```
+
+**must never repeat while the same encryption key is in use.**
+
+This is a cryptographic requirement.
+
+For producers sharing the same key, `source_id` values must be unique within that key domain.
+
+For one producer:
+
+* `boot_id` must not be reused under the same key;
+* `sequence` must not repeat within one `boot_id`;
+* each new logical message must receive a new sequence value.
+
+Therefore:
+
+```text
+same key
++
+same source_id
++
+same boot_id
++
+same sequence
+```
+
+must never be used to encrypt two different logical messages.
+
+Nonce reuse can compromise the security guarantees of AEAD algorithms, particularly AES-GCM.
+
+### 5.2 Retransmission
+
+Retransmitting the same already-protected logical message does not create a new message identity.
+
+The original encrypted payload and authentication tag can be transmitted again.
+
+An implementation must not use the same:
+
+```text
+(source_id, boot_id, sequence)
+```
+
+to encrypt different plaintext.
+
+If the application creates a new logical message, it must assign a new sequence number before encryption.
+
+---
+
+## 6. Associated data
+
+AEAD can authenticate data without encrypting it.
+
+BTP uses this mechanism to protect the logical-message header.
+
+The associated data, or AAD, is a canonical 36-octet BTP header.
+
+Conceptually:
+
+```text
+AEAD(
+    key,
+    nonce,
+    AAD = canonical logical header,
+    plaintext
+)
+```
+
+produces:
+
+```text
+ciphertext || tag
+```
+
+The header remains visible on the wire, but modifications to authenticated header fields cause tag verification to fail.
+
+### 6.1 Canonical logical header
+
+Fragmentation modifies some header fields between frames.
+
+Those transport-dependent values cannot be used directly as AAD because the same logical message may be fragmented differently on another transport.
+
+Before generating the AAD, the header is normalized to represent the complete logical message:
+
+```text
+version         = 2
+FRAGMENTED      = 0
+fragment_index  = 0
+fragment_count  = 1
+payload_size    = complete ciphertext + tag size
+```
+
+Other logical-message fields are preserved.
+
+The resulting header is serialized using the standard 36-octet BTP header representation.
+
+```text
+                  physical fragment header
+                           |
+                           v
+                  canonicalization
+                           |
+                           v
++----------------------------------------------------+
+|          canonical logical BTP header              |
+|                   36 octets                        |
++----------------------------------------------------+
+                           |
+                           v
+                          AAD
+```
+
+### 6.2 Authenticated header information
+
+The canonical AAD binds the encrypted payload to logical-message properties including:
+
+* `version`;
+* `type`;
+* applicable `flags`;
+* `source_id`;
+* `boot_id`;
+* `sequence`;
+* `timestamp_us`;
+* `object_id`;
+* logical payload size.
+
+Changing one of these authenticated properties causes authentication to fail.
+
+The transport-specific fragmentation representation is normalized and is therefore not authenticated as a particular set of physical fragments.
+
+---
+
+## 7. Encryption and fragmentation
+
+Encryption is performed on the **complete logical payload before fragmentation**.
+
+The sender processing order is:
+
+```text
+plaintext
+    |
+    v
+AEAD encryption
+    |
+    v
+ciphertext || tag
+    |
+    v
+fragmentation
+    |
+    v
+BTP frames
+```
+
+In steps:
+
+1. create the logical-message header;
+2. set `ENCRYPTED`;
+3. select `CIPHER_ID`;
+4. derive the nonce;
+5. generate the canonical logical header;
+6. use the canonical header as AAD;
+7. encrypt the complete plaintext;
+8. append the 16-octet authentication tag;
+9. fragment the resulting encrypted payload if required;
+10. encode each fragment as a BTP frame.
+
+Each resulting frame receives its own CRC-32.
+
+The authentication tag belongs to the complete logical message, not to an individual fragment.
+
+---
+
+## 8. Decryption and reassembly
+
+The receiver performs the inverse operation.
+
+```text
+BTP frames
+    |
+    v
+frame validation
+    |
+    v
+reassembly
+    |
+    v
+ciphertext || tag
+    |
+    v
+AEAD authentication
+    |
+    v
+plaintext
+```
+
+The receiver must:
+
+1. decode each BTP frame;
+2. validate its frame CRC and header;
+3. collect all fragments belonging to the logical message;
+4. reconstruct the complete encrypted payload;
+5. reconstruct the canonical logical header;
+6. derive the nonce from `source_id`, `boot_id`, and `sequence`;
+7. select the configured key and `CIPHER_ID`;
+8. verify the authentication tag;
+9. decrypt the payload;
+10. deliver the plaintext to the application only after successful authentication.
+
+A message that fails AEAD authentication must not be delivered as valid application data.
+
+---
+
+## 9. Gateway forwarding
+
+The canonical AAD allows an encrypted logical message to cross transports with different frame-size limits.
+
+Consider a message received as:
+
+```text
+Fragment 0
+Fragment 1
+Fragment 2
+Fragment 3
+```
+
+A gateway may reassemble the encrypted logical payload:
+
+```text
+ciphertext || tag
+```
+
+and then transmit it through a transport with a larger payload capacity as:
+
+```text
+Fragment 0
+Fragment 1
+```
+
+The gateway does not need to decrypt or re-encrypt the message.
+
+```text
+Transport A
+
+[frag 0]
+[frag 1]
+[frag 2]
+[frag 3]
+    |
+    v
++-----------+
+|  Gateway  |
++-----------+
+    |
+    | reassembly
+    |
+    | ciphertext || tag
+    |
+    | re-fragmentation
+    v
+
+Transport B
+
+[frag 0]
+[frag 1]
+```
+
+The following logical properties remain unchanged:
+
+```text
+source_id
+boot_id
+sequence
+timestamp_us
+type
+object_id
+ciphertext
+authentication tag
+```
+
+Only the fragmentation representation changes.
+
+Because fragmentation fields are normalized before AAD generation, the authentication tag remains valid after re-fragmentation.
+
+The gateway therefore does not require access to the cryptographic key.
+
+---
+
+## 10. CRC and AEAD
+
+CRC-32 and AEAD have different purposes.
+
+| Mechanism       | Protects against                                    | Cryptographic |
+| --------------- | --------------------------------------------------- | ------------- |
+| CRC-32          | Accidental frame corruption                         | No            |
+| AEAD tag        | Unauthorized modification of protected message data | Yes           |
+| AEAD encryption | Passive reading of protected payload                | Yes           |
+
+CRC validation occurs at the frame level.
+
+```text
+BTP frame
+    |
+    v
+CRC validation
+```
+
+AEAD authentication occurs at the logical-message level after reassembly.
+
+```text
+logical encrypted message
+    |
+    v
+AEAD authentication
+```
+
+A frame can therefore have:
+
+```text
+valid CRC
+```
+
+while the complete message later produces:
+
+```text
+TagMismatch
+```
+
+A valid CRC does not mean that the sender was authorized and does not mean that the encrypted payload has been authenticated.
+
+---
+
+## 11. Authentication failure
+
+AEAD decryption succeeds only when the authentication tag is valid for:
+
+* the configured key;
+* the selected cipher;
+* the derived nonce;
+* the canonical associated data;
+* the received ciphertext.
+
+Otherwise, authentication fails.
+
+Possible causes include:
+
+* modified ciphertext;
+* modified authenticated header fields;
+* incorrect key;
+* incorrect cipher configuration;
+* corrupted encrypted payload;
+* incompatible logical-message metadata.
+
+The reference implementation reports authentication failure as:
+
+```text
+TagMismatch
+```
+
+The application must discard the message.
+
+It must not:
+
+* process the unauthenticated plaintext;
+* retry using plaintext automatically;
+* bypass authentication;
+* reinterpret the message as an unencrypted frame.
+
+---
+
+## 12. Replay protection
+
+Authenticated encryption does not provide replay protection by itself.
+
+An attacker may capture a complete valid encrypted message and transmit the same message again.
+
+Because the message itself has not been modified:
+
+```text
+ciphertext  -> unchanged
+tag         -> unchanged
+header      -> unchanged
+```
+
+the authentication tag can remain valid.
+
+BTP version 2 does not maintain a receive-side replay window or record which sequence numbers have already been accepted.
+
+Systems that require replay protection must implement an additional policy based on message identity, sequence tracking, session state, or another mechanism appropriate to the application.
+
+This is particularly important for control messages whose repeated execution may change system state.
+
+Command-level duplicate handling is defined separately from cryptographic replay protection.
+
+---
+
+## 13. Metadata visibility
+
+BTP encrypts the application payload.
+
+The frame header remains visible.
+
+An observer may therefore still obtain information such as:
+
+* `source_id`;
+* `boot_id`;
+* `sequence`;
+* `timestamp_us`;
+* `type`;
+* `object_id`;
+* message size;
+* transmission frequency.
+
+For example, an observer may not know the value of a telemetry measurement but may still determine:
+
+* which producer is transmitting;
+* how often it transmits;
+* when commands occur;
+* the approximate amount of data exchanged.
+
+BTP therefore provides payload confidentiality, not traffic-flow confidentiality.
+
+---
+
+## 14. Key scope and identity
+
+Authentication proves possession of the configured cryptographic key.
+
+If several devices share the same key, AEAD alone cannot cryptographically distinguish which key holder generated a valid message.
+
+For example:
+
+```text
+Device A ─┐
+Device B ─┼── shared key K
+Device C ─┘
+```
+
+a valid authentication tag proves that the message was generated using `K`.
+
+It does not independently prove whether the sender was Device A, B, or C.
+
+`source_id` is authenticated as part of the logical header, but a device possessing the same shared key can generate a valid message using another `source_id`.
+
+Systems requiring cryptographic per-device identity should use independent keys or an external identity mechanism.
+
+---
+
+## 15. Key lifetime
+
+BTP does not define:
+
+* key exchange;
+* key rotation;
+* key expiration;
+* key revocation;
+* forward secrecy.
+
+These functions belong to the surrounding security architecture.
+
+If a long-lived shared key is compromised, messages protected using that key may also be compromised.
+
+Applications must define an appropriate key-management policy for their threat model and deployment environment.
+
+---
+
+## 16. Availability
+
+Encryption does not protect communication availability.
+
+An attacker with access to the physical communication medium may still attempt to:
+
+* jam an RF channel;
+* generate interference;
+* flood a receiver with invalid frames;
+* consume link capacity.
+
+These are availability attacks and are outside the protection provided by BTP authenticated encryption.
+
+BTP can detect invalid authenticated messages, but it cannot guarantee that valid messages reach their destination.
+
+---
+
+## 17. Transport restrictions
+
+A transport profile may impose additional restrictions on encrypted messages.
+
+The current USB HID profile does not support `ENCRYPTED` frames because the 16-octet authentication tag consumes a significant portion of its available frame payload.
+
+This restriction belongs to the transport profile and does not change the general BTP encryption model.
+
+Transport-specific encryption support is defined in [Fragmentation and transport profiles](fragmentation-and-transports.md).
+
+---
+
+## 18. Reference implementation
+
+Cryptographic processing is separated from the core BTP frame codec.
+
+The frame codec is responsible for:
+
+* encoding and decoding the BTP envelope;
+* validating frame structure;
+* validating CRC-32;
+* checking encryption-related header consistency.
+
+It does not authenticate or decrypt application payloads.
+
+Cryptographic operations are provided by the optional `btp::aead` component.
+
+The reference implementation supports:
+
+```text
+AES-128-GCM
+ChaCha20-Poly1305
+```
+
+through interchangeable cryptographic backends.
+
+The backend does not affect the BTP wire representation.
+
+A message encrypted by one conforming backend can be decrypted by another when both use the same:
+
+* cipher;
+* key;
+* nonce;
+* AAD;
+* ciphertext representation.
+
+The public AEAD operations report:
+
+| Result            | Meaning                                                           |
+| ----------------- | ----------------------------------------------------------------- |
+| `Ok`              | Operation completed successfully                                  |
+| `InvalidArgument` | Invalid key, buffer, size, header, or cryptographic configuration |
+| `InvalidCipherId` | Unsupported or reserved `CIPHER_ID`                               |
+| `TagMismatch`     | Authentication failed                                             |
+
+Separating cryptographic processing from the core codec allows applications that do not require encryption to use the BTP framing layer without including a cryptographic dependency.
+
+It also allows the cryptographic backend to be replaced or optimized for a particular platform without changing the rest of the protocol implementation.
+
+For example, an embedded target may use a hardware-accelerated AES backend while another implementation uses a software backend.
+
+Both remain interoperable because the backend is not represented on the wire.
+
+---
+
+## 19. Security limitations
+
+BTP authenticated encryption provides:
+
+* payload confidentiality;
+* payload integrity;
+* authentication of the canonical logical-message header;
+* cryptographic detection of modified protected messages.
+
+It does not provide:
+
+* replay protection;
+* metadata confidentiality;
+* RF jamming protection;
+* traffic-flow confidentiality;
+* key provisioning;
+* automatic key rotation;
+* forward secrecy;
+* certificate management;
+* per-device cryptographic identity when a key is shared.
+
+BTP also does not restrict which information an application places inside a payload.
+
+Applications remain responsible for deciding whether credentials, passwords, cryptographic keys, or other sensitive information should be transmitted.
+
+These limitations must be considered when defining the security architecture of a BTP deployment.
+
+---
+
+## 20. Summary
+
+BTP version 2 protects application payloads using authenticated encryption.
+
+The protected logical message is constructed as:
+
+```text
+plaintext
+    |
+    | AEAD
+    | key
+    | nonce = source_id || boot_id || sequence
+    | AAD   = canonical logical header
+    v
+ciphertext || 16-octet tag
+```
+
+The encrypted payload can then be fragmented and transported using any profile that supports encryption.
+
+The receiver performs frame validation and reassembly before authenticating and decrypting the complete logical message.
+
+This design provides message-level cryptographic protection while allowing gateways to re-fragment encrypted traffic without access to the encryption key.
+
+The protocol also allows the cryptographic implementation to be optimized independently for each target platform.
+
+A resource-constrained embedded device may use hardware acceleration or a cipher better suited to software execution, while another implementation may use a completely different cryptographic backend.
+
+These implementation choices do not change the BTP wire format and do not affect interoperability.
+
+Its security depends on three external requirements:
+
+1. cryptographic keys must be provisioned securely;
+2. `(source_id, boot_id, sequence)` must never repeat under the same key for different encrypted messages;
+3. applications requiring replay protection or stronger identity guarantees must provide those mechanisms outside the BTP AEAD layer.
+
+BTP does not prevent an application from transmitting passwords, keys, or other sensitive values inside its payloads. Such use is application-defined and should only be adopted when an appropriate security mechanism already protects those values.
