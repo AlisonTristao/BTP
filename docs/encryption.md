@@ -136,6 +136,32 @@ That sender order is why the library exposes a way to serialize a header
 without encoding a frame — the AAD has to exist before the payload is
 encrypted, but `encode()` expects a payload that is already encrypted.
 
+### Two backends, one contract
+
+`btp::aead` reaches its ciphers through one of two backends, picked at compile
+time by which headers the target actually has:
+
+| Backend | Selected when | Seen on |
+|---|---|---|
+| classic | `<mbedtls/gcm.h>` and `<mbedtls/chachapoly.h>` are reachable | mbedtls 2.x/3.x — the Arduino ESP32 SDK, and the mbedtls this project's CMake build fetches |
+| PSA | they are not, but `<psa/crypto.h>` is | mbedtls 4.x / TF-PSA-Crypto — ESP-IDF 6.x, which moved those two headers under `mbedtls/private/` |
+
+Classic is preferred where both would work, so a target that builds today keeps
+generating exactly the code it generated before PSA existed.
+
+The distinction does not reach the wire or the caller. Both compute the same
+AES-128-GCM and ChaCha20-Poly1305 over the same nonce and AAD, so a peer built
+against one interoperates with a peer built against the other, and the v2 AEAD
+conformance vectors are run against both. Neither asks the caller to initialize
+anything: PSA's process-wide `psa_crypto_init()` is made lazily by the backend
+itself, because requiring it of the caller fails in the worst possible shape —
+every operation, from the first, with an error that reads like a bad argument
+rather than a missing setup step.
+
+On a target with neither backend the translation unit is empty, so a call fails
+at link time. That is deliberate: a stub returning an error would let a build
+that believes it is encrypting ship without doing so.
+
 ## 7. What v2 does not protect
 
 Everything in this section is an accepted limitation, not a defect.

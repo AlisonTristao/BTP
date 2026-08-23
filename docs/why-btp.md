@@ -1,269 +1,568 @@
 # Why BTP exists
 
-Nothing here is normative. This chapter answers the question the specification
-chapters do not: **why choose BTP, and when not to.** If you arrived to
-evaluate the protocol before adopting it, this is the chapter to read first and
-the only one you can read on its own.
+This chapter describes the problems addressed by BTP, its design goals, and the resulting trade-offs. It is non-normative.
 
-## 1. The problem
+## 1. Problem
 
-An embedded producer generates two classes of data with opposite requirements.
-Periodic sensor samples are worth little individually and a lot in series, and
-losing one is survivable. Control operations are worth a lot individually and
-must never execute twice.
+Embedded telemetry devices often use a single communication channel for different types of traffic.
 
-Both have to cross links with opposite characteristics: a low-bandwidth radio
-with short datagrams and high loss, and a local bus with more bandwidth and a
-byte-stream shape.
+A typical device may need to:
 
-The improvised solutions to this fail in predictable ways:
+* transmit telemetry continuously at medium or high rates;
+* receive commands from a server;
+* return command results;
+* provide an interactive terminal;
+* transmit terminal output;
+* exchange configuration and status information.
 
-- **Text over serial** — `printf` and line parsing — breaks on the first
-  payload containing `0x0A`, cannot tell one channel from another, and mixes
-  diagnostics with measurement.
-- **Shipping the `struct`** works until the first different compiler,
-  architecture or alignment flag.
-- **Timestamping on arrival** produces a time series that measures transport
-  latency, not the physical phenomenon.
-- **One format per link** duplicates the semantics and turns every gateway into
-  a translator, with one chance of reinterpretation per hop.
+All of this traffic may share the same physical or logical channel.
 
-BTP solves those four at once, and that is what it is: a fixed-width binary
-envelope, carrying an identity and an instant created at the source, that
-crosses heterogeneous transports without changing meaning.
+Without a common communication model, each traffic class tends to require its own framing, serialization, identification, and parsing rules. This increases complexity on both the device and the receiving application.
 
-## 2. What the design buys
+BTP provides a common binary framing and message model for these different types of data.
 
-### 2.1 Time belongs to the source
+### 1.1 Multiple traffic classes on one channel
 
-`source_id`, `boot_id`, `sequence` and `timestamp_us` are created by the
-producer and no intermediary rewrites them. A gateway is explicitly forbidden
-from replacing the timestamp with the time of arrival.
+Telemetry, commands, and terminal traffic have different characteristics.
 
-The practical consequence is the one that matters: the time series is immune to
-radio latency, gateway queue depth and consumer scheduling. A plot drawn
-against `timestamp_us` shows the phenomenon. Drawn against arrival time, it
-would show the transport.
+Telemetry is generally continuous and may generate messages at medium or high rates.
 
-### 2.2 One envelope, three transports
+Commands are less frequent, but usually require identification, correlation, and a corresponding result.
 
-The 36-octet header, the CRC and the fragmentation invariants are identical on
-ESP-NOW, serial and USB HID. Between profiles **only a limit constant changes**,
-never the semantics — the same fragmentation function is parameterized by the
-profile and does not switch behavior.
+Terminal traffic is interactive and may contain arbitrary byte sequences in both directions.
 
-Adding a transport is therefore writing a profile section, not a second version
-of the protocol.
+When these traffic classes share the same channel, the receiver must be able to determine which subsystem should process each incoming message.
 
-### 2.3 Portability without an ABI
+A receiver should not need to inspect arbitrary payload contents to determine whether incoming data represents:
 
-Every multi-octet integer is little-endian, the CRC included; no component ever
-transmits the memory representation of a struct; and no size is ever derived
-from `sizeof`, from alignment, or from an implicit enum type. The magic is a
-sequence of four octets, not an integer.
+* a telemetry sample;
+* a command request;
+* a command result;
+* terminal data;
+* protocol control information.
 
-The result is that the same frame is produced and consumed identically by a
-microcontroller and by a desktop, in different languages, with no ABI to
-negotiate.
+BTP assigns an explicit type to each message. Different traffic classes can therefore share the same channel while remaining independently identifiable.
 
-### 2.4 It is cheap to embed
+### 1.2 Message boundaries
 
-The shared library is C++11, **allocation-free** and free of any operating
-system dependency: the caller supplies the buffers, the reassembly slots and
-the storage capacity, and nothing grows at runtime.
+A communication channel does not necessarily preserve application message boundaries.
 
-The envelope codec depends on no crypto library at all — the cipher lives in a
-separate target, and turning it off removes the entire dependency.
+Depending on the transport, one read operation may contain:
 
-### 2.5 A gateway can re-fragment an encrypted message without the key
+* part of a message;
+* exactly one message;
+* multiple messages.
 
-This is the least obvious gain in the design and it is worth calling out.
+The protocol must therefore define how messages are identified and separated independently of the application payload.
 
-The cipher's associated data is the header of the **logical** message,
-canonicalized: `payload_size` is the size of the complete encrypted payload,
-the `FRAGMENTED` bit is cleared, and `fragment_index`/`fragment_count` go in as
-`0` and `1`.
+BTP uses explicit binary framing. Each frame contains the information required to determine its structure and payload length.
 
-Because the fragmentation fields are excluded from the computation, the tag is
-the same no matter how the message was cut. A gateway can therefore reassemble
-an encrypted message that arrived over one transport and re-fragment it onto
-another **without holding the key**, and without invalidating the tag. Without
-that canonicalization, encryption and transport traversal would be mutually
-exclusive. [Encryption](encryption.md) has the details.
+### 1.3 Limited channel capacity
 
-### 2.6 Conformance is verifiable, not interpretable
+Embedded communication channels often have limited bandwidth or restrict the amount of data that can be transmitted in a single frame.
 
-The contract is not only prose. Canonical binary vectors ship with the
-protocol, each one a readable `.json` beside a raw `.bin`, plus invalid
-mutations carrying the exact reason each must be rejected.
+This makes representation overhead relevant, especially when telemetry is transmitted continuously.
 
-An implementation is not ready when its author believes they understood the
-text. It is ready when it produces and consumes the same octets as the vectors.
-Changing a vector is declaring a change to the contract, with all the version
-process that implies.
+A textual representation such as JSON is convenient for development and integration, but carries additional information on every message.
 
-### 2.7 A command never queues behind telemetry
+For example:
 
-The logical channels have a defined priority order, with separate queues and
-FIFO within each class. Under pressure, telemetry is dropped first, then logs
-and periodic status, and the loss is counted. A sender must reserve capacity
-for at least one message of each of the two highest classes.
+```json
+{
+  "temperature": 42.5,
+  "pressure": 101.2,
+  "speed": 1500
+}
+```
 
-In other words: a burst of telemetry cannot delay a command result, and that is
-a rule rather than a recommendation.
+The field names, quotation marks, separators, and textual number representations are transmitted every time the message is sent.
 
-### 2.8 Failure is deterministic
+For low-rate communication this overhead may be acceptable. For continuous telemetry over a constrained channel, repeatedly transmitting this metadata consumes bandwidth that could otherwise be used for measurement data.
 
-A reserved field is zero, and receiving one that is not **causes rejection** —
-an unassigned value is never ignored. There is no legacy mode, no
-autodetection, no alternative parser. A frame with a mismatched CRC, an invalid
-tag or a violated invariant is discarded before routing, with no NACK.
+A binary representation can encode the same values using fixed-size fields without repeating their names in every message.
 
-This trades tolerance for diagnosability: an incompatible peer fails
-immediately and legibly, instead of half-working for months.
+BTP therefore separates the description of a telemetry structure from the values transmitted in each sample.
 
-## 3. What the design costs
+The structure can be described when required, while subsequent telemetry messages contain only the binary values associated with that structure.
 
-None of the items below is an implementation defect. All are accepted
-consequences, and several are explicit non-goals.
+### 1.4 Large logical messages
 
-### 3.1 The security model is deliberately narrow
+The maximum size of one transport frame may be smaller than the data that the application needs to exchange.
 
-The full picture is in [Encryption](encryption.md). The summary of what is
-**not** covered:
+Examples include:
 
-| Not covered | Consequence |
-| --- | --- |
-| Anti-replay | A captured valid frame can be reinjected. There is no written requirement today. |
-| Metadata confidentiality | Only the payload is encrypted. `source_id`, `boot_id`, `sequence`, `timestamp_us`, `type` and `object_id` travel in the clear even with `ENCRYPTED` set. |
-| Key rotation, forward secrecy | Neither exists. Compromising the key compromises the captured history. |
-| Per-peer identity | Authentication is by possession of a shared key. Two peers holding the same key are indistinguishable to the cipher. |
+* device descriptions;
+* manifests;
+* configuration data;
+* command results;
+* diagnostic information;
+* groups of measurements.
 
-If your environment requires any of those four, wire v2 does not offer them and
-you will need a layer outside BTP.
+BTP separates the logical message from the individual transmitted frame.
 
-### 3.2 Provisioning stays off the wire
+When a logical message exceeds the capacity of a frame, it can be divided into multiple fragments and reconstructed by the receiver.
 
-Distributing `source_id` and keys is explicitly out of scope, and a key must
-never travel in any field. The two ciphers use different, non-interchangeable
-key sizes: 16 octets for AES-128-GCM, 32 for ChaCha20-Poly1305.
+Fragmentation is therefore handled by the protocol rather than independently by each application message type.
 
-The operational consequence: before any deployment you need your own
-provisioning mechanism, and the protocol will not help you build it.
+### 1.5 Binary structures and schema synchronization
 
-### 3.3 The cipher is not negotiated at runtime
+Binary serialization reduces transmission overhead, but introduces another problem: both endpoints must agree on the meaning and layout of the payload.
 
-Setting `ENCRYPTED` is a static configuration decision made out of band. There
-is no signalling, discovery or negotiation, not in `HELLO` and not anywhere
-else. The `CIPHER_ID` sub-field identifies which cipher produced the payload;
-it negotiates nothing.
+Consider a telemetry payload represented internally as:
 
-A configuration mismatch between two endpoints is by definition a deployment
-error: there is no wire case for "one side encrypts and the other does not",
-and no fallback to cleartext within a channel.
+```cpp
+struct Telemetry {
+    float temperature;
+    float pressure;
+    uint16_t speed;
+};
+```
 
-### 3.4 There are size ceilings, and one of them is tight
+A receiver cannot correctly decode this payload unless it knows:
 
-| Profile | Frame | Payload per frame | Maximum logical payload |
-| --- | ---: | ---: | ---: |
-| Serial (COBS) | 4096 | 4056 | bounded by negotiation |
-| ESP-NOW | 250 | 210 | 53550 (`255 x 210`) |
-| USB HID | 62 | 22 | 5610 (`255 x 22`) |
+* which fields are present;
+* their order;
+* their data types;
+* their sizes;
+* their identifiers and meaning.
 
-The 255-fragment ceiling comes from the `fragment_count` field itself, which is
-one octet. Above it there is no alternative fragmentation: a large manifest and
-a command response use the same common fragmentation, or they do not pass.
+Hard-coding the same structure independently in the producer and consumer creates a synchronization requirement between both implementations.
 
-USB HID is the tight case. With 22 octets of payload, **even a `HELLO`
-fragments** — normal behavior for the profile, not a negotiation failure. It is
-also why AEAD is out of scope there: a 16-octet tag over 22 octets of payload is
-73% overhead, against ~7.6% on ESP-NOW and ~0.4% on serial. An encoder that
-sets `ENCRYPTED` on a frame bound for HID is refused outright.
+If the producer adds, removes, or changes a field while the consumer still expects the previous structure, the payload can no longer be interpreted correctly.
 
-### 3.5 A boot has a finite number of messages
+This becomes more difficult when different device models expose different measurements or when the same server communicates with multiple firmware versions.
 
-`sequence` identifies the logical message, is 32 bits wide, and must not wrap
-within a boot. That is what makes the triple
-(`source_id`, `boot_id`, `sequence`) a reliable identity — and it is what
-imposes the ceiling: exhausting the sequence requires a new `boot_id`, not a
-silent wrap.
+BTP separates **data representation** from **data description**.
 
-For telemetry at 50 Hz the ceiling is remote. For a high-rate producer that
-never restarts, it is a number to compute beforehand, not afterwards.
+Telemetry messages carry compact binary values. The protocol also provides a mechanism for the consumer to obtain the structures and capabilities exposed by a producer.
 
-### 3.6 Telemetry is best-effort by design
+This information is provided through the BTP manifest mechanism.
 
-There is no per-sample ACK and a lost sample is **never** retransmitted. A full
-queue drops telemetry, preferring the most recent sample, and counts the loss.
-End-to-end reliability exists only where the logical type defines it: a
-`COMMAND_REQUEST` is confirmed by a `COMMAND_RESULT`, not by the transport.
+A consumer can issue a manifest request and obtain a description of the objects exposed by the producer, including the information required to interpret subsequent payloads.
 
-If you need guaranteed delivery of every sample, BTP is not where you get it,
-and `TELEMETRY` should not be used as though it were.
+This allows binary telemetry to remain compact without requiring every supported data structure to be hard-coded in advance by the consumer.
 
-### 3.7 The consumer carries obligations
+### 1.6 Different traffic priorities
 
-Because nothing allocates, the sizing is yours: how many reassembly slots, how
-much storage per slot, how deep the queue per priority class. An overflow is a
-counted rejection, not a `realloc`.
+Not all traffic has the same delivery requirements.
 
-And there is one obligation that is easy to forget: a completed message
-**keeps occupying its slot**, to keep its payload view stable, until the
-consumer releases it. Completed slots also expire if they are never released.
+A continuous telemetry stream may consume a significant part of the available channel capacity. At the same time, the device may need to process a command or exchange terminal data.
 
-### 3.8 Migration is coordinated, not incremental
+If all messages are handled identically, high-rate telemetry can delay control or interactive traffic.
 
-There is no legacy mode, no alternative parser and no silent fallback. That
-door is closed on purpose.
+BTP distinguishes traffic classes so that implementations can apply different priorities to them.
 
-This is an advantage and a cost at the same time, and both halves are worth
-stating. The advantage: no compatibility debt, no old path to keep alive, one
-testable behavior. The cost: an incompatible change requires updating consumers
-in a coordinated way, and one straggler blocks the set. A wire change is only
-complete when **every** supported platform produces and consumes the same
-octets.
+Telemetry, control, terminal, and protocol traffic can therefore coexist on the same channel without requiring independent communication protocols.
 
-## 4. Where BTP fits
+### 1.7 Different devices and software environments
 
-The protocol was designed for this shape of problem, and this is where it pays
-off most:
+The same protocol may be processed by different systems, including:
 
-- **Periodic telemetry with control on the same channel**, from an embedded
-  producer to one or a few known consumers.
-- **Heterogeneous links in series** — typically a short radio hop followed by a
-  local bus — where re-framing without reinterpreting is a requirement.
-- **Time series that need the instant of origin**, not of arrival.
-- **Environments where conformance must be auditable**: several
-  implementations, several languages, and the need to prove equivalence in
-  octets.
-- **Memory-constrained targets**, where dynamic allocation is unwanted or
-  forbidden.
-- **A trusted physical network or a controlled perimeter**, with or without
-  payload encryption as the case requires.
+* microcontrollers;
+* embedded computers;
+* gateways;
+* desktop applications;
+* servers;
+* software written in different programming languages.
 
-## 5. Where BTP does not fit
+These systems may use different:
 
-Equally important, with the reason for each:
+* processor architectures;
+* memory alignment rules;
+* compiler ABIs;
+* native type representations;
+* programming languages.
 
-- **Multi-hop networks with dynamic routing.** Topology, route discovery and
-  network addressing are out of scope. The protocol assumes you know where the
-  frame is going.
-- **Hostile environments requiring anti-replay or strong per-peer identity.**
-  See 3.1 — neither exists in this version.
-- **Many peers with distinct keys.** There is no key management, rotation or
-  cryptographic identity per source.
-- **File transfer or large payload streaming.** The 255-fragment ceiling and
-  the absence of retransmission make this the wrong job for this protocol.
-- **Incremental evolution without coordinating consumers.** See 3.8. If you do
-  not control both sides, the absence of a legacy mode is an expensive cost.
-- **Service discovery on an open network.** The manifest describes the catalog
-  of a known producer; it is not a network discovery mechanism.
+The transmitted format must therefore not depend on the native memory representation of a C or C++ structure.
 
-## 6. One sentence
+BTP defines field sizes, byte order, and encoding rules explicitly.
 
-BTP trades **network flexibility and tolerance of a divergent peer** for
-**determinism, portability and verifiable conformance**, in an envelope small
-enough to fit a radio datagram. If your problem is moving measurement and
-control from an embedded device to a computer across different links without
-losing the origin of time, that trade is favorable. If your problem is
-networking, it is not.
+An implementation can reconstruct the logical data representation without depending on the memory layout used by another device.
+
+### 1.8 Intermediate devices
+
+A communication path may contain an intermediate device between the producer and the final consumer.
+
+This device may need to:
+
+* receive messages;
+* queue them;
+* fragment or reassemble them;
+* prioritize traffic;
+* forward messages.
+
+It should not need to understand the application-specific meaning of every telemetry field or command.
+
+BTP separates protocol framing from application semantics.
+
+An intermediate device can therefore manipulate and forward BTP messages without implementing every application data structure carried by the protocol.
+
+---
+
+## 2. Resulting model
+
+BTP treats telemetry, commands, terminal data, and protocol control as different message types transported through a common framing layer.
+
+```text
+                       BTP channel
+                            |
+           +----------------+----------------+
+           |                |                |
+           v                v                v
+       Telemetry         Commands         Terminal
+           |                |                |
+       binary data     request/result     byte stream
+           |
+           v
+     schema described
+       by manifest
+```
+
+The common protocol layer provides mechanisms for:
+
+* message framing;
+* message identification;
+* source timestamps;
+* fragmentation;
+* integrity validation;
+* traffic classification;
+* data structure discovery.
+
+Application-specific payloads remain independent from these mechanisms.
+
+The same communication model can therefore be used by different devices and software implementations while keeping application data compact and explicitly identifiable.
+
+---
+
+## 3. Design goals
+
+### 3.1 Source-owned message identity
+
+Each logical message is identified by:
+
+```text
+source_id
+boot_id
+sequence
+```
+
+The producer also assigns `timestamp_us`.
+
+These values belong to the logical message and are preserved while the message is processed or forwarded.
+
+`source_id` identifies the producer.
+
+`boot_id` identifies one execution of that producer.
+
+`sequence` identifies a logical message within that execution.
+
+Together, these fields allow consumers to distinguish messages without depending on transport-specific addressing.
+
+### 3.2 Source timestamps
+
+Telemetry should represent when a measurement was acquired, not when it arrived at the consumer.
+
+A timestamp assigned by the receiver includes transport delay, buffering, queueing, and application scheduling.
+
+BTP therefore assigns `timestamp_us` at the producer.
+
+Intermediate devices and consumers preserve this value.
+
+This allows data from different messages and devices to be correlated using the acquisition time rather than the delivery time.
+
+### 3.3 Transport-independent message model
+
+BTP separates the logical message from the mechanism used to transport it.
+
+The following properties belong to the BTP message model:
+
+* message identity;
+* message type;
+* timestamp;
+* object identification;
+* payload representation;
+* integrity information.
+
+Transport-specific mechanisms may define different frame-size limits or encapsulation rules without changing the logical meaning of the message.
+
+This allows the same application model to be used across communication channels with different characteristics.
+
+### 3.4 Deterministic serialization
+
+BTP does not transmit native application structures directly.
+
+The wire representation explicitly defines:
+
+* field offsets;
+* field widths;
+* byte order;
+* valid field values;
+* reserved fields;
+* payload boundaries;
+* integrity coverage.
+
+The encoded representation therefore does not depend on:
+
+* compiler structure packing;
+* alignment;
+* enum representation;
+* native endianness;
+* programming language.
+
+Independent implementations can generate and consume the same byte representation.
+
+### 3.5 Compact telemetry representation
+
+High-rate telemetry should minimize repeated metadata.
+
+BTP telemetry payloads contain binary values rather than repeatedly transmitting field names and textual representations.
+
+Descriptions of available telemetry objects are provided separately through the manifest.
+
+This separates frequently transmitted data from infrequently transmitted metadata.
+
+### 3.6 Runtime discovery
+
+A consumer should not require every possible producer configuration to be compiled into the application.
+
+BTP provides a manifest mechanism that allows a producer to describe the objects and capabilities it exposes.
+
+A consumer can request this information when required.
+
+The manifest allows the consumer to determine how supported telemetry, commands, and other exposed objects should be interpreted.
+
+This reduces direct coupling between producer firmware and consumer software.
+
+### 3.7 Bounded resource usage
+
+BTP is intended to operate on resource-constrained embedded systems.
+
+The protocol is designed so that implementations can use bounded memory for:
+
+* encoding;
+* decoding;
+* queues;
+* fragmentation;
+* reassembly.
+
+The reference implementation does not require dynamic allocation in the core codec.
+
+Applications determine the amount of memory allocated for queues and reassembly according to their system requirements.
+
+### 3.8 Explicit traffic classification
+
+BTP identifies the purpose of each message explicitly.
+
+Traffic classes include different requirements for:
+
+* frequency;
+* latency;
+* reliability;
+* processing priority.
+
+An implementation can therefore prioritize control or interactive traffic independently from continuous telemetry.
+
+### 3.9 Deterministic validation
+
+Invalid frames are rejected according to explicit protocol rules.
+
+Validation may include:
+
+* frame structure;
+* field ranges;
+* field combinations;
+* reserved values;
+* payload length;
+* integrity checks;
+* authentication when enabled.
+
+A decoder should not infer missing information or reinterpret malformed frames using alternative formats.
+
+### 3.10 Verifiable conformance
+
+The protocol should be implementable independently of the reference library.
+
+BTP therefore defines canonical binary test vectors.
+
+Valid vectors specify:
+
+* message fields;
+* expected encoded representation.
+
+Invalid vectors specify malformed inputs and their expected rejection.
+
+These vectors allow different implementations to verify byte-level compatibility.
+
+The specification defines the protocol. The reference implementation and conformance vectors provide implementations and tests for that specification.
+
+---
+
+## 4. Design trade-offs
+
+The design goals above introduce explicit limitations.
+
+### 4.1 Binary encoding requires schema information
+
+Binary payloads are more compact than self-describing textual formats, but their fields cannot be interpreted without a corresponding schema.
+
+BTP addresses this using the manifest mechanism.
+
+The consumer must obtain or already know the relevant description before interpreting application-specific binary payloads.
+
+### 4.2 Fragmentation has finite limits
+
+Fragmentation allows logical messages to exceed the size of one transport frame, but it is not intended to provide general-purpose streaming.
+
+The number and size of fragments are bounded by protocol fields and implementation resources.
+
+Large files or continuous bulk transfers should use a transport designed for streaming.
+
+### 4.3 Telemetry may be best-effort
+
+Continuous telemetry can generate data faster than a constrained communication channel can transmit it.
+
+BTP allows implementations to prioritize newer telemetry and higher-priority traffic instead of requiring retransmission of every telemetry sample.
+
+Applications that require guaranteed delivery of every measurement need an additional reliability mechanism.
+
+### 4.4 Static resource limits
+
+Embedded implementations may use fixed-capacity queues and reassembly buffers.
+
+If these resources are exhausted, the implementation must reject or discard data according to defined behavior rather than growing memory usage without limit.
+
+### 4.5 Security scope
+
+BTP can provide authenticated payload encryption, but it is not intended to implement a complete network-security architecture.
+
+Depending on the selected protocol version and configuration, BTP does not necessarily provide:
+
+* anti-replay protection;
+* metadata confidentiality;
+* automatic key distribution;
+* automatic key rotation;
+* forward secrecy;
+* per-peer cryptographic identity.
+
+Systems requiring these properties must provide them through the surrounding architecture.
+
+### 4.6 Provisioning is external
+
+BTP does not define how device identities, cryptographic keys, or initial endpoint configuration are provisioned.
+
+These values must be established by the application or deployment environment.
+
+### 4.7 Protocol upgrades require coordination
+
+BTP favors deterministic decoding over implicit compatibility behavior.
+
+An incompatible change to the wire format may therefore require coordinated updates of communicating endpoints.
+
+Backward compatibility must be defined explicitly when required.
+
+---
+
+## 5. Intended use cases
+
+BTP is intended for systems where a device must exchange multiple types of data through a common communication channel.
+
+Typical use cases include:
+
+* embedded telemetry devices;
+* medium- or high-rate measurement acquisition;
+* remote command execution;
+* interactive terminal access;
+* device configuration;
+* status exchange;
+* communication through bandwidth-constrained links;
+* devices with limited memory;
+* systems containing intermediate gateways;
+* servers communicating with multiple device models;
+* applications implemented in different programming languages.
+
+A typical communication model is:
+
+```text
++------------------+                    +------------------+
+| Embedded device  |                    |      Server      |
+|                  |                    |                  |
+|  Telemetry       | -----------------> | Telemetry parser |
+|  Commands        | <----------------> | Command manager  |
+|  Terminal        | <----------------> | Terminal client  |
+|  Manifest        | <----------------> | Device model     |
++------------------+                    +------------------+
+            \_________________________________/
+                    common BTP channel
+```
+
+All of these functions use the same framing and message model.
+
+---
+
+## 6. Out-of-scope use cases
+
+BTP is not intended to replace every layer of a communication system.
+
+### 6.1 Network routing
+
+BTP does not define:
+
+* route discovery;
+* network-layer addressing;
+* dynamic topology management;
+* multi-hop routing.
+
+The surrounding communication system is responsible for delivering frames between endpoints.
+
+### 6.2 General-purpose file transfer
+
+BTP fragmentation is intended for bounded logical messages.
+
+It is not intended as a replacement for a reliable file-transfer or bulk-streaming protocol.
+
+### 6.3 Fully self-describing messages
+
+BTP does not repeat complete field names and schemas in every telemetry message.
+
+Consumers requiring fully self-describing individual messages may prefer a textual or schema-embedded serialization format.
+
+### 6.4 Automatic network service discovery
+
+The manifest describes the capabilities of a known BTP producer.
+
+It does not discover arbitrary devices or services on a network.
+
+### 6.5 Complete security infrastructure
+
+BTP does not provide key provisioning, certificate infrastructure, user authentication, or network access control.
+
+These functions belong to the surrounding system.
+
+---
+
+## 7. Design summary
+
+BTP provides a common binary message model for embedded telemetry and control systems.
+
+It is designed around the following requirements:
+
+* multiple traffic classes sharing the same communication channel;
+* medium- and high-rate telemetry;
+* compact binary representation;
+* command request and result exchange;
+* bidirectional terminal traffic;
+* bounded transport frame sizes;
+* fragmentation of larger logical messages;
+* runtime discovery of device data structures;
+* interoperability between different processors and software environments;
+* deterministic validation and conformance testing.
+
+BTP separates frequently transmitted data from its description.
+
+Telemetry values can therefore be transmitted in a compact binary representation, while the manifest provides the information required for a consumer to interpret the structures exposed by the producer.
+
+This avoids the repeated overhead of self-describing textual formats while reducing the need to hard-code identical application structures independently on both endpoints.
+
+The protocol focuses on framing, message identity, serialization, fragmentation, traffic classification, discovery, and integrity.
+
+Routing, provisioning, large-scale streaming, and complete network security remain outside its scope.

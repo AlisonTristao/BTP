@@ -8,6 +8,20 @@
 
 namespace btp {
 
+// Two interchangeable backends implement everything below, chosen at compile
+// time by which crypto headers the target actually has (see the top of
+// src/aead.cpp): mbedtls's classic <mbedtls/gcm.h> and <mbedtls/chachapoly.h>
+// where they are public -- the Arduino ESP32 SDK, and the mbedtls this
+// project's CMake build fetches -- and the PSA Crypto API where they are not,
+// which is mbedtls 4.x / TF-PSA-Crypto as shipped by ESP-IDF 6.x.
+//
+// The choice is invisible from here. Both compute the same AES-128-GCM and
+// ChaCha20-Poly1305 over the same nonce and AAD, so a peer built against one
+// interoperates with a peer built against the other, and neither asks the
+// caller to initialize anything -- the v2 AEAD conformance vectors are run
+// against both. If a target has neither backend, this translation unit is
+// empty and a call here fails at link time rather than silently doing nothing.
+
 static const std::size_t kAesGcmKeySize = 16U;            // 128 bits, AES-128-GCM
 static const std::size_t kChaCha20Poly1305KeySize = 32U;  // 256 bits, RFC 8439
 
