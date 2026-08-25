@@ -1,102 +1,78 @@
 # Commands and discovery
 
+BTP uses the `COMMAND` and `CONTROL` message types for request/response operations and runtime discovery.
+
 This chapter defines:
 
-* command execution and results;
+* command requests and results;
+* request correlation;
+* command deduplication;
 * manifest discovery;
 * telemetry subscriptions;
-* protocol status reporting.
+* protocol status messages.
 
 Session establishment and terminal traffic are defined separately in [Session and terminal](session-and-terminal.md).
 
-All layouts in this chapter describe the complete logical payload after reassembly.
+All layouts below describe the **complete logical payload after reassembly**.
 
-There is no:
-
-* alignment padding;
-* implicit terminator;
-* native structure representation.
-
-All multi-octet integers use little-endian encoding.
+BTP payload structures use explicit wire fields. There is no implicit padding, alignment or native structure layout.
 
 ---
 
-## 1. Common data types
+## 1. Common primitives
 
-### 1.1 `utf8_u16`
+Several messages in this chapter use the same basic representations.
 
-`utf8_u16` represents a length-prefixed UTF-8 string.
+### 1.1 Length-prefixed UTF-8
 
-```text
-+----------------------+----------------------+
-| size                 | UTF-8 data           |
-| uint16_le            | size octets          |
-+----------------------+----------------------+
-```
-
-`size` defines the number of UTF-8 octets that follow.
+`utf8_u16` is encoded as:
 
 ```text
-size = 0
+size:uint16_le
+data[size]
 ```
 
-represents an empty string.
+`data` contains exactly `size` octets of UTF-8.
 
-The string contains:
+There is:
 
-* no byte-order mark requirement;
+* no BOM;
 * no implicit null terminator.
 
-The decoder must validate `size` before reading the string.
+A zero size represents an empty string.
+
+The receiver validates the declared size before reading the data.
 
 ---
 
-### 1.2 `bytes_u32`
+### 1.2 Length-prefixed bytes
 
-`bytes_u32` represents an arbitrary byte sequence.
+`bytes_u32` is encoded as:
 
 ```text
-+----------------------+----------------------+
-| size                 | data                 |
-| uint32_le            | size octets          |
-+----------------------+----------------------+
+size:uint32_le
+data[size]
 ```
 
-Any octet value is valid inside `data`.
+The contents are arbitrary octets.
 
-The decoder must validate `size` against:
-
-* the remaining logical payload;
-* the protocol limits;
-* the negotiated session limits, when applicable.
-
-Length validation occurs before allocation, copying, or parsing of the contained data.
+The receiver validates the declared size against the remaining logical payload and all applicable protocol limits before consuming the data.
 
 ---
 
-## 2. Request references
+### 1.3 Request references
 
-Responses identify the request that produced them using a request reference.
+Responses identify the request to which they belong using:
 
-The layout is:
+| Offset | Size | Field               |
+| -----: | ---: | ------------------- |
+|      0 |    4 | `request_source_id` |
+|      4 |    4 | `request_boot_id`   |
+|      8 |    4 | `reply_to_sequence` |
 
-| Offset | Size | Field               | Wire type   |
-| -----: | ---: | ------------------- | ----------- |
-|      0 |    4 | `request_source_id` | `uint32_le` |
-|      4 |    4 | `request_boot_id`   | `uint32_le` |
-|      8 |    4 | `reply_to_sequence` | `uint32_le` |
+All values are `uint32_le`.
 
-These values correspond to the envelope identity of the original request:
-
-```text
-request_source_id = request.source_id
-request_boot_id   = request.boot_id
-reply_to_sequence = request.sequence
-```
-
-A sequence number alone is not sufficient to identify a request.
-
-Request correlation therefore uses:
+Together:
 
 ```text
 (
@@ -106,129 +82,121 @@ Request correlation therefore uses:
 )
 ```
 
-The response copies these values unchanged.
+identify one request.
+
+`reply_to_sequence` alone is not sufficient because sequence values belong to a source and boot namespace.
+
+The response is itself a new BTP message and therefore has its own envelope `sequence`.
 
 ---
 
-## 3. Result status
+### 1.4 Result codes
 
-Operations that return an explicit result use the following status codes.
+Operations that produce a result use the following status values:
 
-|  Value | Name          | Meaning                                       |
-| -----: | ------------- | --------------------------------------------- |
-| `0x00` | `SUCCESS`     | Operation completed successfully              |
-| `0x01` | `REJECTED`    | Request was valid but refused                 |
-| `0x02` | `FAILED`      | Execution started but failed                  |
-| `0x03` | `TIMEOUT`     | Execution exceeded its permitted time         |
-| `0x04` | `CANCELLED`   | Execution was cancelled                       |
-| `0x05` | `UNSUPPORTED` | Requested feature or version is not supported |
-| `0x06` | `BUSY`        | Required capacity is temporarily unavailable  |
+|  Value | Name          |
+| -----: | ------------- |
+| `0x00` | `SUCCESS`     |
+| `0x01` | `REJECTED`    |
+| `0x02` | `FAILED`      |
+| `0x03` | `TIMEOUT`     |
+| `0x04` | `CANCELLED`   |
+| `0x05` | `UNSUPPORTED` |
+| `0x06` | `BUSY`        |
 
-Error codes provide additional information.
+Common error codes are:
 
-|             Value | Name                   |
-| ----------------: | ---------------------- |
-|          `0x0000` | `NONE`                 |
-|          `0x0001` | `MALFORMED_PAYLOAD`    |
-|          `0x0002` | `UNKNOWN_OBJECT`       |
-|          `0x0003` | `INVALID_ARGUMENT`     |
-|          `0x0004` | `NOT_AUTHORIZED`       |
-|          `0x0005` | `CAPACITY_EXHAUSTED`   |
-|          `0x0006` | `EXECUTION_TIMEOUT`    |
-|          `0x0007` | `INTERNAL_ERROR`       |
-|          `0x0008` | `UNSUPPORTED_VERSION`  |
-|          `0x0009` | `STALE_TARGET_BOOT`    |
-|          `0x000A` | `REQUEST_CONFLICT`     |
-|          `0x000B` | `NOT_FOUND`            |
-| `0x000C`–`0x7FFF` | Reserved to BTP        |
-| `0x8000`–`0xFFFF` | Action-specific errors |
+|             Value | Name                  |
+| ----------------: | --------------------- |
+|          `0x0000` | `NONE`                |
+|          `0x0001` | `MALFORMED_PAYLOAD`   |
+|          `0x0002` | `UNKNOWN_OBJECT`      |
+|          `0x0003` | `INVALID_ARGUMENT`    |
+|          `0x0004` | `NOT_AUTHORIZED`      |
+|          `0x0005` | `CAPACITY_EXHAUSTED`  |
+|          `0x0006` | `EXECUTION_TIMEOUT`   |
+|          `0x0007` | `INTERNAL_ERROR`      |
+|          `0x0008` | `UNSUPPORTED_VERSION` |
+|          `0x0009` | `STALE_TARGET_BOOT`   |
+|          `0x000A` | `REQUEST_CONFLICT`    |
+|          `0x000B` | `NOT_FOUND`           |
+| `0x000C`–`0x7FFF` | Reserved              |
+| `0x8000`–`0xFFFF` | Action-specific       |
 
-The following relationship is required:
+A successful result uses:
 
 ```text
-SUCCESS     -> error_code = NONE
-non-SUCCESS -> error_code != NONE
+status     = SUCCESS
+error_code = NONE
 ```
 
-Human-readable error messages may accompany these values.
-
-Applications must use `status` and `error_code` for program logic. Diagnostic text is not a machine-readable error identifier.
+A non-success result uses an error code other than `NONE`.
 
 ---
 
-## 4. Object identifiers
+### 1.5 `object_id` namespaces
 
-The message envelope uses `type` to select a logical channel and `object_id` to select an operation within that channel.
+The interpretation of `object_id` depends on the envelope `type`.
 
-This chapter defines the following objects.
+For `COMMAND`:
 
-### `COMMAND`
-
-| `object_id` | Name              |
+| `object_id` | Operation         |
 | ----------: | ----------------- |
 |    `0x0001` | `COMMAND_REQUEST` |
 |    `0x0002` | `COMMAND_RESULT`  |
 
-### `CONTROL`
+For `CONTROL`:
 
-| `object_id` | Name                 |
-| ----------: | -------------------- |
-|    `0x0003` | `MANIFEST_REQUEST`   |
-|    `0x0004` | `MANIFEST_DATA`      |
-|    `0x0005` | `SUBSCRIBE`          |
-|    `0x0006` | `SUBSCRIBE_RESULT`   |
-|    `0x0007` | `UNSUBSCRIBE`        |
-|    `0x0008` | `UNSUBSCRIBE_RESULT` |
-|    `0x0009` | `STATUS`             |
+| `object_id` | Operation              |
+| ----------: | ---------------------- |
+|    `0x0001` | `HELLO`                |
+|    `0x0002` | `HELLO_RESULT`         |
+|    `0x0003` | `MANIFEST_REQUEST`     |
+|    `0x0004` | `MANIFEST_DATA`        |
+|    `0x0005` | `SUBSCRIBE`            |
+|    `0x0006` | `SUBSCRIBE_RESULT`     |
+|    `0x0007` | `UNSUBSCRIBE`          |
+|    `0x0008` | `UNSUBSCRIBE_RESULT`   |
+|    `0x0009` | `STATUS`               |
+|    `0x000A` | `SESSION_CLOSE`        |
+|    `0x000B` | `SESSION_CLOSE_RESULT` |
 
-Other `CONTROL` identifiers are defined in [Session and terminal](session-and-terminal.md).
-
-An unknown `object_id` is rejected.
-
-The receiver does not infer another message type from the payload contents.
+Unassigned values are reserved.
 
 ---
 
-# 5. Commands
+## 2. Commands
 
-Commands use a request/result model.
+A command requests execution of an action exposed by a target source.
+
+The available actions and their parameter/result schemas are described by the source manifest.
+
+The basic exchange is:
 
 ```text
-Requester                              Executor
-    |                                     |
-    |--------- COMMAND_REQUEST ---------->|
-    |                                     |
-    |          execute action             |
-    |                                     |
-    |<--------- COMMAND_RESULT -----------|
+Requester                              Target
+   |                                     |
+   |--------- COMMAND_REQUEST ---------->|
+   |                                     |
+   |<--------- COMMAND_RESULT -----------|
 ```
-
-The request identifies:
-
-* the target source;
-* the target boot;
-* the action;
-* the action version;
-* the encoded parameters.
-
-The result identifies the original request and reports its final outcome.
 
 ---
 
-## 5.1 `COMMAND_REQUEST`
+### 2.1 `COMMAND_REQUEST`
 
-The payload is:
+The logical payload is:
 
-| Offset |     Size | Field              | Wire type               |
-| -----: | -------: | ------------------ | ----------------------- |
-|      0 |        4 | `target_source_id` | `uint32_le`             |
-|      4 |        4 | `target_boot_id`   | `uint32_le`             |
-|      8 |        2 | `action_id`        | `uint16_le`             |
-|     10 |        2 | `action_version`   | `uint16_le`             |
-|     12 |        2 | `flags`            | `uint16_le`             |
-|     14 |        2 | `reserved`         | `uint16_le`             |
-|     16 |        4 | `parameter_size`   | `uint32_le`             |
-|     20 | variable | `parameters`       | `parameter_size` octets |
+| Offset |     Size | Field              | Wire type   |
+| -----: | -------: | ------------------ | ----------- |
+|      0 |        4 | `target_source_id` | `uint32_le` |
+|      4 |        4 | `target_boot_id`   | `uint32_le` |
+|      8 |        2 | `action_id`        | `uint16_le` |
+|     10 |        2 | `action_version`   | `uint16_le` |
+|     12 |        2 | `flags`            | `uint16_le` |
+|     14 |        2 | `reserved`         | `uint16_le` |
+|     16 |        4 | `parameter_size`   | `uint32_le` |
+|     20 | variable | `parameters`       | octets      |
 
 The following fields must be non-zero:
 
@@ -239,154 +207,92 @@ action_id
 action_version
 ```
 
-The current command format requires:
+`flags` and `reserved` are zero in version 2.
+
+`parameters` contains exactly `parameter_size` octets.
+
+The parameter representation is determined by the action descriptor associated with:
 
 ```text
-flags    = 0
-reserved = 0
+(action_id, action_version)
 ```
 
-`parameter_size` may be zero.
-
-The payload must contain exactly:
-
-```text
-20 + parameter_size
-```
-
-octets.
-
-Trailing bytes are invalid.
+in the target manifest.
 
 ---
 
-## 5.2 Target boot
+### 2.2 Target boot validation
 
-`target_boot_id` identifies the execution of the target device against which the command was created.
-
-Before executing the command, the target verifies:
+A command is addressed to:
 
 ```text
-target_source_id == local source_id
-target_boot_id   == local boot_id
+(target_source_id, target_boot_id)
 ```
 
-If the source is correct but the target has restarted since the command was created, the command is rejected with:
+The target compares `target_boot_id` with its current `boot_id`.
+
+If they differ, the command is not executed and the result is:
 
 ```text
-REJECTED / STALE_TARGET_BOOT
+REJECTED
+STALE_TARGET_BOOT
 ```
 
-This prevents an old command from being executed against a different runtime state after a restart.
-
-For example:
-
-```text
-Server creates command
-target_boot_id = 100
-        |
-        v
-Device restarts
-boot_id = 101
-        |
-        v
-Old command arrives
-        |
-        v
-REJECTED / STALE_TARGET_BOOT
-```
+This prevents a request created for one source boot from being applied to another.
 
 ---
 
-## 5.3 Action definition
+### 2.3 Action version
 
-`action_id` identifies an action exposed by the target.
-
-`action_version` identifies the exact definition of that action.
-
-The target's manifest defines:
-
-* action name;
-* action version;
-* parameter encoding;
-* parameter fields;
-* result encoding;
-* result fields;
-* execution timeout;
-* action-specific error codes;
-* action flags.
-
-The command parameters must match the action descriptor identified by:
+The target resolves the command using:
 
 ```text
-(target_source_id, action_id, action_version)
+(action_id, action_version)
 ```
 
-Unknown versions or invalid parameter payloads are rejected.
+The requested version must correspond to a currently supported action descriptor.
 
-The receiver must not attempt to decode parameters using another action version.
+The receiver does not substitute another action version automatically.
+
+An unsupported version is rejected.
 
 ---
 
-## 5.4 `COMMAND_RESULT`
+### 2.4 `COMMAND_RESULT`
 
-The result envelope identifies the executor and uses a new sequence number generated by that executor.
+The logical payload is:
 
-The payload contains:
+|   Offset |     Size | Field             | Wire type   |
+| -------: | -------: | ----------------- | ----------- |
+|        0 |       12 | request reference | section 1.3 |
+|       12 |        2 | `action_id`       | `uint16_le` |
+|       14 |        2 | `action_version`  | `uint16_le` |
+|       16 |        1 | `status`          | `uint8`     |
+|       17 |        1 | `reserved`        | `uint8`     |
+|       18 |        2 | `error_code`      | `uint16_le` |
+|       20 | variable | `message`         | `utf8_u16`  |
+| variable | variable | `result`          | `bytes_u32` |
 
-|   Offset |    Size | Field             | Wire type   |
-| -------: | ------: | ----------------- | ----------- |
-|        0 |      12 | request reference | Section 2   |
-|       12 |       2 | `action_id`       | `uint16_le` |
-|       14 |       2 | `action_version`  | `uint16_le` |
-|       16 |       1 | `status`          | `uint8`     |
-|       17 |       1 | `reserved`        | `uint8`     |
-|       18 |       2 | `error_code`      | `uint16_le` |
-|       20 | `2 + M` | `message`         | `utf8_u16`  |
-| `22 + M` | `4 + R` | `result`          | `bytes_u32` |
-
-`reserved` must be zero.
-
-When the original request was parsed successfully:
+When the request was decoded successfully:
 
 ```text
 action_id
 action_version
 ```
 
-copy the corresponding request values.
+identify the requested action.
 
-If the request payload itself was malformed, these fields may be zero.
+If the request could not be parsed far enough to determine them, they may be zero.
 
-The `result` data uses the encoding defined by the action descriptor.
+The result body uses the result encoding defined by the corresponding action descriptor.
 
-`result` is empty when:
-
-* the action defines no output;
-* `status` is not `SUCCESS`.
-
-Exactly one final `COMMAND_RESULT` is associated with each accepted or rejected request.
-
-Intermediate progress is not transmitted through additional command results.
-
-Progress information belongs to telemetry or status messages.
+For a non-success status, the result body is empty unless explicitly defined otherwise by the protocol version.
 
 ---
 
-## 5.5 Command retry
+### 2.5 Command deduplication
 
-A requester retries a command by retransmitting the same logical request.
-
-A retry preserves:
-
-```text
-source_id
-boot_id
-sequence
-logical payload
-```
-
-Therefore, the request identity remains:
+Command requests are deduplicated using the request identity:
 
 ```text
 (
@@ -396,177 +302,96 @@ Therefore, the request identity remains:
 )
 ```
 
-Using a new sequence number creates a new logical command.
+The executor retains the logical request associated with this key.
 
-It is not a retry.
+For a previously unseen key, the request is processed normally.
+
+For an existing key:
+
+```text
+same key + same logical request
+```
+
+is treated as a retransmission of the original command.
+
+The command is not executed again.
+
+If execution has already completed, the previously generated `COMMAND_RESULT` is retransmitted.
+
+If:
+
+```text
+same key + different logical request
+```
+
+is received, the new request is rejected with:
+
+```text
+REJECTED
+REQUEST_CONFLICT
+```
+
+A request sequence therefore cannot identify two different commands within the same requester boot.
 
 ---
 
-## 5.6 Deduplication
+### 2.6 Deduplication capacity
 
-Command execution uses request deduplication to prevent the same logical command from producing the same side effect more than once.
+The deduplication cache is bounded.
 
-The deduplication key is:
-
-```text
-(
-    request_source_id,
-    request_boot_id,
-    request_sequence
-)
-```
-
-The executor also compares the complete logical request payload.
-
-### First request
-
-When a new request identity is received, the executor reserves its deduplication entry before starting the action.
+If no additional entry can be retained, a new command request may be rejected with:
 
 ```text
-new identity
-    |
-    v
-reserve dedup entry
-    |
-    v
-execute action
+BUSY
+CAPACITY_EXHAUSTED
 ```
 
-The entry must exist before any externally visible effect occurs.
+Existing entries are not discarded in a way that would permit a previously processed command to be executed again under the same request identity.
 
-### Identical retry
-
-If the same identity is received with the same payload:
-
-```text
-same identity
-same payload
-```
-
-the action is not executed again.
-
-If execution is still in progress, the duplicate remains associated with the original execution.
-
-If execution has completed, the executor retransmits the previously generated `COMMAND_RESULT`.
-
-The retransmitted result is byte-identical to the original result and uses the same result sequence.
-
-### Conflicting request
-
-If the same request identity is received with different payload bytes:
-
-```text
-same identity
-different payload
-```
-
-the request is not executed.
-
-The executor returns:
-
-```text
-REJECTED / REQUEST_CONFLICT
-```
-
-### Deduplication capacity
-
-Deduplication storage is bounded.
-
-Entries protecting accepted requests are not removed to create space for new commands during the executor's current boot.
-
-If the configured deduplication capacity is exhausted, new requests are rejected with:
-
-```text
-BUSY / CAPACITY_EXHAUSTED
-```
-
-Existing entries remain protected.
-
-This preserves the duplicate-execution guarantee even under resource exhaustion.
-
-### Deduplication lifetime
-
-An accepted deduplication entry remains valid until the executor restarts.
-
-The following events do not authorize removal:
-
-* transport disconnection;
-* session closure;
-* command retransmission;
-* requester restart;
-* communication timeout.
-
-When the executor restarts, the cache may be cleared.
-
-Previously created commands contain the old `target_boot_id` and are therefore rejected as stale if received after that restart.
-
-### Idempotent actions
-
-The manifest may mark an action as:
-
-```text
-IDEMPOTENT
-```
-
-This indicates that repeated execution is naturally safe according to the action semantics.
-
-Deduplication is still required.
-
-The flag does not disable command deduplication.
+The deduplication state is scoped to the executor boot.
 
 ---
 
-# 6. Manifest discovery
+## 3. The manifest
 
-The manifest describes the data and actions exposed by a BTP source.
+The manifest describes the BTP objects exposed by a source.
 
-It allows a consumer to discover at runtime:
+It provides the information required to interpret telemetry topics and command actions.
 
-* telemetry topics;
-* telemetry schemas;
-* field definitions;
-* supported actions;
-* action parameters;
-* action results;
-* application-specific errors;
-* subscription capability.
-
-This allows binary telemetry and commands to remain compact without requiring all structures to be hard-coded in the consumer.
+A consumer obtains it using:
 
 ```text
-Consumer                             Source
-   |                                   |
-   |-------- MANIFEST_REQUEST -------->|
-   |                                   |
-   |<--------- MANIFEST_DATA ----------|
-   |                                   |
-   |     topics and actions known       |
+MANIFEST_REQUEST
+        |
+        v
+MANIFEST_DATA
 ```
 
-A manifest describes exactly one source.
+The manifest is versioned independently through:
 
-A gateway may return manifest information for another source from its catalog.
+```text
+config_revision
+```
+
+A source increments this revision when the described configuration changes.
 
 ---
 
-## 6.1 `MANIFEST_REQUEST`
+### 3.1 `MANIFEST_REQUEST`
 
 The payload is:
 
-| Offset | Size | Field                   | Wire type   |
-| -----: | ---: | ----------------------- | ----------- |
-|      0 |    4 | `target_source_id`      | `uint32_le` |
-|      4 |    4 | `target_boot_id`        | `uint32_le` |
-|      8 |    4 | `known_config_revision` | `uint32_le` |
+| Offset | Size | Field                   |
+| -----: | ---: | ----------------------- |
+|      0 |    4 | `target_source_id`      |
+|      4 |    4 | `target_boot_id`        |
+|      8 |    4 | `known_config_revision` |
 
-The request has two modes:
-
-* targeted source request;
-* complete catalog request.
+All fields are `uint32_le`.
 
 ---
 
-## 6.2 Targeted manifest request
+#### Targeted request
 
 When:
 
@@ -574,497 +399,300 @@ When:
 target_source_id != 0
 ```
 
-the request asks for one source.
+the request targets one source.
 
-`target_boot_id` may be:
+`target_boot_id` may be zero to accept the current boot.
 
-```text
-0
-```
-
-to accept the source's current boot, or a specific non-zero boot identifier.
-
-If the requested source does not exist:
+If it is non-zero and differs from the source's current boot, the request fails with:
 
 ```text
-REJECTED / NOT_FOUND
+STALE_TARGET_BOOT
 ```
 
-is returned.
+A `known_config_revision` of zero requests complete manifest data.
 
-If a non-zero `target_boot_id` does not match the current boot:
-
-```text
-REJECTED / STALE_TARGET_BOOT
-```
-
-is returned.
+A non-zero revision tells the responder which manifest revision the requester already has.
 
 ---
 
-## 6.3 Configuration revision
+#### Full catalog request
 
-`known_config_revision` allows the consumer to avoid downloading an unchanged manifest.
+When:
 
 ```text
-known_config_revision = 0
+target_source_id = 0
 ```
 
-forces a complete manifest response.
+the requester asks for all sources currently known by the responder.
 
-If the value matches the current source configuration revision, the source may return a successful `MANIFEST_DATA` with:
-
-```text
-NOT_MODIFIED = 1
-```
-
-and omit the topic and action descriptors.
-
-This supports the following flow:
+In this mode:
 
 ```text
-first connection
-      |
-      v
-request full manifest
-      |
-      v
-cache config_revision = 17
-      |
-      v
-later connection
-      |
-      v
-MANIFEST_REQUEST
-known_config_revision = 17
-      |
-      +---- unchanged ---> NOT_MODIFIED
-      |
-      +---- changed -----> new manifest
-```
-
----
-
-## 6.4 Catalog request
-
-A complete catalog is requested with:
-
-```text
-target_source_id      = 0
 target_boot_id        = 0
 known_config_revision = 0
 ```
 
-The responder creates a snapshot of the sources it currently knows.
+The responder creates a catalog snapshot and sends one `MANIFEST_DATA` logical message for each source in the snapshot.
 
-The snapshot includes the responder itself.
-
-Sources are ordered by:
-
-```text
-source_id
-```
-
-One complete `MANIFEST_DATA` message is generated for each source.
-
-The number of responses is given by:
-
-```text
-catalog_count
-```
-
-and is at least one.
-
-The snapshot does not change while the response set is being generated.
-
-Sources added or removed during enumeration are reflected only in a later manifest request.
+Entries are ordered by `source_id`.
 
 ---
 
-# 7. `MANIFEST_DATA`
+### 3.2 `MANIFEST_DATA`
 
 The payload begins with:
 
-|   Offset |     Size | Field                     | Wire type              |
-| -------: | -------: | ------------------------- | ---------------------- |
-|        0 |       12 | request reference         | Section 2              |
-|       12 |        1 | `status`                  | `uint8`                |
-|       13 |        1 | `flags`                   | `uint8`                |
-|       14 |        2 | `error_code`              | `uint16_le`            |
-|       16 |        2 | `manifest_format_version` | `uint16_le`            |
-|       18 |        2 | `reserved`                | `uint16_le`            |
-|       20 |        4 | `config_revision`         | `uint32_le`            |
-|       24 |       16 | `source_uuid`             | 16 octets              |
-|       40 |        4 | `described_source_id`     | `uint32_le`            |
-|       44 |        4 | `described_boot_id`       | `uint32_le`            |
-|       48 |        1 | `source_role`             | `uint8`                |
-|       49 |        1 | `source_flags`            | `uint8`                |
-|       50 |        2 | `catalog_index`           | `uint16_le`            |
-|       52 |        2 | `catalog_count`           | `uint16_le`            |
-|       54 |        2 | `topic_count`             | `uint16_le`            |
-|       56 |        2 | `action_count`            | `uint16_le`            |
-|       58 | variable | `source_name`             | `utf8_u16`             |
-| variable | variable | topics                    | `topic_count` records  |
-| variable | variable | actions                   | `action_count` records |
+|   Offset |     Size | Field                     |
+| -------: | -------: | ------------------------- |
+|        0 |       12 | request reference         |
+|       12 |        1 | `status`                  |
+|       13 |        1 | `flags`                   |
+|       14 |        2 | `error_code`              |
+|       16 |        2 | `manifest_format_version` |
+|       18 |        2 | `reserved`                |
+|       20 |        4 | `config_revision`         |
+|       24 |       16 | `source_uuid`             |
+|       40 |        4 | `described_source_id`     |
+|       44 |        4 | `described_boot_id`       |
+|       48 |        1 | `source_role`             |
+|       49 |        1 | `source_flags`            |
+|       50 |        2 | `catalog_index`           |
+|       52 |        2 | `catalog_count`           |
+|       54 |        2 | `topic_count`             |
+|       56 |        2 | `action_count`            |
+|       58 | variable | `source_name`             |
+| variable | variable | topic records             |
+| variable | variable | action records            |
 
-The current manifest format is:
+`manifest_format_version` is:
 
 ```text
-manifest_format_version = 1
+1
 ```
 
-`reserved` must be zero.
+in the current protocol.
 
-The defined manifest flags are:
+`source_name` is encoded as `utf8_u16`.
 
-| Bit | Name               |
-| --: | ------------------ |
-|   0 | `NOT_MODIFIED`     |
-|   1 | `CATALOG_COMPLETE` |
+Manifest flags currently define:
 
-All other bits are reserved and must be zero.
+```text
+bit 0 -> NOT_MODIFIED
+bit 1 -> CATALOG_COMPLETE
+```
 
-The defined source flag is:
+Source flags currently define:
 
-| Bit | Name     |
-| --: | -------- |
-|   0 | `ONLINE` |
+```text
+bit 0 -> ONLINE
+```
 
-`ONLINE` indicates that the responder currently has an active session with the described source.
-
-A cached source may therefore appear in a catalog with `ONLINE` clear.
+All unassigned flag bits are zero.
 
 ---
 
-## 7.1 Source identity
+### 3.3 `NOT_MODIFIED`
 
-The BTP envelope identifies the source that transmitted the `MANIFEST_DATA`.
-
-The manifest itself identifies the source being described using:
-
-```text
-described_source_id
-described_boot_id
-source_uuid
-```
-
-These may differ from the envelope source when a gateway responds using cached information.
-
-The gateway preserves the identity of the source being described.
-
----
-
-## 7.2 Targeted response
-
-For a targeted request:
-
-```text
-catalog_index = 0
-catalog_count = 1
-CATALOG_COMPLETE = 1
-```
-
-The response describes exactly one source.
-
----
-
-## 7.3 Catalog response
-
-For a catalog request, each response contains:
-
-```text
-catalog_index = 0 .. catalog_count - 1
-```
-
-Every response uses the same:
-
-```text
-catalog_count
-```
-
-Only the final entry sets:
-
-```text
-CATALOG_COMPLETE = 1
-```
-
-The consumer publishes the new catalog only after receiving a complete and consistent snapshot.
-
-A missing or duplicated catalog entry makes the snapshot incomplete.
-
-The consumer may discard the incomplete snapshot and issue another manifest request.
-
----
-
-## 7.4 `NOT_MODIFIED`
-
-When `NOT_MODIFIED` is set:
+When the requester provides the current `config_revision`, the responder may return:
 
 ```text
 status = SUCCESS
+NOT_MODIFIED = 1
 ```
 
-Source identity and source name remain present.
-
-The descriptor counts are:
+In this case:
 
 ```text
 topic_count  = 0
 action_count = 0
 ```
 
-No topic or action records follow.
+and no descriptors follow.
+
+The returned identity and revision still identify the manifest to which the response refers.
 
 ---
 
-# 8. Manifest records
+### 3.4 Catalog enumeration
 
-Topic, field, and action descriptors are encoded as length-delimited records.
-
-Every record begins with:
+For a targeted request:
 
 ```text
-record_size : uint32_le
+catalog_index = 0
+catalog_count = 1
 ```
 
-`record_size` counts the number of octets following the size field.
+For a full catalog request:
 
 ```text
-+----------------------+-----------------------------+
-| record_size          | record body                 |
-| uint32_le            | record_size octets          |
-+----------------------+-----------------------------+
+catalog_count
 ```
 
-A decoder must:
+is the total number of `MANIFEST_DATA` responses in the snapshot.
 
-1. validate `record_size` against the remaining payload;
-2. restrict parsing to that record;
-3. consume exactly `record_size` octets.
+`catalog_index` ranges from:
 
-Trailing unrecognized bytes are not ignored.
+```text
+0
+```
 
-A malformed record invalidates the complete manifest.
+to:
+
+```text
+catalog_count - 1
+```
+
+The final entry sets:
+
+```text
+CATALOG_COMPLETE
+```
+
+A catalog snapshot is considered complete only when all expected entries are received consistently.
 
 ---
 
-# 9. Topic records
+### 3.5 Manifest records
 
-A topic record describes one telemetry topic.
+Topic, field and action descriptors are encoded as length-delimited records.
 
-It contains, in order:
-
-| Field              | Wire type                   |
-| ------------------ | --------------------------- |
-| `record_size`      | `uint32_le`                 |
-| `topic_id`         | `uint16_le`                 |
-| `schema_version`   | `uint16_le`                 |
-| `encoding`         | `uint8`                     |
-| `flags`            | `uint8`                     |
-| `field_count`      | `uint16_le`                 |
-| `max_rate_millihz` | `uint32_le`                 |
-| `name`             | `utf8_u16`                  |
-| `description`      | `utf8_u16`                  |
-| fields             | `field_count` field records |
-
-The following values must be non-zero:
+Each record begins with:
 
 ```text
-topic_id
-schema_version
+record_size:uint32_le
 ```
 
-The defined topic flag is:
+followed by exactly `record_size` octets.
 
-| Bit | Name           |
-| --: | -------------- |
-|   0 | `SUBSCRIBABLE` |
-
-All remaining flag bits are reserved.
-
-`max_rate_millihz` defines the maximum periodic publication rate.
-
-```text
-max_rate_millihz = 0
-```
-
-means that the topic is not periodically published.
-
-For example:
-
-```text
-1000 millihz = 1 Hz
-10000 millihz = 10 Hz
-```
-
-Topic encodings are defined by the telemetry specification.
+The decoder validates the record size before parsing its contents and requires exact consumption of the record.
 
 ---
 
-# 10. Field records
+### 3.6 Topic records
 
-A field record describes one field of a structured telemetry topic or action schema.
-
-It contains:
-
-| Field               | Wire type                 |
-| ------------------- | ------------------------- |
-| `record_size`       | `uint32_le`               |
-| `field_id`          | `uint16_le`               |
-| `order`             | `uint16_le`               |
-| `type`              | `uint8`                   |
-| `flags`             | `uint8`                   |
-| `element_count`     | `uint16_le`               |
-| `max_element_count` | `uint16_le`               |
-| `scale`             | IEEE-754 `float64_le`     |
-| `offset`            | IEEE-754 `float64_le`     |
-| `enum_count`        | `uint16_le`               |
-| `name`              | `utf8_u16`                |
-| `unit`              | `utf8_u16`                |
-| `description`       | `utf8_u16`                |
-| enums               | `enum_count` enum records |
-
-`scale` and `offset` must be finite.
-
-The defined field flags are:
-
-| Bit | Name             |
-| --: | ---------------- |
-|   0 | `NULLABLE`       |
-|   1 | `VARIABLE_COUNT` |
-
-All other bits are reserved.
-
-The field type codes are:
-
-|  Value | Type           |
-| -----: | -------------- |
-| `0x01` | `uint8`        |
-| `0x02` | `uint16`       |
-| `0x03` | `uint32`       |
-| `0x04` | `uint64`       |
-| `0x05` | `int8`         |
-| `0x06` | `int16`        |
-| `0x07` | `int32`        |
-| `0x08` | `int64`        |
-| `0x09` | `float32`      |
-| `0x0A` | `float64`      |
-| `0x0B` | `bool`         |
-| `0x0C` | `enum8`        |
-| `0x0D` | `enum16`       |
-| `0x0E` | `opaque_bytes` |
-| `0x0F` | `utf8`         |
-
-`0x00` and higher unassigned values are reserved.
-
-`opaque_bytes` and `utf8` are descriptor-only field types used for the optional logical field of whole-body `OPAQUE_BYTES` or `UTF8` telemetry topics.
-
-They are not valid fields inside:
-
-* structured telemetry;
-* action parameters;
-* action results.
-
-The complete field and array rules are defined in [Telemetry payloads](telemetry.md).
-
----
-
-## 10.1 Enum records
-
-Enumeration entries contain:
-
-| Field   | Wire type   |
-| ------- | ----------- |
-| `value` | `uint16_le` |
-| `label` | `utf8_u16`  |
-
-The number of entries is defined by:
+A topic record contains:
 
 ```text
-enum_count
+topic_id:uint16_le
+schema_version:uint16_le
+encoding:uint8
+flags:uint8
+field_count:uint16_le
+max_rate_millihz:uint32_le
+
+name:utf8_u16
+description:utf8_u16
+
+field records...
 ```
 
-Labels are descriptive metadata.
+`topic_id` and `schema_version` must be non-zero.
 
-The numeric value remains the wire identity of the enum entry.
-
----
-
-# 11. Action records
-
-An action record describes one command exposed by a source.
-
-It contains:
-
-| Field                   | Wire type            |
-| ----------------------- | -------------------- |
-| `record_size`           | `uint32_le`          |
-| `action_id`             | `uint16_le`          |
-| `action_version`        | `uint16_le`          |
-| `flags`                 | `uint16_le`          |
-| `parameter_encoding`    | `uint8`              |
-| `result_encoding`       | `uint8`              |
-| `parameter_field_count` | `uint16_le`          |
-| `result_field_count`    | `uint16_le`          |
-| `execution_timeout_ms`  | `uint32_le`          |
-| `name`                  | `utf8_u16`           |
-| `description`           | `utf8_u16`           |
-| `confirmation_text`     | `utf8_u16`           |
-| parameter fields        | field records        |
-| result fields           | field records        |
-| `error_count`           | `uint16_le`          |
-| errors                  | action-error records |
-
-The following values must be non-zero:
+Topic flags currently define:
 
 ```text
-action_id
-action_version
-execution_timeout_ms
+bit 0 -> SUBSCRIBABLE
 ```
 
-Parameter and result field records are ordered by increasing `order`.
+`max_rate_millihz` specifies the maximum periodic publication rate announced for the topic.
+
+The telemetry payload interpretation is defined in [Telemetry payloads](telemetry.md).
 
 ---
 
-## 11.1 Action flags
+### 3.7 Field records
 
-The defined action flags are:
-
-| Bit | Name         |
-| --: | ------------ |
-|   0 | `IDEMPOTENT` |
-|   1 | `DANGEROUS`  |
-
-All other bits are reserved.
-
-### `IDEMPOTENT`
-
-The action can naturally be executed more than once without producing additional side effects.
-
-This does not disable BTP command deduplication.
-
-### `DANGEROUS`
-
-The action requires explicit user confirmation before execution.
-
-When `DANGEROUS` is set:
+A field record contains:
 
 ```text
-confirmation_text
+field_id:uint16_le
+order:uint16_le
+type:uint8
+flags:uint8
+
+element_count:uint16_le
+max_element_count:uint16_le
+
+scale:float64_le
+offset:float64_le
+
+enum_count:uint16_le
+
+name:utf8_u16
+unit:utf8_u16
+description:utf8_u16
+
+enum entries...
 ```
 
-must not be empty.
+Field flags currently define:
 
-The confirmation text is provided by the source.
+```text
+bit 0 -> NULLABLE
+bit 1 -> VARIABLE_COUNT
+```
 
-A client must not infer or invent different semantics for the action.
+`scale` and `offset` must be finite IEEE-754 `float64` values.
+
+The field types and serialization rules are defined in [Telemetry payloads](telemetry.md).
 
 ---
 
-## 11.2 Action encodings
+### 3.8 Enum entries
 
-Action parameters and results support:
+An enum descriptor entry contains:
+
+```text
+value:uint16_le
+label:utf8_u16
+```
+
+`value` is the wire value.
+
+`label` is descriptive metadata.
+
+---
+
+### 3.9 Action records
+
+An action record contains:
+
+```text
+action_id:uint16_le
+action_version:uint16_le
+flags:uint16_le
+
+parameter_encoding:uint8
+result_encoding:uint8
+
+parameter_field_count:uint16_le
+result_field_count:uint16_le
+
+execution_timeout_ms:uint32_le
+
+name:utf8_u16
+description:utf8_u16
+confirmation_text:utf8_u16
+
+parameter field records...
+
+result field records...
+
+error_count:uint16_le
+
+action-specific error entries...
+```
+
+`action_id` and `action_version` must be non-zero.
+
+Action flags currently define:
+
+```text
+bit 0 -> IDEMPOTENT
+bit 1 -> DANGEROUS
+```
+
+The protocol-defined action encodings are:
 
 |  Value | Encoding    |
 | -----: | ----------- |
@@ -1072,115 +700,71 @@ Action parameters and results support:
 | `0x05` | `PACKED_LE` |
 | `0x06` | `TLV_LE`    |
 
-`EMPTY` requires:
+`EMPTY` requires zero fields.
 
-```text
-field_count = 0
-```
+`PACKED_LE` and `TLV_LE` use the same serialization rules defined for telemetry fields.
 
-`PACKED_LE` and `TLV_LE` use the same field representation defined for telemetry.
-
-Unlike telemetry payloads, action parameters and results do not contain a `schema_version` prefix.
-
-Their structure is selected directly by:
-
-```text
-action_id
-action_version
-```
+Action parameter and result bodies do **not** contain a `schema_version` prefix because the action version is already carried by the command request/result.
 
 ---
 
-## 11.3 Action-specific errors
+### 3.10 Action-specific errors
 
-Action records may define application-specific error codes.
-
-Each entry contains:
-
-| Field        | Wire type   |
-| ------------ | ----------- |
-| `error_code` | `uint16_le` |
-| `label`      | `utf8_u16`  |
-
-Action-specific errors use:
+Action-specific error descriptors use values from:
 
 ```text
 0x8000 .. 0xFFFF
 ```
 
-The range below `0x8000` is reserved for protocol-defined errors.
-
----
-
-# 12. Manifest versioning
-
-Identifiers and versions are stable after publication.
-
-A change that modifies how a telemetry topic is interpreted requires:
-
-* a new `schema_version`;
-* a new `config_revision`.
-
-A change that modifies an action's:
-
-* parameters;
-* result structure;
-* execution semantics;
-* action-specific errors;
-
-requires:
-
-* a new `action_version`;
-* a new `config_revision`.
-
-A `config_revision` value must not be reused for different manifest contents.
-
-A consumer may cache descriptors associated with a known revision.
-
-If a new revision is detected, the consumer updates its manifest information before interpreting previously unknown schema or action versions.
-
-It must not guess compatibility from an older descriptor.
-
----
-
-# 13. Subscriptions
-
-Subscriptions request periodic publication of telemetry topics.
+Each entry contains:
 
 ```text
-Consumer                               Source
-   |                                     |
-   |----------- SUBSCRIBE -------------->|
-   |                                     |
-   |<------ SUBSCRIBE_RESULT ------------|
-   |                                     |
-   |<---------- TELEMETRY ---------------|
-   |<---------- TELEMETRY ---------------|
-   |<---------- TELEMETRY ---------------|
+error_code:uint16_le
+label:utf8_u16
 ```
 
-A subscription controls publication rate and lifetime.
-
-It does not change telemetry delivery semantics.
-
-Telemetry remains best-effort.
+Values below `0x8000` are reserved for common BTP errors.
 
 ---
 
-## 13.1 `SUBSCRIBE`
+### 3.11 Stable identifiers and revisions
+
+A manifest does not reuse an identifier or version for a different interpretation.
+
+A change that modifies the interpretation of a topic or action requires the corresponding version to change.
+
+A change to manifest content also requires a new:
+
+```text
+config_revision
+```
+
+A consumer receiving an unknown schema or action version must obtain the corresponding current descriptor before interpreting that payload.
+
+---
+
+## 4. Subscriptions
+
+`SUBSCRIBE` requests periodic publication of one telemetry topic.
+
+The topic must be announced as subscribable in the source manifest.
+
+---
+
+### 4.1 `SUBSCRIBE`
 
 The payload is:
 
-| Offset | Size | Field                    | Wire type   |
-| -----: | ---: | ------------------------ | ----------- |
-|      0 |    4 | `target_source_id`       | `uint32_le` |
-|      4 |    4 | `target_boot_id`         | `uint32_le` |
-|      8 |    2 | `topic_id`               | `uint16_le` |
-|     10 |    2 | `flags`                  | `uint16_le` |
-|     12 |    4 | `requested_rate_millihz` | `uint32_le` |
-|     16 |    4 | `requested_lease_ms`     | `uint32_le` |
+| Offset | Size | Field                    |
+| -----: | ---: | ------------------------ |
+|      0 |    4 | `target_source_id`       |
+|      4 |    4 | `target_boot_id`         |
+|      8 |    2 | `topic_id`               |
+|     10 |    2 | `flags`                  |
+|     12 |    4 | `requested_rate_millihz` |
+|     16 |    4 | `requested_lease_ms`     |
 
-The following values must be non-zero:
+The following fields must be non-zero:
 
 ```text
 target_source_id
@@ -1190,49 +774,37 @@ requested_rate_millihz
 requested_lease_ms
 ```
 
-The current format requires:
-
-```text
-flags = 0
-```
-
-The topic must be marked:
-
-```text
-SUBSCRIBABLE
-```
-
-in the manifest.
+`flags` is zero in version 2.
 
 ---
 
-## 13.2 `SUBSCRIBE_RESULT`
+### 4.2 `SUBSCRIBE_RESULT`
 
 The result contains:
 
-| Offset | Size | Field                    | Wire type   |
-| -----: | ---: | ------------------------ | ----------- |
-|      0 |   12 | request reference        | Section 2   |
-|     12 |    1 | `status`                 | `uint8`     |
-|     13 |    1 | `reserved`               | `uint8`     |
-|     14 |    2 | `error_code`             | `uint16_le` |
-|     16 |    4 | `subscription_id`        | `uint32_le` |
-|     20 |    4 | `effective_rate_millihz` | `uint32_le` |
-|     24 |    4 | `granted_lease_ms`       | `uint32_le` |
+```text
+request reference
 
-`reserved` must be zero.
+status:uint8
+reserved:uint8
+error_code:uint16_le
+
+subscription_id:uint32_le
+effective_rate_millihz:uint32_le
+granted_lease_ms:uint32_le
+```
 
 On success:
 
 ```text
-subscription_id        != 0
+subscription_id != 0
 effective_rate_millihz != 0
-granted_lease_ms       != 0
+granted_lease_ms != 0
 ```
 
-On failure, all three values are zero.
+On failure these values are zero.
 
-The effective publication rate must not exceed:
+The effective publication rate does not exceed:
 
 ```text
 requested_rate_millihz
@@ -1244,106 +816,59 @@ or the topic's:
 max_rate_millihz
 ```
 
-Therefore:
+---
+
+### 4.3 Subscription identity
+
+An accepted subscription is identified by:
 
 ```text
-effective_rate <= requested_rate
-effective_rate <= manifest maximum
+subscription_id
 ```
 
-The source may grant a lower rate.
+A subscription remains valid only for the granted lease period.
+
+Renewal uses another `SUBSCRIBE` request.
+
+A retransmission of the same request identity does not create a second subscription.
 
 ---
 
-## 13.3 Delivery behavior
+### 4.4 `UNSUBSCRIBE`
 
-A subscription defines the requested publication schedule.
-
-It does not guarantee exact sample timing.
-
-Publication may contain:
-
-* scheduling jitter;
-* transport delay;
-* lost telemetry messages.
-
-There is no per-sample acknowledgement.
-
-A subscription therefore does not convert telemetry into a reliable stream.
-
----
-
-## 13.4 Subscription replacement
-
-Retransmitting the same logical `SUBSCRIBE` request returns the same subscription rather than creating another one.
-
-A new request identity for the same session and topic creates or replaces the corresponding subscription atomically.
-
-This allows subscription parameters to be updated without accumulating duplicate subscriptions.
-
----
-
-## 13.5 Lease expiration
-
-Every subscription has a finite lease.
-
-The granted lifetime is returned as:
+`UNSUBSCRIBE` contains:
 
 ```text
-granted_lease_ms
+target_source_id:uint32_le
+target_boot_id:uint32_le
+subscription_id:uint32_le
 ```
 
-The subscription expires when its lease ends.
+All values must be non-zero.
 
-The consumer renews the subscription by issuing another `SUBSCRIBE`.
+The corresponding result uses the common request-reference and status model.
+
+Removing an already absent subscription is treated as successful.
 
 ---
 
-# 14. `UNSUBSCRIBE`
+## 5. Status
 
-`UNSUBSCRIBE` removes an existing subscription.
+`STATUS` is a spontaneous `CONTROL` message containing protocol counters.
 
-Its payload contains:
+It does not have a corresponding result message.
 
-| Offset | Size | Field              | Wire type   |
-| -----: | ---: | ------------------ | ----------- |
-|      0 |    4 | `target_source_id` | `uint32_le` |
-|      4 |    4 | `target_boot_id`   | `uint32_le` |
-|      8 |    4 | `subscription_id`  | `uint32_le` |
-
-Removing an existing subscription returns success.
-
-Removing a subscription that is already absent also returns:
-
-```text
-SUCCESS / NONE
-```
-
-This makes `UNSUBSCRIBE` safe to retry.
-
----
-
-# 15. Status
-
-`STATUS` reports protocol and communication counters.
-
-It is sent spontaneously and does not receive a response.
-
-The message envelope identifies the reporting source.
-
-Counters are scoped by:
+The counters are scoped to the source envelope:
 
 ```text
 (source_id, boot_id)
 ```
 
-They reset only when the source starts a new boot.
-
 ---
 
-## 15.1 Status version 1
+### 5.1 Status version 1
 
-The fixed payload is:
+The logical payload is:
 
 | Offset | Size | Field                  |
 | -----: | ---: | ---------------------- |
@@ -1361,268 +886,165 @@ The fixed payload is:
 |     76 |    8 | `command_duplicates`   |
 |     84 |    8 | `telemetry_dropped`    |
 
-`status_version` is:
-
-```text
-1
-```
-
-All counters are `uint64_le`.
-
 The complete version-1 payload is:
 
 ```text
 92 octets
 ```
 
-The defined status flag is:
+`status_version` is:
 
-| Bit | Name       |
-| --: | ---------- |
-|   0 | `DEGRADED` |
+```text
+1
+```
 
-All other bits are reserved.
+Status flags currently define:
+
+```text
+bit 0 -> DEGRADED
+```
+
+All counters are `uint64_le`.
+
+Counters are monotonic within one source boot and saturate at `UINT64_MAX`.
 
 ---
 
-## 15.2 Counter behavior
+### 5.2 Status version 2
 
-Counters are monotonic within one boot.
+Status version 2 preserves the complete 92-octet version-1 prefix and appends per-topic information.
 
-They saturate at:
-
-```text
-UINT64_MAX
-```
-
-and do not wrap.
-
-They reset only when `boot_id` changes.
-
-A transport reconnection or session restart does not reset the counters.
-
-This allows communication problems to remain observable across transient reconnects.
-
-### `frames_dropped`
-
-Counts valid frames discarded because of queue or resource-capacity limits.
-
-### `crc_errors`
-
-Counts frames rejected because their CRC was invalid.
-
-### `decode_errors`
-
-Counts malformed envelopes or logical payloads.
-
-### `reassembly_completed`
-
-Counts fragmented logical messages successfully reconstructed.
-
-### `reassembly_timeouts`
-
-Counts incomplete reassemblies removed because their timeout expired.
-
-### `reassembly_rejected`
-
-Counts fragmented messages rejected because of invalid or conflicting fragment state.
-
-### `command_duplicates`
-
-Counts duplicate command requests detected by command deduplication.
-
-### `telemetry_dropped`
-
-Counts telemetry messages discarded by the implementation.
-
-One event may contribute to different counters when those counters represent different aspects of the same event.
-
-The same event must not increment one counter more than once.
-
----
-
-# 16. Status version 2
-
-`status_version = 2` extends the version-1 payload with optional per-topic statistics.
-
-The first 92 octets are identical to version 1.
-
-The extension is:
-
-| Offset |     Size | Field                |
-| -----: | -------: | -------------------- |
-|     92 |        2 | `topic_status_count` |
-|     94 | `28 × T` | topic status records |
-
-where:
+At offset 92:
 
 ```text
-T = topic_status_count
+topic_status_count:uint16_le
 ```
 
-The complete size is therefore:
+followed by:
 
 ```text
-94 + 28 * topic_status_count
+topic_status_count
 ```
 
----
+records of 28 octets each.
 
-## 16.1 Topic status record
+Each topic status record contains:
 
-Each topic status record has a fixed size of 28 octets.
+| Offset | Size | Field                    |
+| -----: | ---: | ------------------------ |
+|      0 |    4 | `source_id`              |
+|      4 |    2 | `topic_id`               |
+|      6 |    2 | `subscriber_count`       |
+|      8 |    4 | `effective_rate_millihz` |
+|     12 |    8 | `bytes_total`            |
+|     20 |    8 | `samples_dropped_total`  |
 
-| Offset | Size | Field                    | Wire type   |
-| -----: | ---: | ------------------------ | ----------- |
-|      0 |    4 | `source_id`              | `uint32_le` |
-|      4 |    2 | `topic_id`               | `uint16_le` |
-|      6 |    2 | `subscriber_count`       | `uint16_le` |
-|      8 |    4 | `effective_rate_millihz` | `uint32_le` |
-|     12 |    8 | `bytes_total`            | `uint64_le` |
-|     20 |    8 | `samples_dropped_total`  | `uint64_le` |
-
-`source_id` and `topic_id` must be non-zero.
-
-```text
-effective_rate_millihz = 0
-```
-
-means the topic is not currently being published periodically.
-
-`source_id` is included because `topic_id` is only unique within one source.
-
-A gateway may therefore report:
-
-```text
-(source A, topic 1)
-(source B, topic 1)
-```
-
-as two independent topic status records.
-
-The pair:
+Within one status message, the pair:
 
 ```text
 (source_id, topic_id)
 ```
 
-must be unique within one `STATUS` message.
-
-Record order has no semantic meaning.
-
-A receiver that supports status version 2 may ignore the per-topic extension if those metrics are not required.
+must not repeat.
 
 ---
 
-# 17. Limits
+## 6. Limits
 
-The protocol defines the following limits.
+The following limits apply to the structures defined in this chapter:
 
-| Limit                                       |       Maximum |
-| ------------------------------------------- | ------------: |
-| Logical payload on a path including ESP-NOW | 53,550 octets |
-| Logical manifest                            | 49,152 octets |
-| Individual `utf8_u16` string                |  1,024 octets |
-| Name or unit                                |    128 octets |
-| Result diagnostic message                   |    512 octets |
-| Action parameters                           | 32,768 octets |
-| Action result                               | 32,768 octets |
-| Fields per topic                            |           256 |
-| Fields per action side                      |           256 |
-| Sources per catalog                         |         1,024 |
-| Topics per manifest                         |         1,024 |
-| Actions per manifest                        |         1,024 |
-| Enum entries per record                     |           256 |
-| Action-specific errors per record           |           256 |
+| Limit                                   |        Value |
+| --------------------------------------- | -----------: |
+| Logical manifest                        | 49152 octets |
+| Individual `utf8_u16` text              |  1024 octets |
+| Name or unit                            |   128 octets |
+| Result message                          |   512 octets |
+| Action parameters or result             | 32768 octets |
+| Fields per topic or action side         |          256 |
+| Sources per catalog                     |         1024 |
+| Topics per manifest                     |         1024 |
+| Actions per manifest                    |         1024 |
+| Enum or action-error entries per record |          256 |
 
-The effective limit is the minimum imposed by:
+The effective limit is always the smallest applicable limit imposed by:
 
 ```text
 protocol
+session
+descriptor
 transport path
-session negotiation
-manifest descriptor
-implementation capacity
 ```
 
-A producer must not advertise a data structure whose declared maximum size exceeds the limits available on the negotiated communication path.
+A logical message larger than the payload available in one physical BTP frame uses the normal fragmentation mechanism described in [Getting it across the link](fragmentation-and-transports.md).
 
-Large manifests and command results use the normal BTP fragmentation mechanism.
-
-There is no separate fragmentation format inside these messages.
+There is no second fragmentation mechanism inside commands or manifests.
 
 ---
 
-# 18. Validation order
+## 7. Validation
 
-After the BTP envelope has been validated and any required fragments have been reassembled, the receiver processes messages from this chapter in the following order:
+A receiver validates the complete logical payload before applying the operation represented by it.
 
-1. resolve `type` and `object_id`;
-2. validate the minimum fixed payload size;
-3. validate reserved fields and flags;
-4. validate every length before reading the referenced data;
-5. validate identifiers and versions;
-6. validate status and error-code combinations;
-7. validate record counts and protocol limits;
-8. validate nested records within their declared boundaries;
-9. require exact consumption of the logical payload;
-10. only then perform application-visible state changes.
+The general order is:
 
-State changes include:
+1. validate the BTP envelope;
+2. complete reassembly when fragmented;
+3. resolve `type` and `object_id`;
+4. validate the fixed-size portion of the payload;
+5. validate reserved fields and flags;
+6. validate every declared length before consuming variable data;
+7. validate identifiers, versions and counts;
+8. validate nested records within their declared bounds;
+9. validate all applicable protocol limits;
+10. require exact consumption of the logical payload;
+11. only then process the operation.
 
-* executing an action;
-* replacing a subscription;
-* removing a subscription;
-* publishing a manifest catalog.
+A malformed logical payload is rejected as a whole.
 
-Malformed or incomplete logical messages do not produce partial application state.
-
-For fragmented messages, application processing starts only after successful reassembly.
+The decoder does not infer missing fields, ignore unexpected trailing bytes or continue parsing beyond a declared boundary.
 
 ---
 
-# 19. Summary
+## 8. Summary
 
-The `COMMAND` channel provides request/result command execution with explicit target identification and mandatory deduplication.
+BTP defines command and discovery operations through `COMMAND` and `CONTROL` messages.
+
+Commands use:
 
 ```text
 COMMAND_REQUEST
-      |
-      v
-target + action + parameters
-      |
-      v
-deduplicated execution
-      |
-      v
+        |
+        v
 COMMAND_RESULT
 ```
 
-The manifest provides runtime discovery of the structures exposed by each source.
+and include:
+
+* explicit target source and boot identity;
+* versioned action identifiers;
+* request correlation;
+* bounded deduplication.
+
+Runtime discovery uses:
 
 ```text
 MANIFEST_REQUEST
-      |
-      v
+        |
+        v
 MANIFEST_DATA
-      |
-      +---- telemetry topics and schemas
-      |
-      +---- actions and parameter schemas
 ```
 
-Subscriptions control periodic telemetry publication without changing telemetry's best-effort delivery semantics.
+to describe:
 
-```text
-SUBSCRIBE
-    |
-    v
-subscription + lease + effective rate
-    |
-    v
-TELEMETRY
-```
+* sources;
+* telemetry topics;
+* schemas;
+* fields;
+* actions;
+* parameters;
+* results;
+* action-specific errors.
 
-`STATUS` provides boot-scoped counters for communication, reassembly, command, and telemetry behavior.
+Subscriptions control periodic telemetry publication, while status messages expose protocol counters.
 
-Together, these mechanisms allow a consumer to discover a device at runtime, decode its telemetry, execute its supported actions, configure telemetry publication, and monitor protocol health without requiring device-specific wire structures to be compiled into the consumer.
+All of these mechanisms use the same BTP logical-message and fragmentation rules defined by the rest of the protocol.
