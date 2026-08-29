@@ -161,6 +161,17 @@ bool seal_size_fits(std::uint16_t payload_size) noexcept {
     return payload_size <= static_cast<std::uint16_t>(0xFFFFU - kTagSize);
 }
 
+// prepare() deliberately permits a null input when its size is zero, matching
+// the codec contract. Some classic mbedTLS ports (notably ESP32's hardware
+// AES-GCM wrapper) still reject a null pointer before considering the length.
+// A valid dummy address keeps the public contract portable and is read zero
+// times, so it cannot affect ciphertext or authentication tags.
+const std::uint8_t kEmptyInput[1] = {0U};
+
+const std::uint8_t* non_null(const std::uint8_t* input) noexcept {
+    return input != nullptr ? input : kEmptyInput;
+}
+
 }  // namespace
 
 #if defined(BTP_AEAD_BACKEND_CLASSIC)
@@ -191,7 +202,7 @@ AeadError aead_seal_aes_gcm(const AeadKey& key, const Header& header,
     if (rc == 0) {
         rc = mbedtls_gcm_crypt_and_tag(
             &ctx, MBEDTLS_GCM_ENCRYPT, payload_size, nonce, sizeof(nonce),
-            aad, sizeof(aad), plaintext, out_ciphertext_and_tag, kTagSize,
+            aad, sizeof(aad), non_null(plaintext), out_ciphertext_and_tag, kTagSize,
             out_ciphertext_and_tag + payload_size);
     }
 
@@ -266,7 +277,7 @@ AeadError aead_seal_chacha20poly1305(
     int rc = mbedtls_chachapoly_setkey(&ctx, key.data);
     if (rc == 0) {
         rc = mbedtls_chachapoly_encrypt_and_tag(
-            &ctx, payload_size, nonce, aad, sizeof(aad), plaintext,
+            &ctx, payload_size, nonce, aad, sizeof(aad), non_null(plaintext),
             out_ciphertext_and_tag, out_ciphertext_and_tag + payload_size);
     }
 
@@ -335,15 +346,6 @@ const psa_algorithm_t kAlgAesGcm =
     PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_GCM, kTagSize);
 const psa_algorithm_t kAlgChaCha20Poly1305 =
     PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CHACHA20_POLY1305, kTagSize);
-
-// prepare() permits a null input when its size is zero, matching how the codec
-// treats an empty payload. PSA promises nothing about a null buffer pointer,
-// so give it a valid address it will read zero octets from instead.
-const std::uint8_t kEmptyInput[1] = {0U};
-
-const std::uint8_t* non_null(const std::uint8_t* input) noexcept {
-    return input != nullptr ? input : kEmptyInput;
-}
 
 // Calls psa_crypto_init() once, on the first operation that needs it.
 //

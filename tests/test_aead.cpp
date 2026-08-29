@@ -520,6 +520,18 @@ void test_null_pointers_are_rejected() {
     std::uint8_t tag_only[16] = {};
     CHECK(btp::aead_seal_aes_gcm(key, header, 0U, nullptr, tag_only) ==
           btp::AeadError::Ok);
+    std::uint8_t empty_opened[1] = {};
+    CHECK(btp::aead_open_aes_gcm(key, header, sizeof(tag_only), tag_only,
+                                 empty_opened) == btp::AeadError::Ok);
+
+    // The same zero-length contract applies to the other supported AEAD.
+    std::uint8_t chacha_tag_only[16] = {};
+    CHECK(btp::aead_seal_chacha20poly1305(
+              chacha_key, chacha_header, 0U, nullptr, chacha_tag_only) ==
+          btp::AeadError::Ok);
+    CHECK(btp::aead_open_chacha20poly1305(
+              chacha_key, chacha_header, sizeof(chacha_tag_only),
+              chacha_tag_only, empty_opened) == btp::AeadError::Ok);
 }
 
 }  // namespace
