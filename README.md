@@ -10,7 +10,7 @@ This repository is the canonical source of three things that ship as one
 version: the wire specification, the C++11 library that implements it, and the
 binary vectors that prove an implementation is correct.
 
-> **You are on `main`** — the wire `version == 0x02` line, library `2.0.0`.
+> **You are on `main`** — the wire `version == 0x02` line, library `2.1.0`.
 > The wire v1 line is maintained on branch
 > [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x). See
 > [Versioning and branches](#versioning-and-branches).
@@ -154,7 +154,7 @@ is cut to an `N.x` branch and maintained there:
 
 | Branch | Wire | Line |
 | --- | --- | --- |
-| `main` | `0x02` | Current development, library `2.0.0` — **this branch** |
+| `main` | `0x02` | Current development, library `2.1.0` — **this branch** |
 | [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) | `0x01` | Maintenance of the wire v1 line, released as `v1.1.0-beta` |
 
 If a wire v3 ever arrives, a `2.x` branch is cut from the `main` of that
@@ -168,14 +168,14 @@ They do not mix:
 | Concept | Example | What it is |
 | --- | --- | --- |
 | Wire version | `wire 0x02` | The octet at offset 4 of the header |
-| Release | `v1.1.0-beta` | The git tag over spec, library and vectors. Latest published; no wire v2 tag is cut yet |
+| Release | `v2.1.0` | The git tag over spec, library and vectors. `MANIFEST_DATA` format `2` (`source_info`) is the `2.1.0` addition |
 | Branch | `1.x` | Holds the previous major; `main` holds the newest |
-| Library | `2.0.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
+| Library | `2.1.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
 
 Never write "BTP v1" unqualified — it is ambiguous between three of those.
 
 A pre-release suffix belongs to the line that is still settling, not to `main`:
-the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.0.0`.
+the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.1.0`.
 Note that only `library.json` can spell a suffix at all — CMake's
 `project(VERSION)` is numeric-only and `kLibraryVersion*` are three `uint8`.
 

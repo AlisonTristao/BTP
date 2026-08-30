@@ -461,16 +461,21 @@ The payload begins with:
 |       54 |        2 | `topic_count`             |
 |       56 |        2 | `action_count`            |
 |       58 | variable | `source_name`             |
+| variable | variable | `source_info`             |
 | variable | variable | topic records             |
 | variable | variable | action records            |
 
-`manifest_format_version` is:
+`manifest_format_version` is `1` or `2`.
 
-```text
-1
-```
+Format `2` is identical to format `1` up to and including `source_name`, then
+inserts the `source_info` block defined in [Source info](#312-source-info)
+before the topic records. Format `1` has no `source_info` block.
 
-in the current protocol.
+A responder sends the highest format it implements. There is no format
+negotiation in `MANIFEST_REQUEST`, so a requester that only implements format
+`1` rejects a format `2` response, and a deployment moves both ends together.
+A requester that implements format `2` also accepts format `1` and treats its
+`source_info` as empty.
 
 `source_name` is encoded as `utf8_u16`.
 
@@ -507,7 +512,13 @@ topic_count  = 0
 action_count = 0
 ```
 
-and no descriptors follow.
+and no topic or action records follow.
+
+In format `2`, the `source_info` block still follows `source_name` exactly as
+in a full response. `source_info` is informational rather than a descriptor,
+and is not covered by `config_revision` (see [Source info](#312-source-info)),
+so a consumer receives the current `source_info` even when the catalog itself
+was not modified.
 
 The returned identity and revision still identify the manifest to which the response refers.
 
@@ -743,6 +754,79 @@ A consumer receiving an unknown schema or action version must obtain the corresp
 
 ---
 
+### 3.12 Source info
+
+Format `2` of `MANIFEST_DATA` carries a `source_info` block immediately after
+`source_name` and before the topic records:
+
+| Offset | Size | Field        | Wire type                 |
+| -----: | ---: | ------------ | ------------------------- |
+|      0 |    2 | `info_count` | `uint16_le`               |
+|      2 |    V | `entries`    | `info_count` × info entry |
+
+Each info entry is three consecutive `utf8_u16` strings:
+
+```text
+key:utf8_u16
+label:utf8_u16
+value:utf8_u16
+```
+
+`key` is a stable machine identifier for the datum, for example `fw_version`.
+
+`label` is a human-readable name for display, for example `Firmware`. It may
+be empty, in which case a consumer displays `key`.
+
+`value` is the datum itself, always textual. A numeric quantity is carried as
+its text form, for example `"2"` or `"16777216"`.
+
+BTP does not define a registry of `key` values and assigns no meaning to any
+of them. A consumer that does not recognise a `key` still displays the entry
+from `label` and `value`. The entries are unordered, a `key` should not repeat
+within one block, and every entry is optional: `info_count = 0` is valid and
+means the source published no info.
+
+---
+
+#### Purpose and scope
+
+`source_info` describes attributes of the source that help a human operator or
+a diagnostic tool identify and inspect it: a configured name or description,
+the firmware version and build identity, the chip, the running firmware
+partition, where an update is served.
+
+It is not part of the object catalog. It does not affect how telemetry topics
+or command actions are interpreted, and a change limited to `source_info` does
+not require a new `config_revision`. A consumer therefore receives the current
+`source_info` on every full and `NOT_MODIFIED` response, regardless of the
+revision it has cached.
+
+A source keeps `source_info` small. A value that changes continuously — uptime,
+free memory, a counter — belongs in [Status](#5-status), not here. A secret,
+such as an update password, is never placed in `source_info`.
+
+---
+
+#### Conventional keys
+
+These `key` spellings let two sources describe the same thing the same way.
+They are conventions, not a registry: nothing validates them, no consumer
+behaviour depends on them, and a source is free to use others.
+
+| `key`           | Meaning                                             |
+| --------------- | -------------------------------------------------- |
+| `name`          | Configured human name for this source              |
+| `description`   | Free-text description                              |
+| `model`         | Hardware model                                     |
+| `fw_version`    | Firmware version string                            |
+| `fw_build`      | Firmware build timestamp                           |
+| `chip`          | Chip model                                         |
+| `chip_revision` | Silicon revision                                   |
+| `ota_partition` | Running firmware partition                         |
+| `ota_endpoint`  | Where a firmware update is served — never a secret |
+
+---
+
 ## 4. Subscriptions
 
 `SUBSCRIBE` requests periodic publication of one telemetry topic.
@@ -965,6 +1049,9 @@ The following limits apply to the structures defined in this chapter:
 | Topics per manifest                     |         1024 |
 | Actions per manifest                    |         1024 |
 | Enum or action-error entries per record |          256 |
+| Source info entries                     |           32 |
+| Source info `key`                       |    64 octets |
+| Source info `label` or `value`          |   256 octets |
 
 The effective limit is always the smallest applicable limit imposed by:
 

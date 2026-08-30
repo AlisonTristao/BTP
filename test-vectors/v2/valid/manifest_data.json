@@ -1,0 +1,52 @@
+{
+  "format": "btp-test-vector-v2",
+  "id": "manifest_data",
+  "description": "A CONTROL frame carrying MANIFEST_DATA in manifest_format_version 2. It is a targeted response (catalog_index 0, catalog_count 1, CATALOG_COMPLETE) with no topic or action records, so the whole payload past source_name is the source_info block: info_count followed by three entries, each three utf8_u16 strings (key, label, value). The third entry has an empty label. The frame itself is unencrypted; source_info is plaintext manifest content and the AEAD extension is orthogonal (see the aead_* vectors).",
+  "transport": "serial",
+  "frame": {
+    "type": "CONTROL",
+    "flags": "0x0000",
+    "source_id": "0x0C0D0E0F",
+    "boot_id": "0x10203040",
+    "sequence": "0x00000002",
+    "timestamp_us": "0x00000000000003E8",
+    "object_id": "0x0004",
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "payload_hex": "44 33 22 11 88 77 66 55 09 00 00 00 00 02 00 00 02 00 00 00 01 00 00 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00 44 33 22 11 88 77 66 55 01 01 00 00 01 00 00 00 00 00 0b 00 73 65 6e 73 6f 72 2d 6e 6f 64 65 03 00 0a 00 66 77 5f 76 65 72 73 69 6f 6e 08 00 46 69 72 6d 77 61 72 65 09 00 32 2e 31 2e 30 2d 72 63 31 04 00 63 68 69 70 04 00 43 68 69 70 08 00 45 53 50 33 32 2d 53 33 04 00 6e 61 6d 65 00 00 0b 00 6c 61 62 20 62 65 6e 63 68 20 32"
+  },
+  "payload_model": {
+    "name": "MANIFEST_DATA",
+    "request_reference": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": "SUCCESS",
+    "flags": "0x02 (CATALOG_COMPLETE)",
+    "error_code": 0,
+    "manifest_format_version": 2,
+    "reserved": 0,
+    "config_revision": 1,
+    "source_uuid_hex": "11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00",
+    "described_source_id": "0x11223344",
+    "described_boot_id": "0x55667788",
+    "source_role": "0x01 (producer)",
+    "source_flags": "0x01 (ONLINE)",
+    "catalog_index": 0,
+    "catalog_count": 1,
+    "topic_count": 0,
+    "action_count": 0,
+    "source_name": "sensor-node",
+    "source_info": {
+      "info_count": 3,
+      "entries": [
+        { "key": "fw_version", "label": "Firmware", "value": "2.1.0-rc1" },
+        { "key": "chip", "label": "Chip", "value": "ESP32-S3" },
+        { "key": "name", "label": "", "value": "lab bench 2" }
+      ]
+    },
+    "topic_records": [],
+    "action_records": []
+  }
+}

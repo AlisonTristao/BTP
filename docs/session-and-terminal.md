@@ -95,6 +95,11 @@ When a peer publishes a manifest, the revision starts at:
 
 and increases monotonically when the described configuration changes.
 
+`config_revision` tracks the object catalog: topics, schemas, fields and
+actions. It does not track the `source_info` block
+([Commands and discovery](commands.md#312-source-info)), which is informational
+and is always delivered in full.
+
 The manifest itself is defined in [Commands and discovery](commands.md#3-the-manifest).
 
 ---

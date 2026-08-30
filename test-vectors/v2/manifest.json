@@ -3,6 +3,7 @@
   "contract": "BTP wire v2 / payload AEAD / btp::codec 2.0.0",
   "valid_vectors": [
     "hello",
+    "manifest_data",
     "aead_telemetry_gcm",
     "aead_telemetry_chacha20poly1305",
     "aead_fragmented_gcm_0",
