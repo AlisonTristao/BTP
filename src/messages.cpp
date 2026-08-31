@@ -864,8 +864,19 @@ T min_of(T a, T b) noexcept {
     return (a < b) ? a : b;
 }
 
+// versions[] is a fixed array of kMaxAnnouncedVersions; a decoded Hello never
+// carries more (decode_hello caps version_count there), but negotiate() also
+// takes a caller-built local Hello, so clamp before indexing rather than trust
+// the count.
+std::size_t announced_count(const Hello& hello) noexcept {
+    return (hello.version_count < kMaxAnnouncedVersions)
+               ? hello.version_count
+               : kMaxAnnouncedVersions;
+}
+
 bool version_listed(const Hello& hello, std::uint8_t version) noexcept {
-    for (std::size_t index = 0U; index < hello.version_count; ++index) {
+    const std::size_t count = announced_count(hello);
+    for (std::size_t index = 0U; index < count; ++index) {
         if (hello.versions[index] == version) {
             return true;
         }
@@ -882,7 +893,7 @@ EffectiveLimits negotiate(const Hello& local, const Hello& remote) noexcept {
     // ascending, so scanning local from the top and taking the first the
     // remote also lists gives the maximum in one pass (section 2.1).
     std::uint8_t selected = 0U;
-    for (std::size_t index = local.version_count; index-- > 0U;) {
+    for (std::size_t index = announced_count(local); index-- > 0U;) {
         if (version_listed(remote, local.versions[index])) {
             selected = local.versions[index];
             break;

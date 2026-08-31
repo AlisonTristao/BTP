@@ -980,6 +980,17 @@ void test_negotiate() {
     CHECK(none.selected_version == 0U);
     CHECK(none.max_logical_payload == 0U);
     CHECK(none.session_timeout_ms == 0U);
+
+    // A caller-built Hello with version_count past the versions[] array must not
+    // make negotiate() read out of bounds: only the first kMaxAnnouncedVersions
+    // entries are considered, the rest of the (over-large) count is ignored.
+    btp::Hello overrun = make_hello(1U, 2U, 4096U, 2U, 8U, 8U, 10000U);
+    overrun.version_count = 200U;  // versions[2..] stays zero
+    const btp::EffectiveLimits clamped = btp::negotiate(overrun, b);
+    CHECK(clamped.selected_version == 2U);
+    CHECK(clamped.max_logical_payload == 4096U);
+    const btp::EffectiveLimits clamped_swapped = btp::negotiate(b, overrun);
+    CHECK(clamped_swapped.selected_version == 2U);
 }
 
 void test_is_message_object() {
