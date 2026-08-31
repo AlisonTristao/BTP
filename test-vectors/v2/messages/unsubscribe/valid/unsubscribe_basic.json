@@ -1,0 +1,11 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "unsubscribe_basic",
+  "object": "unsubscribe",
+  "description": "UNSUBSCRIBE for the subscription granted above.",
+  "payload_model": {
+    "target_source_id": "0x11223344",
+    "target_boot_id": "0x55667788",
+    "subscription_id": "0x00A10001"
+  }
+}

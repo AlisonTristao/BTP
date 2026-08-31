@@ -14,6 +14,8 @@ The session begins with `HELLO` / `HELLO_RESULT` and ends through `SESSION_CLOSE
 
 The terminal channel operates inside an established session but remains logically separate from telemetry, commands and control traffic.
 
+The reference library's `btp::messages` encodes and decodes the `HELLO`, `HELLO_RESULT`, `SESSION_CLOSE` and `SESSION_CLOSE_RESULT` payloads and computes the effective limits (`btp::negotiate`), but it does not run the session -- the lifetime, the watchdog and the serial `console`↔`protocol` transition are the integration's ([Using the library §11.1](library.md#111-the-session-state-machine-is-not-implemented)).
+
 ---
 
 ## 1. `HELLO`
@@ -287,6 +289,8 @@ A version cannot be selected if another required hop cannot carry it.
 ---
 
 ### 2.2 Effective limits
+
+`btp::negotiate(local, remote)` computes the peer-to-peer part of this: the field-by-field minimum and the highest common version. A gateway on a path with a tighter limit than either peer clamps the result further itself.
 
 Every negotiated session limit is the minimum of the capabilities available to the peers and the communication path.
 
@@ -792,6 +796,8 @@ There is:
 * no text length prefix;
 * no terminator;
 * no encoding requirement.
+
+`btp::messages` has no `TERMINAL` type for this reason -- there is nothing to decode. The payload of a reassembled `TERMINAL` message *is* the bytes.
 
 The payload boundary is determined only by the BTP logical message size.
 

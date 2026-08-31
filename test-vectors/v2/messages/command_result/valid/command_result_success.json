@@ -1,0 +1,19 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "command_result_success",
+  "object": "command_result",
+  "description": "A successful COMMAND_RESULT with a short human message and an empty result body.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "action_id": 1,
+    "action_version": 1,
+    "status": 0,
+    "error_code": 0,
+    "message": "pong",
+    "result_hex": ""
+  }
+}

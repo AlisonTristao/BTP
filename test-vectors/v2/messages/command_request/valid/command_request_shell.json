@@ -1,0 +1,13 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "command_request_shell",
+  "object": "command_request",
+  "description": "A shell COMMAND_REQUEST (action 1 version 1) carrying the text \"dongle -ping\" as its parameters.",
+  "payload_model": {
+    "target_source_id": "0x0C0D0E0F",
+    "target_boot_id": "0x10203040",
+    "action_id": 1,
+    "action_version": 1,
+    "parameters_hex": "646f6e676c65202d70696e67"
+  }
+}

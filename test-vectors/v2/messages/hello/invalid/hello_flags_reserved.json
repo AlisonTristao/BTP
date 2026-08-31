@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_flags_reserved",
+  "object": "hello",
+  "base": "hello_dual_version",
+  "description": "The HELLO flags field is zero in wire v2.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 2,
+      "value": "0x0001"
+    }
+  ],
+  "expected_error": "ReservedNotZero"
+}

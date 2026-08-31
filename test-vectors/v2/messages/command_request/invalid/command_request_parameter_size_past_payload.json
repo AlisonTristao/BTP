@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "command_request_parameter_size_past_payload",
+  "object": "command_request",
+  "base": "command_request_shell",
+  "description": "parameter_size declares more octets than the payload holds.",
+  "mutations": [
+    {
+      "operation": "set_u32_le",
+      "offset": 16,
+      "value": 20
+    }
+  ],
+  "expected_error": "LengthOverflow"
+}

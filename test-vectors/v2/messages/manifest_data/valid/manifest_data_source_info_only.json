@@ -1,0 +1,43 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_data_source_info_only",
+  "object": "manifest_data",
+  "description": "Format 2, a targeted CATALOG_COMPLETE response with no topic or action records: the whole payload past source_name is the source_info block. Same bytes as the payload of test-vectors/v2/valid/manifest_data.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "flags": 2,
+    "error_code": 0,
+    "manifest_format_version": 2,
+    "config_revision": 1,
+    "source_uuid_hex": "112233445566778899aabbccddeeff00",
+    "described_source_id": "0x11223344",
+    "described_boot_id": "0x55667788",
+    "source_role": 1,
+    "source_flags": 1,
+    "catalog_index": 0,
+    "catalog_count": 1,
+    "source_name": "sensor-node",
+    "source_info": [
+      {
+        "key": "fw_version",
+        "label": "Firmware",
+        "value": "2.1.0-rc1"
+      },
+      {
+        "key": "chip",
+        "label": "Chip",
+        "value": "ESP32-S3"
+      },
+      {
+        "key": "name",
+        "label": "",
+        "value": "lab bench 2"
+      }
+    ]
+  }
+}

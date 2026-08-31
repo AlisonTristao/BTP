@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v1_truncated",
+  "object": "status",
+  "base": "status_v1_counters",
+  "description": "The 92-octet counter block is cut short.",
+  "mutations": [
+    {
+      "operation": "truncate",
+      "length": 90
+    }
+  ],
+  "expected_error": "PayloadTooShort"
+}

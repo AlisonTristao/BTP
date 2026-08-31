@@ -1,0 +1,18 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "subscribe_result_success",
+  "object": "subscribe_result",
+  "description": "SUBSCRIBE_RESULT granting a subscription at the requested rate and a 30 s lease.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "error_code": 0,
+    "subscription_id": "0x00A10001",
+    "effective_rate_millihz": 10000,
+    "granted_lease_ms": 30000
+  }
+}

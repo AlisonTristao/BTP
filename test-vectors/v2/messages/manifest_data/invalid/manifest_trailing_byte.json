@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_trailing_byte",
+  "object": "manifest_data",
+  "base": "manifest_data_source_info_only",
+  "description": "One extra octet after the source_info block.",
+  "mutations": [
+    {
+      "operation": "append",
+      "hex": "00"
+    }
+  ],
+  "expected_error": "TrailingBytes"
+}

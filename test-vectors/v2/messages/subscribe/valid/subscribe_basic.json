@@ -1,0 +1,13 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "subscribe_basic",
+  "object": "subscribe",
+  "description": "SUBSCRIBE to topic 0x0101 at 10 Hz (10000 millihertz) with a 30 s lease.",
+  "payload_model": {
+    "target_source_id": "0x11223344",
+    "target_boot_id": "0x55667788",
+    "topic_id": "0x0101",
+    "requested_rate_millihz": 10000,
+    "requested_lease_ms": 30000
+  }
+}

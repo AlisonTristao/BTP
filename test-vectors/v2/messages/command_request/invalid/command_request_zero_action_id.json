@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "command_request_zero_action_id",
+  "object": "command_request",
+  "base": "command_request_shell",
+  "description": "action_id must be non-zero (section 2.1).",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 8,
+      "value": 0
+    }
+  ],
+  "expected_error": "ZeroField"
+}

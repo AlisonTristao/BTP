@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.1.0 LANGUAGES CXX)
+project(btp VERSION 2.2.0 LANGUAGES CXX)
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the
@@ -54,6 +54,28 @@ btp_strict_warnings(btp_codec)
 # alias above is btp::codec, so a consumer's find_package(btp) succeeds and
 # then fails to find the target it was told to link.
 set_target_properties(btp_codec PROPERTIES EXPORT_NAME codec)
+
+# ---------------------------------------------------------------------------
+# btp::messages -- struct <-> bytes for every COMMAND / CONTROL payload
+# (docs/commands.md, docs/session-and-terminal.md). Same guarantees as
+# btp::codec: no allocation, noexcept, caller-owned buffers. Links btp::codec
+# for ByteView and the shared little-endian helpers; NO mbedtls, so it is
+# always built, like btp::codec and unlike btp::aead.
+# ---------------------------------------------------------------------------
+
+add_library(btp_messages src/messages.cpp)
+add_library(btp::messages ALIAS btp_messages)
+
+target_include_directories(
+    btp_messages
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_messages PUBLIC cxx_std_11)
+target_link_libraries(btp_messages PUBLIC btp::codec)
+btp_strict_warnings(btp_messages)
+set_target_properties(btp_messages PROPERTIES EXPORT_NAME messages)
 
 # ---------------------------------------------------------------------------
 # btp::aead -- optional wire v2 encryption, on top of mbedtls.
@@ -135,7 +157,7 @@ if(BTP_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
 
-    set(btp_export_targets btp_codec)
+    set(btp_export_targets btp_codec btp_messages)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -204,6 +226,19 @@ if(BTP_BUILD_TESTS)
         add_test(NAME btp_${suite}_tests COMMAND btp_${suite}_tests)
     endforeach()
 
+    # btp::messages has its own suite: it links btp::messages (not just
+    # btp::codec) and white-box-includes src/messages_detail.hpp for the cursor
+    # tests, then checks every fixed payload against test-vectors/v2/messages/.
+    add_executable(btp_messages_tests tests/test_messages.cpp)
+    target_link_libraries(btp_messages_tests PRIVATE btp::messages)
+    target_compile_features(btp_messages_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_messages_tests)
+    target_compile_definitions(
+        btp_messages_tests
+        PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
+    )
+    add_test(NAME btp_messages_tests COMMAND btp_messages_tests)
+
     target_compile_definitions(
         btp_conformance_tests
         PRIVATE BTP_VECTOR_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1"
@@ -227,6 +262,14 @@ if(BTP_BUILD_TESTS)
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vectors_v2.py
             --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2
+            --check
+    )
+    add_test(
+        NAME btp_message_vectors
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_messages.py
+            --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2/messages
             --check
     )
 

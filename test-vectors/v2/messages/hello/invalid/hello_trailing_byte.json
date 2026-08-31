@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_trailing_byte",
+  "object": "hello",
+  "base": "hello_dual_version",
+  "description": "One extra octet after the announced versions.",
+  "mutations": [
+    {
+      "operation": "append",
+      "hex": "00"
+    }
+  ],
+  "expected_error": "TrailingBytes"
+}

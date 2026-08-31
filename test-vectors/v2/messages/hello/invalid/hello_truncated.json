@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_truncated",
+  "object": "hello",
+  "base": "hello_dual_version",
+  "description": "The payload is cut off inside the fixed portion.",
+  "mutations": [
+    {
+      "operation": "truncate",
+      "length": 20
+    }
+  ],
+  "expected_error": "PayloadTooShort"
+}

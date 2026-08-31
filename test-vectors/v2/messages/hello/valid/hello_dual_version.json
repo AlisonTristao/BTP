@@ -1,0 +1,20 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_dual_version",
+  "object": "hello",
+  "description": "A consumer HELLO announcing wire versions 1 and 2, typical desktop limits, a non-zero config_revision.",
+  "payload_model": {
+    "role": 3,
+    "versions": [
+      1,
+      2
+    ],
+    "max_logical_payload": 16384,
+    "max_inflight_reassemblies": 4,
+    "max_subscriptions": 16,
+    "max_dedup_entries": 32,
+    "session_timeout_ms": 10000,
+    "peer_uuid_hex": "00112233445566778899aabbccddeeff",
+    "config_revision": 7
+  }
+}

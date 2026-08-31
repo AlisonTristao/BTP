@@ -1,0 +1,39 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v2_two_topics",
+  "object": "status",
+  "description": "STATUS version 2: the same 92-octet prefix, then two topic_status records for one source.",
+  "payload_model": {
+    "status_version": 2,
+    "flags": 0,
+    "uptime_us": 123456789,
+    "frames_rx": 4200,
+    "frames_tx": 3900,
+    "frames_dropped": 5,
+    "crc_errors": 1,
+    "decode_errors": 0,
+    "reassembly_completed": 40,
+    "reassembly_timeouts": 2,
+    "reassembly_rejected": 0,
+    "command_duplicates": 3,
+    "telemetry_dropped": 17,
+    "topics": [
+      {
+        "source_id": "0x11223344",
+        "topic_id": "0x0101",
+        "subscriber_count": 2,
+        "effective_rate_millihz": 10000,
+        "bytes_total": 98304,
+        "samples_dropped_total": 12
+      },
+      {
+        "source_id": "0x11223344",
+        "topic_id": "0x0102",
+        "subscriber_count": 1,
+        "effective_rate_millihz": 5000,
+        "bytes_total": 40960,
+        "samples_dropped_total": 0
+      }
+    ]
+  }
+}

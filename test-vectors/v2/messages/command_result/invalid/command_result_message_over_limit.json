@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "command_result_message_over_limit",
+  "object": "command_result",
+  "base": "command_result_success",
+  "description": "The message utf8_u16 length exceeds the 512-octet result-message limit.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 20,
+      "value": 600
+    }
+  ],
+  "expected_error": "CountTooLarge"
+}

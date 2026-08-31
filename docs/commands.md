@@ -17,6 +17,8 @@ All layouts below describe the **complete logical payload after reassembly**.
 
 BTP payload structures use explicit wire fields. There is no implicit padding, alignment or native structure layout.
 
+Every payload in this chapter has a struct ⇄ bytes implementation in the reference library's `btp::messages` (`btp/messages.hpp`): a `decode_*` / `encode_*` pair for the fixed messages, `ManifestReader` / `ManifestWriter` for `MANIFEST_DATA`. See [Using the library §12](library.md#12-the-message-layer). The layouts here remain the authority; the library is checked against them by `test-vectors/v2/messages/`.
+
 ---
 
 ## 1. Common primitives
@@ -291,6 +293,8 @@ For a non-success status, the result body is empty unless explicitly defined oth
 ---
 
 ### 2.5 Command deduplication
+
+`btp::messages` encodes and decodes `COMMAND_REQUEST` / `COMMAND_RESULT` and the request reference that correlates them, but the deduplication cache below is the integration's state, not the library's ([Using the library §11.4](library.md#114-command-execution-and-deduplication-are-above-the-payload-layer)).
 
 Command requests are deduplicated using the request identity:
 
@@ -576,6 +580,8 @@ record_size:uint32_le
 followed by exactly `record_size` octets.
 
 The decoder validates the record size before parsing its contents and requires exact consumption of the record.
+
+In `btp::messages` this run is walked, not decoded whole: `ManifestReader::next_topic` / `next_action` hand back the raw record bytes, and `FieldRecordReader` / `EnumEntryReader` / `ActionErrorReader` walk them without allocation ([Using the library §12.3](library.md#123-reading-and-writing-manifest_data)).
 
 ---
 

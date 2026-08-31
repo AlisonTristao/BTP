@@ -50,37 +50,37 @@ Application
 BTP wire representation
 ```
 
-The reference implementation also deliberately does not implement every higher-level mechanism described by the BTP specification.
+The library implements the wire: the frame, the fragmentation, the COBS
+framing, the optional AEAD, and -- through `btp::messages` -- the byte layout
+of every `COMMAND` and `CONTROL` payload ([The message layer](#12-the-message-layer)).
 
-For example, the protocol defines:
+It deliberately stops below the mechanisms that carry *state*:
 
-* sessions;
-* `HELLO`;
-* manifests;
-* telemetry schemas;
-* command execution;
-* command deduplication;
-* subscriptions;
-* priority queues.
+* the session state machine and its watchdog;
+* command execution and the deduplication cache;
+* the manifest catalogue a consumer keeps;
+* telemetry schema interpretation;
+* the priority scheduler.
 
-Those mechanisms use the BTP frame format, but their application state is not owned by the current reference codec library.
-
-This distinction is important when considering memory usage.
+Those use the BTP frame and payload formats the library defines, but their
+application state is owned by the integration above it. This distinction is
+important when considering memory usage.
 
 ---
 
-## 1. The four headers
+## 1. The headers
 
-The public API is divided into four headers.
+The public API is divided into five headers.
 
-| Header                  | Responsibility                                         |
-| ----------------------- | ------------------------------------------------------ |
-| `btp/codec.hpp`         | Frame encoding, decoding, CRC and header serialization |
-| `btp/fragmentation.hpp` | Fragmentation and logical-message reassembly           |
-| `btp/stream.hpp`        | COBS and incremental serial decoding                   |
-| `btp/aead.hpp`          | Optional version-2 authenticated encryption            |
+| Header                  | Responsibility                                              |
+| ----------------------- | ---------------------------------------------------------- |
+| `btp/codec.hpp`         | Frame encoding, decoding, CRC and header serialization      |
+| `btp/fragmentation.hpp` | Fragmentation and logical-message reassembly                |
+| `btp/stream.hpp`        | COBS and incremental serial decoding                        |
+| `btp/messages.hpp`      | Struct ⇄ bytes for every `COMMAND` / `CONTROL` payload      |
+| `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through two CMake targets.
+The implementation is exposed through three CMake targets.
 
 ### `btp::codec`
 
@@ -94,7 +94,27 @@ stream.cpp
 
 It has no external dependency.
 
-Applications that do not require BTP encryption can use only this target.
+Applications that do not require BTP encryption or the payload layer can use
+only this target.
+
+### `btp::messages`
+
+`btp::messages` contains:
+
+```text
+messages.cpp
+```
+
+It links `btp::codec` and has no other dependency -- in particular no
+mbedtls -- so it is always built, like `btp::codec` and unlike `btp::aead`. It
+carries the same guarantees as `btp::codec`: no allocation, `noexcept`,
+caller-owned buffers, no partial output on failure.
+
+It is the struct ⇄ bytes half of [Commands and discovery](commands.md) and
+[Session and terminal](session-and-terminal.md): a `decode_*` / `encode_*`
+pair for each fixed message, and `ManifestReader` / `ManifestWriter` for
+`MANIFEST_DATA`. It adds no wire field. [The message layer](#12-the-message-layer)
+covers it in full.
 
 ### `btp::aead`
 
@@ -122,17 +142,17 @@ Conceptually:
        +-------------+-------------+
        |             |             |
      codec     fragmentation      stream
-
-
-                  btp::aead
+                     ^
                      |
-                     v
-                 mbedcrypto
+                 btp::messages          btp::aead
+                                            |
+                                            v
+                                        mbedcrypto
 ```
 
-Encryption is therefore optional at build time.
-
-The basic frame codec does not require the cryptographic component.
+`btp::messages` links `btp::codec`; `btp::aead` additionally links mbedcrypto.
+Encryption is therefore optional at build time, and the basic frame codec
+requires neither the payload layer nor the cryptographic component.
 
 ---
 
@@ -1311,6 +1331,9 @@ BTP_ENABLE_AEAD
 
 allows applications that do not use BTP encryption to build the codec without the crypto dependency.
 
+`btp::codec` and `btp::messages` have no build option: they have no external
+dependency and are always built.
+
 ---
 
 ### 8.2 Installed package
@@ -1419,9 +1442,17 @@ The BTP repository contains machine-readable conformance vectors for the support
 They are located under:
 
 ```text
-test-vectors/v1/
-test-vectors/v2/
+test-vectors/v1/            frame vectors, wire v1
+test-vectors/v2/            frame vectors, wire v2 (AEAD)
+test-vectors/v2/messages/   payload vectors for btp::messages
 ```
+
+The frame vectors are a whole datagram with an opaque payload; the message
+vectors are a logical `COMMAND` / `CONTROL` payload with no frame around it.
+They are checked by `tools/test_vectors.py`, `tools/test_vectors_v2.py` and
+`tools/test_messages.py` respectively -- three independent reference
+implementations, so a bug in one and a bug in the C++ cannot hide each other.
+See [the message-vector README](../test-vectors/v2/messages/README.md).
 
 The vectors complement the written specification.
 
@@ -1613,7 +1644,7 @@ They must not be confused.
 | Concept            | Example        | Meaning                                 |
 | ------------------ | -------------- | --------------------------------------- |
 | Wire version       | `0x01`, `0x02` | Value stored in the BTP header          |
-| Library version    | `2.0.0`        | Version of the reference implementation |
+| Library version    | `2.2.0`        | Version of the reference implementation |
 | Release tag        | `v1.1.0-beta`  | Repository release                      |
 | Maintenance branch | `1.x`          | Source branch maintaining a major line  |
 
@@ -1624,7 +1655,7 @@ The library version is not.
 For example:
 
 ```text
-library 2.0.0
+library 2.2.0
 ```
 
 and:
@@ -1644,7 +1675,7 @@ BTP wire version 2
 or:
 
 ```text
-BTP library 2.0.0
+BTP library 2.2.0
 ```
 
 rather than an ambiguous:
@@ -1713,130 +1744,85 @@ If one of them describes different bytes from the others, the implementation lin
 
 ## 11. Known limitations and implementation boundary
 
-The reference library intentionally stops below several BTP protocol mechanisms.
-
-Understanding this boundary prevents functionality defined by the specification from being mistaken for functionality automatically provided by the C++ library.
-
----
-
-### 11.1 Session logic is not implemented by the codec
-
-The BTP specification defines:
-
-```text
-HELLO
-HELLO_RESULT
-
-session lifetime
-watchdog
-
-SESSION_CLOSE
-SESSION_CLOSE_RESULT
-```
-
-The current reference codec can encode and decode the BTP frames carrying those payloads, but it does not contain a complete session manager.
-
-The application integrating BTP maintains that higher-level state.
+The library implements the wire -- the frame and, with `btp::messages`, the
+byte layout of every `COMMAND` and `CONTROL` payload. It intentionally stops
+below the mechanisms that carry *state*. This section marks that line, so a
+mechanism the specification defines is not mistaken for one the library runs
+on its own.
 
 ---
 
-### 11.2 Manifest storage is not implemented by the codec
+### 11.1 The session state machine is not implemented
 
-The specification defines:
-
-```text
-MANIFEST_REQUEST
-MANIFEST_DATA
-```
-
-and the structure of topic, field and action descriptors.
-
-The current reference codec does not maintain an internal catalog of discovered schemas.
-
-After decoding and reassembling a manifest message, descriptor parsing and storage belong to the higher-level implementation.
-
-Therefore:
+`btp::messages` encodes and decodes:
 
 ```text
-BTP has runtime discovery
+HELLO / HELLO_RESULT
+SESSION_CLOSE / SESSION_CLOSE_RESULT
 ```
 
-does not mean:
+and `btp::negotiate()` computes the effective limits from two `HELLO`s
+(the peer-to-peer minimum; a gateway clamps further for its path).
 
-```text
-btp::codec automatically owns
-a dynamic manifest database
-```
-
-There is no contradiction with the library's no-allocation guarantee.
+It does **not** run the session: the lifetime, the inactivity watchdog, the
+`console`↔`protocol` transition on serial, and the rule that command
+deduplication outlives a session are the integration's state to keep.
 
 ---
 
-### 11.3 Telemetry schema interpretation is above the frame codec
+### 11.2 The manifest catalogue is not stored
 
-`btp::decode()` exposes the logical BTP payload.
+`btp::messages` provides `ManifestReader` / `ManifestWriter` for the byte
+layout of `MANIFEST_DATA` -- the header, the `source_info` block, and every
+topic, field, action and enum record, walked without allocation.
 
-It does not automatically convert a telemetry payload into application variables according to a manifest schema.
-
-Conceptually:
-
-```text
-BTP frame
-   |
-   v
-btp::decode()
-   |
-   v
-logical telemetry payload
-   |
-   v
-schema-aware application layer
-```
-
-The wire representation of telemetry is specified by BTP.
-
-The schema-aware object model used by a particular application is not stored inside the frame codec.
+It does **not** keep a catalogue of what it read. Which schemas a consumer
+caches, and for how long against `config_revision`, is the integration's
+decision -- fixed-capacity tables on a microcontroller, dynamic containers on
+a desktop. Runtime discovery means the information becomes known at runtime,
+not that the library holds a database.
 
 ---
 
-### 11.4 Command execution and deduplication are above the codec
+### 11.3 Telemetry schema interpretation is above the payload layer
 
-BTP specifies:
+`btp::messages` decodes a topic's `FieldRecord`s -- the type, unit, scale,
+offset and enum labels that *describe* a schema. It does not decode a
+`TELEMETRY` sample against that schema: the `PACKED_LE` / `TLV_LE` body codec,
+the nullable bitmap and the engineering conversion are a separate layer.
 
-* command request identity;
-* action versions;
-* command results;
-* retry behavior;
-* deduplication rules.
-
-The reference codec provides the framing required to transport those messages.
-
-It does not:
-
-* execute application actions;
-* maintain the deduplication cache;
-* track command state.
-
-Those mechanisms are implemented by the BTP integration above the codec.
+```text
+MANIFEST_DATA  --btp::messages-->  FieldRecord (the schema)
+TELEMETRY      --btp::decode()-->  logical payload (opaque here)
+                                        |
+                                        v
+                                   schema-aware layer (not in this library)
+```
 
 ---
 
-### 11.5 Subscriptions and priority queues are above the codec
+### 11.4 Command execution and deduplication are above the payload layer
 
-The protocol defines:
+`btp::messages` encodes and decodes `COMMAND_REQUEST` / `COMMAND_RESULT`,
+including the request reference that correlates a result to its request.
 
-```text
-SUBSCRIBE
-SUBSCRIBE_RESULT
-UNSUBSCRIBE
-STATUS
-```
+It does **not** execute an action, keep the deduplication cache, or track
+command state. The `(request_source_id, request_boot_id, request_sequence)`
+key, its bounded cache and the retransmission rules
+([Commands and discovery](commands.md#25-command-deduplication)) are the
+integration's.
 
-and the BTP priority classes.
+---
 
-The current codec library does not own a telemetry scheduler or a priority queue.
+### 11.5 The priority scheduler is not implemented
 
-The transport integration applies those rules when scheduling outgoing messages.
+`btp::messages` encodes and decodes `SUBSCRIBE` / `SUBSCRIBE_RESULT` /
+`UNSUBSCRIBE` / `UNSUBSCRIBE_RESULT` and `STATUS` (versions 1 and 2).
+
+It does **not** own a telemetry scheduler, a subscription aggregator, or the
+six-class priority queue. Those decide *when* an outgoing message is sent and
+are inherently transport-specific -- FreeRTOS queues on firmware, an event
+loop on a desktop.
 
 ---
 
@@ -1887,7 +1873,120 @@ directly on the complete received message.
 
 ---
 
-## 12. Putting the library together
+## 12. The message layer
+
+`btp::messages` turns the byte layout of every `COMMAND` and `CONTROL` payload
+-- the tables in [Commands and discovery](commands.md) and
+[Session and terminal](session-and-terminal.md) -- into a C++ struct, and
+back. It sits directly above `btp::codec`: `btp::decode()` gives you a logical
+payload after reassembly, and `btp::messages` gives that payload a shape.
+
+It adds no wire field. Every layout it serialises is already specified; this
+is the specification's struct ⇄ bytes half written once, so a consumer does
+not re-derive an offset table from the prose.
+
+---
+
+### 12.1 What it covers
+
+| Object | API |
+| --- | --- |
+| `HELLO` / `HELLO_RESULT` | `decode_hello` / `encode_hello`, `decode_hello_result` / `encode_hello_result` |
+| `SESSION_CLOSE` (`_RESULT`) | `decode_session_close` / …, `decode_session_close_result` / … |
+| `COMMAND_REQUEST` / `COMMAND_RESULT` | `decode_command_request` / …, `decode_command_result` / … |
+| `MANIFEST_REQUEST` | `decode_manifest_request` / `encode_manifest_request` |
+| `MANIFEST_DATA` | `ManifestReader` / `ManifestWriter` (§12.3) |
+| `SUBSCRIBE` (`_RESULT`), `UNSUBSCRIBE` (`_RESULT`) | `decode_subscribe` / …, `decode_unsubscribe_result` / … |
+| `STATUS` v1 and v2 | `decode_status`, `status_topic_count`, `encode_status_v1` / `encode_status_v2` |
+| `HELLO` negotiation | `negotiate(local, remote)` -> `EffectiveLimits` |
+
+`TERMINAL_IN` / `TERMINAL_OUT` have no entry: their payload is opaque bytes
+with no structure to decode ([Session and terminal](session-and-terminal.md#7-the-terminal)).
+`is_message_object(type, object_id)` reports whether a `(type, object_id)`
+pair names a payload this layer decodes -- a router uses it to tell a message
+it should decode from a frame it only relays.
+
+---
+
+### 12.2 The contract
+
+Every `decode_*` / `encode_*` follows the same rules as `btp::codec`:
+
+* **no allocation** -- `MANIFEST_DATA` is walked record by record, never
+  decoded into one growing structure;
+* **`noexcept`** -- errors are returned as `btp::MessageError`, a separate
+  enum from `btp::Error` because a truncated `utf8_u16` inside a payload and a
+  bad envelope CRC are failures at different layers;
+* **zero-copy decode** -- a `ByteView` in an out-struct points into the
+  payload buffer and is valid only while that buffer is;
+* **no partial output on failure** -- on any non-`Ok` return, the out-struct
+  and `*written` are not to be read.
+
+`decode_*` validates in the order [Commands and discovery](commands.md#7-validation)
+defines: the fixed portion, reserved fields and flag bits, every declared
+length before the variable data it introduces, identifiers and versions and
+counts, nested records within their bounds, the protocol limits of
+[section 6](commands.md#6-limits), and finally exact consumption of the
+payload. `encode_*` applies the same field rules, so a struct that would not
+decode does not encode.
+
+The layer validates each field against its own domain (`role`, a result
+`status`, a close `reason`) but does not check cross-field or cross-record
+semantics -- that a successful `HELLO_RESULT` implies non-zero limits, that a
+`(source_id, topic_id)` pair does not repeat within one `STATUS`. Those
+belong to the session and subscription layers above.
+
+---
+
+### 12.3 Reading and writing `MANIFEST_DATA`
+
+A manifest can carry 1024 topics and 1024 actions, each with up to 256
+fields, so it is walked, not returned whole. `ManifestReader` stays shallow --
+header, `source_info`, topics, actions -- and hands each topic and action back
+with the **raw bytes** of its nested records, which sub-readers walk:
+
+```cpp
+btp::ManifestReader r(payload, size);
+btp::ManifestHeader h;
+r.header(&h);
+
+btp::SourceInfoEntry si;                              // format 2 only
+while (r.next_source_info(&si) == btp::ManifestStep::Item) { /* ... */ }
+
+btp::TopicRecord t;
+btp::ByteView field_bytes;
+while (r.next_topic(&t, &field_bytes) == btp::ManifestStep::Item) {
+    btp::FieldRecordReader fr(field_bytes, t.field_count);
+    btp::FieldRecord f;
+    btp::ByteView enum_bytes;
+    while (fr.next(&f, &enum_bytes) == btp::ManifestStep::Item) {
+        btp::EnumEntryReader er(enum_bytes, f.enum_count);
+        btp::EnumEntry e;
+        while (er.next(&e) == btp::ManifestStep::Item) { /* ... */ }
+    }
+}
+
+btp::ActionRecord a;
+btp::ByteView params, results, errors;
+while (r.next_action(&a, &params, &results, &errors) == btp::ManifestStep::Item) {
+    // FieldRecordReader over params and results, ActionErrorReader over errors
+}
+
+r.finish();   // requires the whole payload to have been consumed
+```
+
+Nesting is explicit in the types -- a `FieldRecordReader` over a topic's
+fields is a different object from one over an action's parameters -- never in
+hidden reader state. `ManifestWriter` mirrors this: `begin`, `add_source_info`,
+`begin_topic` / `add_field` / `add_enum` / `end_topic`, `begin_action` /
+`add_action_param` / `add_action_result` / `add_action_error` / `end_action`,
+`finish`. It backpatches every `record_size`, `info_count`, `field_count`,
+`enum_count` and `error_count`, and `finish` checks the topic and action
+counts against the header.
+
+---
+
+## 13. Putting the library together
 
 A typical unencrypted transmit path is:
 
@@ -1985,13 +2084,14 @@ TERMINAL
 LOG
 ```
 
-according to the corresponding BTP chapter.
+according to the corresponding BTP chapter -- for `COMMAND` and `CONTROL`,
+through `btp::messages` (§12).
 
 ---
 
-## 13. Summary
+## 14. Summary
 
-The BTP reference library implements the protocol mechanisms closest to the wire:
+The BTP reference library implements the wire:
 
 ```text
 frame serialization
@@ -2001,6 +2101,7 @@ fragmentation
 reassembly
 serial COBS
 optional AEAD
+COMMAND / CONTROL payload layout   (btp::messages)
 ```
 
 It deliberately does not own the surrounding application.
@@ -2010,19 +2111,19 @@ In particular, the library does not own:
 ```text
 transport I/O
 
-manifest database
+manifest catalogue storage
 
-telemetry object storage
+telemetry schema interpretation
 
-session manager
+the session state machine and watchdog
 
-command executor
+command execution
 
-command deduplication table
+the command deduplication cache
 
-subscription scheduler
+the subscription aggregator
 
-priority queues
+the priority scheduler
 ```
 
 This distinction is also what makes the library's memory model straightforward.

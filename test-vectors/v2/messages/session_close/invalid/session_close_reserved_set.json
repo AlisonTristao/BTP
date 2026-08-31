@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "session_close_reserved_set",
+  "object": "session_close",
+  "base": "session_close_normal",
+  "description": "The three octets after reason are reserved and zero.",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 1,
+      "value": 1
+    }
+  ],
+  "expected_error": "ReservedNotZero"
+}

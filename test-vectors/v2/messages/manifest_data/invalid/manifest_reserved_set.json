@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_reserved_set",
+  "object": "manifest_data",
+  "base": "manifest_data_source_info_only",
+  "description": "The two octets after manifest_format_version are reserved and zero.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 18,
+      "value": 1
+    }
+  ],
+  "expected_error": "ReservedNotZero"
+}

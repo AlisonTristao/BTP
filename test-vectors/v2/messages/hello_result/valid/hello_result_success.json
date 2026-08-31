@@ -1,0 +1,23 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_result_success",
+  "object": "hello_result",
+  "description": "HELLO_RESULT accepting the session on wire version 2 with the effective limits clamped to the responder.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "selected_version": 2,
+    "error_code": 0,
+    "max_logical_payload": 8192,
+    "max_inflight_reassemblies": 2,
+    "max_subscriptions": 8,
+    "max_dedup_entries": 16,
+    "session_timeout_ms": 10000,
+    "peer_uuid_hex": "00112233445566778899aabbccddeeff",
+    "config_revision": 1
+  }
+}

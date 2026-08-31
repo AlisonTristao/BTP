@@ -16,7 +16,8 @@ is correct. They ship as one version.
 | --- | --- |
 | Wire `version == 0x01` | Specified, implemented, covered by `test-vectors/v1/`. |
 | Wire `version == 0x02` (AEAD payload) | Specified, implemented in `btp::aead` with two ciphers, covered by `test-vectors/v2/`. |
-| Library | `2.0.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
+| `COMMAND` / `CONTROL` payload layout | Specified, implemented in `btp::messages`, covered by `test-vectors/v2/messages/`. |
+| Library | `2.2.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
 | Latest published tag | `v1.1.0-beta`. No wire `0x02` tag has been published yet. |
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 
@@ -38,9 +39,10 @@ the payload chapters when you need a specific channel.
 **Reimplementing BTP on another platform** — read [The datagram](frame.md) and
 [Getting it across the link](fragmentation-and-transports.md) in full, then the
 payload chapters for the channels you need, then
-[the conformance vectors](library.md#9-conformance-vectors). Your implementation
-is not finished when you believe you understood the prose; it is finished when
-it produces and consumes the same octets as the vectors.
+[the conformance vectors](library.md#9-conformance-vectors) — the frame vectors
+and, for the `COMMAND` / `CONTROL` payloads, `test-vectors/v2/messages/`. Your
+implementation is not finished when you believe you understood the prose; it is
+finished when it produces and consumes the same octets as the vectors.
 
 ## The chapters
 
@@ -54,7 +56,7 @@ it produces and consumes the same octets as the vectors.
 | [Telemetry payloads](telemetry.md) | Topics, schemas, encodings, and how a client binds a field. |
 | [Commands and discovery](commands.md) | Requests, results, deduplication, the manifest, subscriptions, status. |
 | [Session and terminal](session-and-terminal.md) | `HELLO`, session lifetime, the opaque terminal, priority under load. |
-| [Using the library](library.md) | The API, its guarantees, build, vectors, versioning, known limits. |
+| [Using the library](library.md) | The API, `btp::messages`, guarantees, build, vectors, versioning, known limits. |
 
 ## Scope
 

@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_versions_not_ascending",
+  "object": "hello",
+  "base": "hello_dual_version",
+  "description": "The second announced version is not greater than the first.",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 41,
+      "value": 1
+    }
+  ],
+  "expected_error": "NotAscending"
+}

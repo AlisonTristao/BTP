@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v2_count_over_records",
+  "object": "status",
+  "base": "status_v2_two_topics",
+  "description": "topic_status_count declares three records but only two follow.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 92,
+      "value": 3
+    }
+  ],
+  "expected_error": "PayloadTooShort"
+}

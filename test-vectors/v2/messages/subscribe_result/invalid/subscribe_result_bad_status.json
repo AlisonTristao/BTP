@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "subscribe_result_bad_status",
+  "object": "subscribe_result",
+  "base": "subscribe_result_success",
+  "description": "status 0x09 is not one of the seven defined result statuses (section 1.4).",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 12,
+      "value": 9
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

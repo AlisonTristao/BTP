@@ -53,6 +53,8 @@ This chapter specifies the logical payload of messages whose envelope `type` is 
 
 Everything below describes the payload **after reassembly**. A consumer never decodes an isolated fragment.
 
+The reference library draws a line through this chapter: `btp::messages` decodes the manifest `FieldRecord`s that *describe* a schema (type, unit, scale, offset, enum labels), but not a `TELEMETRY` sample against that schema -- the `PACKED_LE` / `TLV_LE` body codec, the nullable bitmap and the engineering conversion are not in the library ([Using the library §11.3](library.md#113-telemetry-schema-interpretation-is-above-the-payload-layer)).
+
 ---
 
 ## 1. Why telemetry needs a schema

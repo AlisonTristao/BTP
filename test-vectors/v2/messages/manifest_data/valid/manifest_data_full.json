@@ -1,0 +1,117 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_data_full",
+  "object": "manifest_data",
+  "description": "Format 2 with one subscribable topic (two fields, the second an enum) and one dangerous action (one PACKED_LE parameter, no results, one action-specific error).",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "flags": 2,
+    "error_code": 0,
+    "manifest_format_version": 2,
+    "config_revision": 4,
+    "source_uuid_hex": "112233445566778899aabbccddeeff00",
+    "described_source_id": "0x0C0D0E0F",
+    "described_boot_id": "0x10203040",
+    "source_role": 1,
+    "source_flags": 1,
+    "catalog_index": 0,
+    "catalog_count": 1,
+    "source_name": "motor-node",
+    "source_info": [
+      {
+        "key": "fw_version",
+        "label": "Firmware",
+        "value": "3.0.0"
+      }
+    ],
+    "topics": [
+      {
+        "topic_id": "0x0101",
+        "schema_version": 1,
+        "encoding": 5,
+        "flags": 1,
+        "max_rate_millihz": 50000,
+        "name": "motor_state",
+        "description": "left/right wheel state",
+        "fields": [
+          {
+            "field_id": 1,
+            "order": 0,
+            "type": 8,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "name": "left_speed",
+            "unit": "rad/s",
+            "description": ""
+          },
+          {
+            "field_id": 2,
+            "order": 1,
+            "type": 11,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "name": "mode",
+            "unit": "1",
+            "description": "",
+            "enums": [
+              {
+                "value": 0,
+                "label": "idle"
+              },
+              {
+                "value": 1,
+                "label": "run"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "action_id": 1,
+        "action_version": 1,
+        "flags": 2,
+        "parameter_encoding": 5,
+        "result_encoding": 0,
+        "execution_timeout_ms": 2000,
+        "name": "set_pwm",
+        "description": "set a wheel PWM pair",
+        "confirmation_text": "",
+        "parameters": [
+          {
+            "field_id": 1,
+            "order": 0,
+            "type": 5,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "name": "left",
+            "unit": "1",
+            "description": ""
+          }
+        ],
+        "results": [],
+        "errors": [
+          {
+            "error_code": "0x8001",
+            "label": "motor disarmed"
+          }
+        ]
+      }
+    ]
+  }
+}

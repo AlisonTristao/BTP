@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_bad_version",
+  "object": "status",
+  "base": "status_v1_counters",
+  "description": "status_version 3 is not a value this layer knows.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 0,
+      "value": 3
+    }
+  ],
+  "expected_error": "UnsupportedFormat"
+}

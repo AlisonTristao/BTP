@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v2_count_under_records",
+  "object": "status",
+  "base": "status_v2_two_topics",
+  "description": "topic_status_count declares one record but two follow.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 92,
+      "value": 1
+    }
+  ],
+  "expected_error": "TrailingBytes"
+}

@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_bad_source_role",
+  "object": "manifest_data",
+  "base": "manifest_data_source_info_only",
+  "description": "source_role 0x09 is reserved (docs/session-and-terminal.md section 1.5).",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 48,
+      "value": 9
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

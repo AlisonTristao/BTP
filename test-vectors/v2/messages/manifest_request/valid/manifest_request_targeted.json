@@ -1,0 +1,11 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_request_targeted",
+  "object": "manifest_request",
+  "description": "A targeted MANIFEST_REQUEST for one source at its current boot, asking for the full manifest.",
+  "payload_model": {
+    "target_source_id": "0x11223344",
+    "target_boot_id": "0x55667788",
+    "known_config_revision": 0
+  }
+}

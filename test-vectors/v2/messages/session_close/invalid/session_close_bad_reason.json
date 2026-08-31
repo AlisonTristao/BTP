@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "session_close_bad_reason",
+  "object": "session_close",
+  "base": "session_close_normal",
+  "description": "Close reason 0x09 is unassigned (section 4.1).",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 0,
+      "value": 9
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

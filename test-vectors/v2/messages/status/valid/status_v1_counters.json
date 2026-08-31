@@ -1,0 +1,21 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v1_counters",
+  "object": "status",
+  "description": "STATUS version 1: the 92-octet counter block with DEGRADED set.",
+  "payload_model": {
+    "status_version": 1,
+    "flags": 1,
+    "uptime_us": 123456789,
+    "frames_rx": 4200,
+    "frames_tx": 3900,
+    "frames_dropped": 5,
+    "crc_errors": 1,
+    "decode_errors": 0,
+    "reassembly_completed": 40,
+    "reassembly_timeouts": 2,
+    "reassembly_rejected": 0,
+    "command_duplicates": 3,
+    "telemetry_dropped": 17
+  }
+}

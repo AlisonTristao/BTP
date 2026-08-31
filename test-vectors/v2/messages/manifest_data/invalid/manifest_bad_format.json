@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_bad_format",
+  "object": "manifest_data",
+  "base": "manifest_data_source_info_only",
+  "description": "manifest_format_version 3 is not a value this layer knows.",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 16,
+      "value": 3
+    }
+  ],
+  "expected_error": "UnsupportedFormat"
+}

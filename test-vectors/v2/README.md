@@ -60,12 +60,21 @@ under mbedtls.
 | `cipher_id_reserved` | `CIPHER_ID` of 2 or 3 |
 | `cipher_id_requires_encrypted` | Non-zero `CIPHER_ID` without `ENCRYPTED` |
 
+## The message-layer vectors
+
+`messages/` is a separate set one layer up from the frame: the `.bin` there is
+a logical `COMMAND` / `CONTROL` payload with no frame around it, checked
+against `btp::messages` by `tools/test_messages.py`. See
+[messages/README.md](messages/README.md).
+
 ## Verifying
 
 ```bash
 python tools/test_vectors_v2.py --root test-vectors/v2 --check
+python tools/test_messages.py --root test-vectors/v2/messages --check
 ```
 
 `tools/test_vectors_v2.py` is a sibling of the v1 tool, not a wrapper around
 it: its reference decoder independently reimplements the v2 rules, so a bug in
-one reference decoder cannot silently hide in the other.
+one reference decoder cannot silently hide in the other. `tools/test_messages.py`
+does the same one layer up, for the payloads.

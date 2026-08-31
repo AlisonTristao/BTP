@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "status_v1_trailing_byte",
+  "object": "status",
+  "base": "status_v1_counters",
+  "description": "A version-1 payload is exactly 92 octets (section 5.1).",
+  "mutations": [
+    {
+      "operation": "append",
+      "hex": "00"
+    }
+  ],
+  "expected_error": "TrailingBytes"
+}

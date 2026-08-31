@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "unsubscribe_result_ok",
+  "object": "unsubscribe_result",
+  "description": "The responder acknowledging the unsubscribe.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "error_code": 0
+  }
+}

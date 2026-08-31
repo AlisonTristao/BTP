@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <btp/codec.hpp>
 #include <btp/fragmentation.hpp>
+#include <btp/messages.hpp>
 #include <btp/stream.hpp>
 
 namespace {
@@ -9,6 +10,7 @@ std::uint8_t frame_buffer[btp::kEspNowMaxFrameSize];
 std::uint8_t cobs_buffer[btp::kEspNowMaxFrameSize + 2U];
 std::uint8_t decoded_buffer[btp::kEspNowMaxFrameSize];
 std::uint8_t payload[] = {0x00U, 0x0aU, 0x0dU, 0xffU};
+std::uint8_t message_buffer[128];
 
 }  // namespace
 
@@ -51,6 +53,21 @@ void setup() {
         fragments != 1U) {
         abort();
     }
+
+    // btp::messages compiles and links on the embedded target. Phase 0: the
+    // bodies are stubs, so the calls are exercised only for compilation, not
+    // for a result.
+    btp::Hello hello = {};
+    std::size_t message_written = 0U;
+    (void)btp::encode_hello(hello, message_buffer, sizeof(message_buffer),
+                            &message_written);
+    btp::Hello parsed_hello = {};
+    (void)btp::decode_hello(message_buffer, sizeof(message_buffer),
+                            &parsed_hello);
+
+    btp::ManifestReader reader(message_buffer, sizeof(message_buffer));
+    btp::ManifestHeader manifest_header = {};
+    (void)reader.header(&manifest_header);
 }
 
 void loop() {}

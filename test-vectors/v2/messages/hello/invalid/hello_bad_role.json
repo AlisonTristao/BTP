@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "hello_bad_role",
+  "object": "hello",
+  "base": "hello_dual_version",
+  "description": "role 0x07 is reserved (section 1.5).",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 0,
+      "value": 7
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

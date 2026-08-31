@@ -1,0 +1,26 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_data_not_modified",
+  "object": "manifest_data",
+  "description": "Format 1, NOT_MODIFIED: topic_count and action_count are zero and no records follow. The identity and revision still name the manifest.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "flags": 1,
+    "error_code": 0,
+    "manifest_format_version": 1,
+    "config_revision": 4,
+    "source_uuid_hex": "112233445566778899aabbccddeeff00",
+    "described_source_id": "0x11223344",
+    "described_boot_id": "0x55667788",
+    "source_role": 2,
+    "source_flags": 1,
+    "catalog_index": 0,
+    "catalog_count": 1,
+    "source_name": "hub"
+  }
+}
