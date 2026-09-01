@@ -18,7 +18,7 @@ is correct. They ship as one version.
 | Wire `version == 0x02` (AEAD payload) | Specified, implemented in `btp::aead` with two ciphers, covered by `test-vectors/v2/`. |
 | `COMMAND` / `CONTROL` payload layout | Specified, implemented in `btp::messages`, covered by `test-vectors/v2/messages/`. |
 | Library | `2.3.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
-| Latest published tag | `v1.1.0-beta`. No wire `0x02` tag has been published yet. |
+| Latest published tag | `v2.3.0` on `main` (wire `0x02`); `v1.1.0-beta` on the `1.x` line. |
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 
 Wire version, release tag, branch and library version are four different things
