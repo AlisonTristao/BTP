@@ -205,7 +205,7 @@ std::uint64_t SampleValue::u64(std::size_t index) const noexcept {
 
 SampleReader::SampleReader(const std::uint8_t* payload, std::size_t size,
                            const FieldSpec* fields, std::size_t field_count,
-                           std::uint8_t encoding) noexcept
+                           std::uint8_t encoding, SampleLayout layout) noexcept
     : payload_(payload),
       size_(size),
       fields_(fields),
@@ -214,7 +214,7 @@ SampleReader::SampleReader(const std::uint8_t* payload, std::size_t size,
       error_(MessageError::Ok),
       primed_(false),
       schema_version_(0U),
-      body_start_(2U),
+      body_start_(layout == SampleLayout::BodyOnly ? 0U : 2U),
       cursor_(0U),
       bitmap_start_(0U),
       bitmap_bytes_(0U),
@@ -229,12 +229,14 @@ SampleReader::SampleReader(const std::uint8_t* payload, std::size_t size,
         error_ = MessageError::CountTooLarge;
         return;
     }
-    if (size < 2U) {
+    if (size < body_start_) {
         error_ = MessageError::PayloadTooShort;
         return;
     }
-    schema_version_ = static_cast<std::uint16_t>(payload[0]) |
-                      static_cast<std::uint16_t>(static_cast<std::uint16_t>(payload[1]) << 8U);
+    if (body_start_ == 2U) {
+        schema_version_ = static_cast<std::uint16_t>(payload[0]) |
+                          static_cast<std::uint16_t>(static_cast<std::uint16_t>(payload[1]) << 8U);
+    }
     for (std::size_t index = 0U; index < field_count; ++index) {
         if (fields[index].order != index) {
             error_ = MessageError::InvalidArgument;  // caller must pass fields in `order`
@@ -612,7 +614,7 @@ SampleWriter::SampleWriter(std::uint8_t* out, std::size_t capacity,
     }
 }
 
-MessageError SampleWriter::begin(std::uint16_t schema_version) noexcept {
+MessageError SampleWriter::begin(std::uint16_t schema_version, SampleLayout layout) noexcept {
     if (error_ != MessageError::Ok) {
         return error_;
     }
@@ -620,18 +622,21 @@ MessageError SampleWriter::begin(std::uint16_t schema_version) noexcept {
         error_ = MessageError::WrongOrder;
         return error_;
     }
+    const std::size_t prefix = (layout == SampleLayout::BodyOnly) ? 0U : 2U;
     bitmap_bytes_ = (nullable_count_ + 7U) / 8U;
-    if ((2U + bitmap_bytes_) > capacity_) {
+    if ((prefix + bitmap_bytes_) > capacity_) {
         error_ = MessageError::BufferTooSmall;
         return error_;
     }
-    out_[0] = static_cast<std::uint8_t>(schema_version);
-    out_[1] = static_cast<std::uint8_t>(schema_version >> 8U);
-    bitmap_start_ = 2U;
+    if (prefix == 2U) {
+        out_[0] = static_cast<std::uint8_t>(schema_version);
+        out_[1] = static_cast<std::uint8_t>(schema_version >> 8U);
+    }
+    bitmap_start_ = prefix;
     for (std::size_t index = 0U; index < bitmap_bytes_; ++index) {
         out_[bitmap_start_ + index] = 0U;
     }
-    cursor_ = 2U + bitmap_bytes_;
+    cursor_ = prefix + bitmap_bytes_;
     state_ = kSwBegun;
     return MessageError::Ok;
 }

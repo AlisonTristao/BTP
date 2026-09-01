@@ -391,6 +391,48 @@ void test_tlv_errors() {
     CHECK(r3.error() == MessageError::CountMismatch);
 }
 
+void test_body_only_layout() {
+    const FieldSpec fields[] = {
+        spec(1, 0, WireType::Float32),
+        spec(2, 1, WireType::Int16, 0U, 0.01, 0.0),
+    };
+    // Same as test_packed_roundtrip_scalars, but no schema_version prefix.
+    std::uint8_t buffer[32];
+    SampleWriter w(buffer, sizeof(buffer), fields, 2U);
+    CHECK(w.begin(7U, btp::SampleLayout::BodyOnly) == MessageError::Ok);
+    CHECK(w.put_f64(12.5) == MessageError::Ok);
+    CHECK(w.put_f64(3.14) == MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(w.finish(&written) == MessageError::Ok);
+    CHECK(written == 6U);                 // 4 + 2, no 2-byte prefix
+    CHECK(buffer[4] == 0x3AU && buffer[5] == 0x01U);
+
+    SampleReader r(buffer, written, fields, 2U, btp::kEncodingPackedLe,
+                   btp::SampleLayout::BodyOnly);
+    CHECK(r.schema_version() == 0U);      // caller supplies it out of band
+    SampleValue v = {};
+    CHECK(r.next(&v) == SampleStep::Item);
+    CHECK(v.f64(0) > 12.49 && v.f64(0) < 12.51);
+    CHECK(r.next(&v) == SampleStep::Item);
+    CHECK(v.i64(0) == 314);
+    CHECK(r.next(&v) == SampleStep::End);
+    CHECK(r.finish() == MessageError::Ok);
+
+    // body() returns the whole buffer in BodyOnly mode.
+    btp::ByteView body = {};
+    CHECK(r.body(&body) == MessageError::Ok);
+    CHECK(body.size == written);
+
+    // A 1-byte buffer is fine for BodyOnly (would be PayloadTooShort otherwise).
+    const FieldSpec one[] = { spec(1, 0, WireType::Uint8) };
+    const std::uint8_t just_one[] = {0x2AU};
+    SampleReader r1(just_one, 1U, one, 1U, btp::kEncodingPackedLe,
+                    btp::SampleLayout::BodyOnly);
+    CHECK(r1.next(&v) == SampleStep::Item);
+    CHECK(v.u64(0) == 42U);
+    CHECK(r1.finish() == MessageError::Ok);
+}
+
 void test_body_accessor() {
     const FieldSpec none[] = { spec(1, 0, WireType::Uint8) };  // unused for text
     const std::uint8_t bytes[] = {0x02U, 0x00U, 'h', 'i', '!'};
@@ -468,6 +510,7 @@ int main() {
     test_writer_type_guards();
     test_tlv_sparse();
     test_tlv_errors();
+    test_body_only_layout();
     test_body_accessor();
 #ifdef BTP_VECTOR_ROOT_V2
     test_vectors();

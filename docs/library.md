@@ -1669,7 +1669,7 @@ They must not be confused.
 | Concept            | Example        | Meaning                                 |
 | ------------------ | -------------- | --------------------------------------- |
 | Wire version       | `0x01`, `0x02` | Value stored in the BTP header          |
-| Library version    | `2.4.0`        | Version of the reference implementation |
+| Library version    | `2.5.0`        | Version of the reference implementation |
 | Release tag        | `v1.1.0-beta`  | Repository release                      |
 | Maintenance branch | `1.x`          | Source branch maintaining a major line  |
 
@@ -1680,7 +1680,7 @@ The library version is not.
 For example:
 
 ```text
-library 2.4.0
+library 2.5.0
 ```
 
 and:
@@ -1700,7 +1700,7 @@ BTP wire version 2
 or:
 
 ```text
-BTP library 2.4.0
+BTP library 2.5.0
 ```
 
 rather than an ambiguous:
@@ -2113,6 +2113,12 @@ every field to have been written.
 For a text encoding (`OPAQUE_BYTES`, `UTF8`, `JSON_UTF8`, `CSV_UTF8`)
 `next()` returns `End` and `body()` hands back the whole `encoded_body`; the
 caller parses the text.
+
+A consumer must read `schema_version` to pick the schema before it can decode
+anything, so a router usually has it already. Passing
+`btp::SampleLayout::BodyOnly` to the `SampleReader` constructor (and to
+`SampleWriter::begin`) makes the buffer the `encoded_body` alone, with no
+two-octet prefix to re-supply; `schema_version()` then returns 0.
 
 ---
 

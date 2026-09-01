@@ -89,13 +89,14 @@ void setup() {
     };
     btp::SampleWriter sample_writer(message_buffer, sizeof(message_buffer),
                                     sample_fields, 2U);
-    (void)sample_writer.begin(1U);
+    (void)sample_writer.begin(1U, btp::SampleLayout::BodyOnly);
     (void)sample_writer.put_f64(12.5);
     (void)sample_writer.put_f64(3.14);
     (void)sample_writer.finish(&message_written);
 
     btp::SampleReader sample_reader(message_buffer, message_written,
-                                    sample_fields, 2U, btp::kEncodingPackedLe);
+                                    sample_fields, 2U, btp::kEncodingPackedLe,
+                                    btp::SampleLayout::BodyOnly);
     btp::SampleValue sample_value = {};
     while (sample_reader.next(&sample_value) == btp::SampleStep::Item) {
         (void)sample_value.f64(0);

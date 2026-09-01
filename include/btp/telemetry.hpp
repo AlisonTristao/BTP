@@ -141,6 +141,15 @@ struct SampleValue {
 
 enum class SampleStep : std::uint8_t { Item, End, Error };
 
+// Whether the buffer handed to SampleReader / SampleWriter includes the
+// two-octet schema_version prefix. A router that dispatched on schema_version
+// to pick the schema in the first place already has it -- BodyOnly lets it
+// pass just the encoded_body without re-prepending two bytes.
+enum class SampleLayout : std::uint8_t {
+    LogicalPayload,  // schema_version:u16 then encoded_body (docs/telemetry.md section 6)
+    BodyOnly,        // encoded_body only
+};
+
 // ---------------------------------------------------------------------------
 // SampleReader -- decode
 // ---------------------------------------------------------------------------
@@ -167,10 +176,11 @@ public:
 
     SampleReader(const std::uint8_t* payload, std::size_t size,
                  const FieldSpec* fields, std::size_t field_count,
-                 std::uint8_t encoding) noexcept;
+                 std::uint8_t encoding,
+                 SampleLayout layout = SampleLayout::LogicalPayload) noexcept;
 
-    // The uint16_le at payload[0..2). Valid once the constructor's arguments
-    // were non-null and size >= 2; 0 otherwise (also recorded as an error).
+    // The uint16_le at payload[0..2) in LogicalPayload mode; 0 in BodyOnly
+    // mode (the caller already has it).
     std::uint16_t schema_version() const noexcept { return schema_version_; }
 
     Step next(SampleValue* out) noexcept;
@@ -228,7 +238,11 @@ public:
     SampleWriter(std::uint8_t* out, std::size_t capacity,
                  const FieldSpec* fields, std::size_t field_count) noexcept;
 
-    MessageError begin(std::uint16_t schema_version) noexcept;
+    // In LogicalPayload mode (the default) begin() writes the two-octet
+    // schema_version prefix; in BodyOnly mode it writes only the presence
+    // bitmap and `schema_version` is ignored.
+    MessageError begin(std::uint16_t schema_version,
+                       SampleLayout layout = SampleLayout::LogicalPayload) noexcept;
 
     MessageError put_f64(double engineering_value) noexcept;
     MessageError put_i64(std::int64_t raw) noexcept;
