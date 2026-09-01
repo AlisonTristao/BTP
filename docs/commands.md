@@ -498,6 +498,13 @@ bit 0 -> ONLINE
 
 All unassigned flag bits are zero.
 
+When `status` is not `SUCCESS` (a `REJECTED` response to a targeted request for
+an unknown source, a `STALE_TARGET_BOOT`, and so on) the response describes no
+source. `source_role`, `source_uuid`, `described_source_id`, `described_boot_id`,
+`config_revision`, `topic_count` and `action_count` are then "don't care" and
+are conventionally zero; `source_name` may carry a short human diagnostic. A
+reader validates `source_role` only on a `SUCCESS` descriptor.
+
 ---
 
 ### 3.3 `NOT_MODIFIED`

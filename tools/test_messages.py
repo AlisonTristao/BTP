@@ -754,7 +754,12 @@ def decode_manifest_data(data):
         return None, r.error
     if m["manifest_format_version"] not in (1, 2):
         return None, "UnsupportedFormat"
-    if m["status"] > 6 or not 1 <= m["source_role"] <= 4:
+    if m["status"] > 6:
+        return None, "InvalidValue"
+    # A non-SUCCESS response (REJECTED / NOT_FOUND / ...) describes no source,
+    # so source_role is "don't care" (conventionally zero). Only a SUCCESS
+    # descriptor must name a valid role.
+    if m["status"] == 0 and not 1 <= m["source_role"] <= 4:
         return None, "InvalidValue"
     if m["manifest_format_version"] == 2:
         info_count = r.u16()

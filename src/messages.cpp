@@ -1084,7 +1084,15 @@ MessageError ManifestReader::header(ManifestHeader* out) noexcept {
         error_ = MessageError::UnsupportedFormat;
         return error_;
     }
-    if (!valid_result_status(header.status) || !valid_role(header.source_role)) {
+    if (!valid_result_status(header.status)) {
+        error_ = MessageError::InvalidValue;
+        return error_;
+    }
+    // A non-SUCCESS response (REJECTED / NOT_FOUND / STALE_TARGET_BOOT) describes
+    // no source: source_role and the identity fields are "don't care",
+    // conventionally zero. Only a SUCCESS descriptor must name a valid role.
+    if (header.status == static_cast<std::uint8_t>(ResultStatus::Success) &&
+        !valid_role(header.source_role)) {
         error_ = MessageError::InvalidValue;
         return error_;
     }
@@ -1542,7 +1550,15 @@ MessageError ManifestWriter::begin(const ManifestHeader& header) noexcept {
         error_ = MessageError::UnsupportedFormat;
         return error_;
     }
-    if (!valid_result_status(header.status) || !valid_role(header.source_role)) {
+    if (!valid_result_status(header.status)) {
+        error_ = MessageError::InvalidValue;
+        return error_;
+    }
+    // A non-SUCCESS response (REJECTED / NOT_FOUND / STALE_TARGET_BOOT) describes
+    // no source: source_role and the identity fields are "don't care",
+    // conventionally zero. Only a SUCCESS descriptor must name a valid role.
+    if (header.status == static_cast<std::uint8_t>(ResultStatus::Success) &&
+        !valid_role(header.source_role)) {
         error_ = MessageError::InvalidValue;
         return error_;
     }

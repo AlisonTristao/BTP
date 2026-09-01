@@ -729,6 +729,12 @@ public:
 
     MessageError finish(std::size_t* written) noexcept;
 
+    // Octets emitted so far. Lets a caller that is packing a size-limited
+    // response (reserve room for the records before writing source_info, say)
+    // decide what still fits without a second pass. 0 before begin(); after a
+    // failure it stops advancing, like every other call.
+    std::size_t size() const noexcept { return cursor_; }
+
 private:
     void close_source_info() noexcept;   // backpatch info_count
     void close_field() noexcept;         // backpatch the open field record_size, check enum count

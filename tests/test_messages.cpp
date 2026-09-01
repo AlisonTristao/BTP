@@ -934,6 +934,37 @@ void test_manifest_writer_count_mismatch() {
     CHECK(writer.finish(&written) == btp::MessageError::CountMismatch);
 }
 
+// A non-SUCCESS MANIFEST_DATA (REJECTED / NOT_FOUND) describes no source, so
+// source_role is conventionally zero -- valid for a rejected response, invalid
+// for a SUCCESS descriptor.
+void test_manifest_rejected_response_allows_zero_role() {
+    std::uint8_t buffer[128] = {};
+    btp::ManifestHeader header = {};
+    header.manifest_format_version = 1U;
+    header.status = static_cast<std::uint8_t>(btp::ResultStatus::Rejected);
+    header.error_code = static_cast<std::uint16_t>(btp::ResultError::NotFound);
+    header.source_role = 0U;  // no source to describe
+    btp::ByteView name = {reinterpret_cast<const std::uint8_t*>("unknown source"), 14U};
+    header.source_name = name;
+
+    btp::ManifestWriter writer(buffer, sizeof(buffer));
+    CHECK(writer.begin(header) == btp::MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+    btp::ManifestReader reader(buffer, written);
+    btp::ManifestHeader parsed = {};
+    CHECK(reader.header(&parsed) == btp::MessageError::Ok);
+    CHECK(parsed.status == static_cast<std::uint8_t>(btp::ResultStatus::Rejected));
+    CHECK(parsed.source_role == 0U);
+    CHECK(reader.finish() == btp::MessageError::Ok);
+
+    // But a SUCCESS descriptor with role 0 is still rejected.
+    header.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    btp::ManifestWriter writer2(buffer, sizeof(buffer));
+    CHECK(writer2.begin(header) == btp::MessageError::InvalidValue);
+}
+
 // ---------------------------------------------------------------------------
 // negotiate() and is_message_object()
 // ---------------------------------------------------------------------------
@@ -1063,6 +1094,7 @@ int main() {
     test_vector_manifest_not_modified();
     test_invalid_manifest_vectors();
     test_manifest_writer_count_mismatch();
+    test_manifest_rejected_response_allows_zero_role();
     test_negotiate();
     test_is_message_object();
     test_invalid_vectors();
