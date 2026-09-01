@@ -3,6 +3,7 @@
 #include <btp/fragmentation.hpp>
 #include <btp/messages.hpp>
 #include <btp/stream.hpp>
+#include <btp/telemetry.hpp>
 
 namespace {
 
@@ -80,6 +81,26 @@ void setup() {
     (void)writer.put_raw_source_info(raw_info);
     (void)writer.put_raw_records(raw_topics, raw_actions);
     (void)writer.finish(&message_written);
+
+    // btp::telemetry compiles and links on the embedded target.
+    static const btp::FieldSpec sample_fields[] = {
+        {1U, 0U, static_cast<std::uint8_t>(btp::WireType::Float32), 0U, 1U, 0U, 1.0, 0.0},
+        {2U, 1U, static_cast<std::uint8_t>(btp::WireType::Int16), 0U, 1U, 0U, 0.01, 0.0},
+    };
+    btp::SampleWriter sample_writer(message_buffer, sizeof(message_buffer),
+                                    sample_fields, 2U);
+    (void)sample_writer.begin(1U);
+    (void)sample_writer.put_f64(12.5);
+    (void)sample_writer.put_f64(3.14);
+    (void)sample_writer.finish(&message_written);
+
+    btp::SampleReader sample_reader(message_buffer, message_written,
+                                    sample_fields, 2U, btp::kEncodingPackedLe);
+    btp::SampleValue sample_value = {};
+    while (sample_reader.next(&sample_value) == btp::SampleStep::Item) {
+        (void)sample_value.f64(0);
+    }
+    (void)sample_reader.finish();
 }
 
 void loop() {}

@@ -1,0 +1,13 @@
+{
+  "format": "btp-test-vector-telemetry-v2",
+  "id": "packed_variable_array",
+  "encoding": "PACKED_LE",
+  "description": "A single variable-count int16 field (max 8): count:uint16_le then that many elements.",
+  "schema_version": 1,
+  "schema": [
+    { "field_id": 1, "order": 0, "type": "int16", "scale": 1.0, "offset": 0.0, "variable_count": true, "max_element_count": 8 }
+  ],
+  "sample": [
+    { "field_id": 1, "raw": [10, -20, 30, 40] }
+  ]
+}

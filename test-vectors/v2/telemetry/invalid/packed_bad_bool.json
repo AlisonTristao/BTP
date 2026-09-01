@@ -1,0 +1,16 @@
+{
+  "format": "btp-test-vector-telemetry-v2",
+  "id": "packed_bad_bool",
+  "base": "packed_bool",
+  "encoding": "PACKED_LE",
+  "description": "A bool octet other than 0x00 / 0x01 (docs/telemetry.md section 14.2).",
+  "schema_version": 1,
+  "schema": [
+    { "field_id": 1, "order": 0, "type": "bool", "scale": 1.0, "offset": 0.0 }
+  ],
+  "sample": [
+    { "field_id": 1, "raw": [1] }
+  ],
+  "mutations": [ { "operation": "set_u8", "offset": 2, "value": "0x02" } ],
+  "expected_error": "InvalidValue"
+}

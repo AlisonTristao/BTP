@@ -1,0 +1,20 @@
+{
+  "format": "btp-test-vector-telemetry-v2",
+  "id": "packed_truncated",
+  "base": "packed_motor",
+  "encoding": "PACKED_LE",
+  "description": "The last field's bytes are cut short.",
+  "schema_version": 1,
+  "schema": [
+    { "field_id": 1, "order": 0, "type": "float32", "scale": 1.0, "offset": 0.0 },
+    { "field_id": 2, "order": 1, "type": "int16", "scale": 0.01, "offset": 0.0 },
+    { "field_id": 3, "order": 2, "type": "enum8", "scale": 1.0, "offset": 0.0 }
+  ],
+  "sample": [
+    { "field_id": 1, "raw": [12.5] },
+    { "field_id": 2, "raw": [314] },
+    { "field_id": 3, "raw": [1] }
+  ],
+  "mutations": [ { "operation": "truncate", "length": 8 } ],
+  "expected_error": "PayloadTooShort"
+}

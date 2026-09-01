@@ -53,7 +53,7 @@ This chapter specifies the logical payload of messages whose envelope `type` is 
 
 Everything below describes the payload **after reassembly**. A consumer never decodes an isolated fragment.
 
-The reference library draws a line through this chapter: `btp::messages` decodes the manifest `FieldRecord`s that *describe* a schema (type, unit, scale, offset, enum labels), but not a `TELEMETRY` sample against that schema -- the `PACKED_LE` / `TLV_LE` body codec, the nullable bitmap and the engineering conversion are not in the library ([Using the library §11.3](library.md#113-telemetry-schema-interpretation-is-above-the-payload-layer)).
+The reference library covers this chapter in two halves. `btp::messages` decodes the manifest `FieldRecord`s that *describe* a schema (type, unit, scale, offset, enum labels). `btp::telemetry` decodes and encodes a `TELEMETRY` sample *against* a schema the caller holds: the `PACKED_LE` / `TLV_LE` body, the nullable presence bitmap and the engineering conversion (`raw * scale + offset`). What stays outside the library is the `JSON_UTF8` / `CSV_UTF8` text parse and the schema *storage* -- the caller keeps the `FieldSpec` table, the same way it keeps any other discovered state ([Using the library §12.4](library.md#124-decoding-and-encoding-telemetry-samples)).
 
 ---
 
@@ -459,6 +459,12 @@ Every `TELEMETRY` logical payload starts with the schema version.
 |      0 |        2 | `schema_version` | `uint16_le`                      |
 |      2 | variable | `encoded_body`   | according to the schema encoding |
 
+**Library.** `btp::SampleReader` decodes this payload against a `btp::FieldSpec`
+array (`SampleReader::schema_version()` peeks the prefix; `body()` returns the
+`encoded_body` for a text encoding). `btp::SampleWriter` encodes it for
+`PACKED_LE`. See [Using the library
+§12.4](library.md#124-decoding-and-encoding-telemetry-samples).
+
 Conceptually:
 
 ```text
@@ -739,6 +745,10 @@ compact repeated telemetry
 
 `PACKED_LE` is the most compact structured telemetry representation in BTP.
 
+**Library.** `btp::SampleReader` (encoding `btp::kEncodingPackedLe`) and
+`btp::SampleWriter` implement this section, including the presence bitmap and
+its zero-padding rule.
+
 Fields are serialized directly in schema order.
 
 There is:
@@ -845,6 +855,10 @@ Any of the following invalidate the sample:
 ## 11. `TLV_LE`
 
 `TLV_LE` makes each field explicit.
+
+**Library.** `btp::SampleReader` (encoding `btp::kEncodingTlvLe`) decodes this
+section, presenting fields in schema `order` and reporting an omitted nullable
+field as null. `btp::SampleWriter` does not emit `TLV_LE`.
 
 The body consists of zero or more entries:
 
@@ -980,15 +994,31 @@ It is not a fallback for a failed binary encoder.
 
 ## 13. Wire types
 
-Structured telemetry uses explicit BTP wire types.
+Structured telemetry uses explicit BTP wire types. A field record
+([Field records](commands.md#37-field-records)) carries the `type` octet
+below.
 
-| Type                                     |          Size | Representation                              |
-| ---------------------------------------- | ------------: | ------------------------------------------- |
-| `uint8` / `uint16` / `uint32` / `uint64` | 1 / 2 / 4 / 8 | Unsigned, little-endian                     |
-| `int8` / `int16` / `int32` / `int64`     | 1 / 2 / 4 / 8 | Two's complement, little-endian             |
-| `float32` / `float64`                    |         4 / 8 | IEEE-754 bit pattern, little-endian         |
-| `bool`                                   |             1 | `0x00` false, `0x01` true                   |
-| `enum8` / `enum16`                       |         1 / 2 | Unsigned value; labels come from the schema |
+| `type` | Type       |  Size | Representation                              |
+| -----: | ---------- | ----: | ------------------------------------------- |
+| `0x01` | `uint8`    |     1 | Unsigned, little-endian                     |
+| `0x02` | `uint16`   |     2 | Unsigned, little-endian                     |
+| `0x03` | `uint32`   |     4 | Unsigned, little-endian                     |
+| `0x04` | `uint64`   |     8 | Unsigned, little-endian                     |
+| `0x05` | `int8`     |     1 | Two's complement, little-endian             |
+| `0x06` | `int16`    |     2 | Two's complement, little-endian             |
+| `0x07` | `int32`    |     4 | Two's complement, little-endian             |
+| `0x08` | `int64`    |     8 | Two's complement, little-endian             |
+| `0x09` | `float32`  |     4 | IEEE-754 bit pattern, little-endian         |
+| `0x0A` | `float64`  |     8 | IEEE-754 bit pattern, little-endian         |
+| `0x0B` | `bool`     |     1 | `0x00` false, `0x01` true; any other octet invalid |
+| `0x0C` | `enum8`    |     1 | Unsigned value; labels come from the schema |
+| `0x0D` | `enum16`   |     2 | Unsigned value; labels come from the schema |
+
+`0x00` and `0x0E`-`0xFF` are reserved and invalidate the field.
+
+**Library.** `btp::WireType` names these values; `btp::wire_type_width(type)`
+returns the octet width (0 for a reserved value). See [Using the library
+§12.4](library.md#124-decoding-and-encoding-telemetry-samples).
 
 Values are serialized field by field.
 
@@ -1070,6 +1100,12 @@ The receiver:
 * continues processing the rest of the sample.
 
 This is the only recoverable telemetry payload error.
+
+**Library.** `btp::SampleValue` hands back the raw integer (`i64()` / `u64()`).
+Whether that integer names a known label is a lookup against the field's enum
+entries, which the caller holds (from `btp::messages`); `btp::telemetry` never
+sees them, so "unknown enum" is the caller's determination and its counter,
+the same line drawn for other cross-record semantics.
 
 ### 14.4 Structural errors
 

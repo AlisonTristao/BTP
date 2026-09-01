@@ -1,0 +1,14 @@
+{
+  "format": "btp-test-vector-telemetry-manifest-v2",
+  "description": "TELEMETRY logical payloads (schema_version + PACKED_LE / TLV_LE body) decoded against a schema. The .bin is the logical payload only; the BTP frame around it is covered by test-vectors/v2/valid/. See tools/test_telemetry.py.",
+  "vectors": [
+    "packed_motor",
+    "packed_nullable",
+    "packed_variable_array",
+    "tlv_sparse",
+    "packed_bad_bool",
+    "packed_trailing",
+    "packed_truncated",
+    "tlv_unordered"
+  ]
+}

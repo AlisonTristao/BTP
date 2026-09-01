@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.3.0 LANGUAGES CXX)
+project(btp VERSION 2.4.0 LANGUAGES CXX)
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the
@@ -76,6 +76,28 @@ target_compile_features(btp_messages PUBLIC cxx_std_11)
 target_link_libraries(btp_messages PUBLIC btp::codec)
 btp_strict_warnings(btp_messages)
 set_target_properties(btp_messages PROPERTIES EXPORT_NAME messages)
+
+# ---------------------------------------------------------------------------
+# btp::telemetry -- the TELEMETRY body codec (PACKED_LE / TLV_LE), the nullable
+# bitmap and the engineering conversion, against a schema the caller holds
+# (docs/telemetry.md). btp::messages decodes the manifest that DESCRIBES the
+# schema; this decodes a sample AGAINST it. Same guarantees, NO mbedtls, always
+# built.
+# ---------------------------------------------------------------------------
+
+add_library(btp_telemetry src/telemetry.cpp)
+add_library(btp::telemetry ALIAS btp_telemetry)
+
+target_include_directories(
+    btp_telemetry
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_telemetry PUBLIC cxx_std_11)
+target_link_libraries(btp_telemetry PUBLIC btp::messages)
+btp_strict_warnings(btp_telemetry)
+set_target_properties(btp_telemetry PROPERTIES EXPORT_NAME telemetry)
 
 # ---------------------------------------------------------------------------
 # btp::aead -- optional wire v2 encryption, on top of mbedtls.
@@ -157,7 +179,7 @@ if(BTP_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
 
-    set(btp_export_targets btp_codec btp_messages)
+    set(btp_export_targets btp_codec btp_messages btp_telemetry)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -239,6 +261,19 @@ if(BTP_BUILD_TESTS)
     )
     add_test(NAME btp_messages_tests COMMAND btp_messages_tests)
 
+    # btp::telemetry: links btp::telemetry, white-box-includes the shared cursor
+    # for its own detail tests, checks the sample codec against
+    # test-vectors/v2/telemetry/.
+    add_executable(btp_telemetry_tests tests/test_telemetry.cpp)
+    target_link_libraries(btp_telemetry_tests PRIVATE btp::telemetry)
+    target_compile_features(btp_telemetry_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_telemetry_tests)
+    target_compile_definitions(
+        btp_telemetry_tests
+        PRIVATE BTP_VECTOR_ROOT_V2="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2"
+    )
+    add_test(NAME btp_telemetry_tests COMMAND btp_telemetry_tests)
+
     target_compile_definitions(
         btp_conformance_tests
         PRIVATE BTP_VECTOR_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1"
@@ -270,6 +305,14 @@ if(BTP_BUILD_TESTS)
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_messages.py
             --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2/messages
+            --check
+    )
+    add_test(
+        NAME btp_telemetry_vectors
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_telemetry.py
+            --root ${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v2/telemetry
             --check
     )
 

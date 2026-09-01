@@ -1,0 +1,17 @@
+{
+  "format": "btp-test-vector-telemetry-v2",
+  "id": "tlv_sparse",
+  "encoding": "TLV_LE",
+  "description": "Three fields, the nullable middle one omitted. Entries {field_id, value_size, value} in ascending field_id.",
+  "schema_version": 1,
+  "schema": [
+    { "field_id": 1, "order": 0, "type": "uint16", "scale": 1.0, "offset": 0.0 },
+    { "field_id": 5, "order": 1, "type": "int16", "scale": 1.0, "offset": 0.0, "nullable": true },
+    { "field_id": 9, "order": 2, "type": "uint8", "scale": 1.0, "offset": 0.0 }
+  ],
+  "sample": [
+    { "field_id": 1, "raw": [42] },
+    { "field_id": 5, "null": true },
+    { "field_id": 9, "raw": [7] }
+  ]
+}

@@ -51,15 +51,17 @@ BTP wire representation
 ```
 
 The library implements the wire: the frame, the fragmentation, the COBS
-framing, the optional AEAD, and -- through `btp::messages` -- the byte layout
-of every `COMMAND` and `CONTROL` payload ([The message layer](#12-the-message-layer)).
+framing, the optional AEAD, the byte layout of every `COMMAND` and `CONTROL`
+payload (`btp::messages`, [The message layer](#12-the-message-layer)) and the
+`TELEMETRY` sample body against a schema (`btp::telemetry`,
+[§12.4](#124-decoding-and-encoding-telemetry-samples)).
 
 It deliberately stops below the mechanisms that carry *state*:
 
 * the session state machine and its watchdog;
 * command execution and the deduplication cache;
 * the manifest catalogue a consumer keeps;
-* telemetry schema interpretation;
+* telemetry schema storage (which schemas a consumer caches, and for how long);
 * the priority scheduler.
 
 Those use the BTP frame and payload formats the library defines, but their
@@ -70,7 +72,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into five headers.
+The public API is divided into six headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -78,9 +80,10 @@ The public API is divided into five headers.
 | `btp/fragmentation.hpp` | Fragmentation and logical-message reassembly                |
 | `btp/stream.hpp`        | COBS and incremental serial decoding                        |
 | `btp/messages.hpp`      | Struct ⇄ bytes for every `COMMAND` / `CONTROL` payload      |
+| `btp/telemetry.hpp`     | A `TELEMETRY` sample ⇄ values against a schema              |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through three CMake targets.
+The implementation is exposed through four CMake targets.
 
 ### `btp::codec`
 
@@ -116,6 +119,25 @@ pair for each fixed message, and `ManifestReader` / `ManifestWriter` for
 `MANIFEST_DATA`. It adds no wire field. [The message layer](#12-the-message-layer)
 covers it in full.
 
+### `btp::telemetry`
+
+`btp::telemetry` contains:
+
+```text
+telemetry.cpp
+```
+
+It links `btp::messages` (for `FieldRecord` and the shared error enum) and,
+like it, needs no mbedtls and is always built. Same guarantees as the rest of
+the library.
+
+Where `btp::messages` decodes the manifest that *describes* a telemetry
+schema, `btp::telemetry` decodes and encodes a `TELEMETRY` sample *against* a
+schema the caller already holds: `SampleReader` / `SampleWriter` for the
+`PACKED_LE` / `TLV_LE` body, the nullable presence bitmap and the
+`raw * scale + offset` conversion. It adds no wire field.
+[The telemetry layer](#124-decoding-and-encoding-telemetry-samples) covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -145,14 +167,15 @@ Conceptually:
                      ^
                      |
                  btp::messages          btp::aead
-                                            |
-                                            v
-                                        mbedcrypto
+                     ^                      |
+                     |                      v
+                 btp::telemetry         mbedcrypto
 ```
 
-`btp::messages` links `btp::codec`; `btp::aead` additionally links mbedcrypto.
-Encryption is therefore optional at build time, and the basic frame codec
-requires neither the payload layer nor the cryptographic component.
+`btp::messages` links `btp::codec`; `btp::telemetry` links `btp::messages`;
+`btp::aead` additionally links mbedcrypto. Encryption is therefore optional at
+build time, and the basic frame codec requires neither the payload layer nor
+the cryptographic component.
 
 ---
 
@@ -1331,8 +1354,8 @@ BTP_ENABLE_AEAD
 
 allows applications that do not use BTP encryption to build the codec without the crypto dependency.
 
-`btp::codec` and `btp::messages` have no build option: they have no external
-dependency and are always built.
+`btp::codec`, `btp::messages` and `btp::telemetry` have no build option: they
+have no external dependency and are always built.
 
 ---
 
@@ -1445,12 +1468,14 @@ They are located under:
 test-vectors/v1/            frame vectors, wire v1
 test-vectors/v2/            frame vectors, wire v2 (AEAD)
 test-vectors/v2/messages/   payload vectors for btp::messages
+test-vectors/v2/telemetry/  TELEMETRY sample vectors for btp::telemetry
 ```
 
-The frame vectors are a whole datagram with an opaque payload; the message
-vectors are a logical `COMMAND` / `CONTROL` payload with no frame around it.
-They are checked by `tools/test_vectors.py`, `tools/test_vectors_v2.py` and
-`tools/test_messages.py` respectively -- three independent reference
+The frame vectors are a whole datagram with an opaque payload; the message and
+telemetry vectors are a logical payload with no frame around it (a telemetry
+vector also carries the schema it is decoded against). They are checked by
+`tools/test_vectors.py`, `tools/test_vectors_v2.py`, `tools/test_messages.py`
+and `tools/test_telemetry.py` respectively -- four independent reference
 implementations, so a bug in one and a bug in the C++ cannot hide each other.
 See [the message-vector README](../test-vectors/v2/messages/README.md).
 
@@ -1644,7 +1669,7 @@ They must not be confused.
 | Concept            | Example        | Meaning                                 |
 | ------------------ | -------------- | --------------------------------------- |
 | Wire version       | `0x01`, `0x02` | Value stored in the BTP header          |
-| Library version    | `2.3.0`        | Version of the reference implementation |
+| Library version    | `2.4.0`        | Version of the reference implementation |
 | Release tag        | `v1.1.0-beta`  | Repository release                      |
 | Maintenance branch | `1.x`          | Source branch maintaining a major line  |
 
@@ -1655,7 +1680,7 @@ The library version is not.
 For example:
 
 ```text
-library 2.3.0
+library 2.4.0
 ```
 
 and:
@@ -1675,7 +1700,7 @@ BTP wire version 2
 or:
 
 ```text
-BTP library 2.3.0
+BTP library 2.4.0
 ```
 
 rather than an ambiguous:
@@ -1784,20 +1809,32 @@ not that the library holds a database.
 
 ---
 
-### 11.3 Telemetry schema interpretation is above the payload layer
+### 11.3 Telemetry schema *storage* is above the payload layer
 
 `btp::messages` decodes a topic's `FieldRecord`s -- the type, unit, scale,
-offset and enum labels that *describe* a schema. It does not decode a
-`TELEMETRY` sample against that schema: the `PACKED_LE` / `TLV_LE` body codec,
-the nullable bitmap and the engineering conversion are a separate layer.
+offset and enum labels that *describe* a schema. `btp::telemetry` decodes and
+encodes a `TELEMETRY` sample *against* that schema
+([§12.4](#124-decoding-and-encoding-telemetry-samples)).
 
 ```text
-MANIFEST_DATA  --btp::messages-->  FieldRecord (the schema)
-TELEMETRY      --btp::decode()-->  logical payload (opaque here)
-                                        |
-                                        v
-                                   schema-aware layer (not in this library)
+MANIFEST_DATA  --btp::messages---->  FieldRecord   --field_spec()-->  FieldSpec table
+TELEMETRY      --btp::decode()----->  logical payload
+                                          |  + FieldSpec table
+                                          v
+                                 btp::telemetry::SampleReader  -->  values
 ```
+
+What is still the integration's:
+
+* **schema storage.** Which schemas a consumer caches, in what structure and
+  for how long against `config_revision`, is its decision -- the same as any
+  other discovered state (§11.2). `btp::telemetry` takes a `FieldSpec` array
+  wherever it came from.
+* **`JSON_UTF8` / `CSV_UTF8`.** Parsing the text body needs an allocator;
+  `SampleReader::body()` returns the raw bytes and the caller parses.
+* **the enum-label lookup.** `SampleValue` hands back the raw integer; whether
+  it names a known label is a lookup against the field's enum entries, which
+  the caller holds.
 
 ---
 
@@ -1884,6 +1921,10 @@ payload after reassembly, and `btp::messages` gives that payload a shape.
 It adds no wire field. Every layout it serialises is already specified; this
 is the specification's struct ⇄ bytes half written once, so a consumer does
 not re-derive an offset table from the prose.
+
+The `TELEMETRY` sample body is the one payload `btp::messages` does not carry:
+it needs a schema in hand. `btp::telemetry` covers it, from the same schema
+`btp::messages` decodes ([§12.4](#124-decoding-and-encoding-telemetry-samples)).
 
 ---
 
@@ -2013,6 +2054,65 @@ and backpatches `topic_count` / `action_count` to what actually landed, so a
 relay serving a catalog into a buffer smaller than the cache emits a
 consistent short manifest rather than failing. `record_size` framing is
 re-validated on both sides; record contents are trusted.
+
+---
+
+### 12.4 Decoding and encoding telemetry samples
+
+`btp::telemetry` (`btp/telemetry.hpp`, target `btp::telemetry`) is the sample
+half of [Telemetry payloads](telemetry.md): a `TELEMETRY` logical payload
+(`schema_version` + `PACKED_LE` / `TLV_LE` body) against a schema the caller
+holds. `btp::messages` gave the schema; this reads and writes a sample.
+
+The schema is a `FieldSpec` array -- a lean subset of `FieldRecord` (the codec
+never touches `name` / `unit` / enum entries). A producer fills a static
+`FieldSpec[]`; a consumer converts each walked `FieldRecord` with
+`field_spec()` and keeps the array in its own cache. `order` must be
+contiguous from zero, in array order.
+
+```cpp
+// schema (from the manifest, or compiled in)
+btp::FieldSpec fields[] = {
+    { 1, 0, uint8_t(btp::WireType::Float32), 0, 1, 0, 1.0,  0.0 },
+    { 2, 1, uint8_t(btp::WireType::Int16),   0, 1, 0, 0.01, 0.0 },
+};
+
+// decode
+btp::SampleReader r(payload, size, fields, 2, btp::kEncodingPackedLe);
+btp::SampleValue v;
+while (r.next(&v) == btp::SampleStep::Item) {
+    if (v.is_null) continue;
+    double eng = v.f64(0);        // raw * scale + offset (raw for bool / enum)
+    std::int64_t raw = v.i64(0);  // the wire integer, unscaled
+}
+if (r.finish() != btp::MessageError::Ok) { /* reject the whole sample */ }
+
+// encode (PACKED_LE only)
+btp::SampleWriter w(out, capacity, fields, 2);
+w.begin(schema_version);
+w.put_f64(12.5);                  // one call per field, in `order`
+w.put_f64(3.14);                  // Int16 scale 0.01 -> raw 314
+std::size_t written = 0;
+w.finish(&written);
+```
+
+`next()` yields every schema field exactly once, in `order`, for both
+encodings -- a `TLV_LE` field omitted on the wire still comes back as an
+`is_null` item. `SampleValue` copies nothing: `f64(i)` / `i64(i)` / `u64(i)`
+read element `i` straight from the payload. A structural fault
+([telemetry.md §14.4](telemetry.md#144-structural-errors)) fails the whole
+sample; there is no partial decode.
+
+`SampleWriter` emits `PACKED_LE` only: `TLV_LE` entries go in `field_id`
+order while a caller writes in schema order, which would need buffering.
+`put_f64` takes the engineering value and applies the inverse conversion;
+`put_i64` / `put_u64` take the raw wire value; `put_null` marks a nullable
+field absent. `begin()` reserves the presence bitmap and `finish()` requires
+every field to have been written.
+
+For a text encoding (`OPAQUE_BYTES`, `UTF8`, `JSON_UTF8`, `CSV_UTF8`)
+`next()` returns `End` and `body()` hands back the whole `encoded_body`; the
+caller parses the text.
 
 ---
 

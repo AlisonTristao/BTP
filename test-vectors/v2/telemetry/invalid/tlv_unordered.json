@@ -1,0 +1,18 @@
+{
+  "format": "btp-test-vector-telemetry-v2",
+  "id": "tlv_unordered",
+  "base": "tlv_two",
+  "encoding": "TLV_LE",
+  "description": "Two TLV entries whose field_ids are not strictly ascending (docs/telemetry.md section 11).",
+  "schema_version": 1,
+  "schema": [
+    { "field_id": 1, "order": 0, "type": "uint8", "scale": 1.0, "offset": 0.0 },
+    { "field_id": 2, "order": 1, "type": "uint8", "scale": 1.0, "offset": 0.0 }
+  ],
+  "sample": [
+    { "field_id": 1, "raw": [1] },
+    { "field_id": 2, "raw": [2] }
+  ],
+  "mutations": [ { "operation": "set_u16_le", "offset": 2, "value": "0x0002" } ],
+  "expected_error": "NotAscending"
+}
