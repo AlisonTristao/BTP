@@ -1390,6 +1390,76 @@ MessageError ManifestReader::finish() noexcept {
     return MessageError::Ok;
 }
 
+MessageError ManifestReader::raw_source_info(ByteView* out) noexcept {
+    if (out == nullptr) {
+        error_ = MessageError::InvalidArgument;
+        return error_;
+    }
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    if (state_ != kMfHeader) {
+        error_ = MessageError::WrongOrder;
+        return error_;
+    }
+    const std::size_t start = cursor_;
+    skip_source_info();  // -> kMfTopics, cursor past the block (no-op for fmt 1)
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    *out = ByteView{payload_ + start, cursor_ - start};
+    return MessageError::Ok;
+}
+
+MessageError ManifestReader::raw_records(ByteView* topic_records,
+                                        ByteView* action_records) noexcept {
+    if (topic_records == nullptr || action_records == nullptr) {
+        error_ = MessageError::InvalidArgument;
+        return error_;
+    }
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    skip_source_info();
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    if (state_ != kMfTopics || topics_seen_ != 0U || actions_seen_ != 0U) {
+        error_ = MessageError::WrongOrder;
+        return error_;
+    }
+    const std::size_t topics_start = cursor_;
+    for (std::uint16_t index = 0U; index < topic_count_; ++index) {
+        std::size_t content_start = 0U;
+        std::size_t content_end = 0U;
+        error_ = open_record(payload_, size_, cursor_, &content_start, &content_end);
+        if (error_ != MessageError::Ok) {
+            return error_;
+        }
+        cursor_ = content_end;
+    }
+    const std::size_t topics_end = cursor_;
+    for (std::uint16_t index = 0U; index < action_count_; ++index) {
+        std::size_t content_start = 0U;
+        std::size_t content_end = 0U;
+        error_ = open_record(payload_, size_, cursor_, &content_start, &content_end);
+        if (error_ != MessageError::Ok) {
+            return error_;
+        }
+        cursor_ = content_end;
+    }
+    if (cursor_ != size_) {
+        error_ = MessageError::TrailingBytes;
+        return error_;
+    }
+    *topic_records = ByteView{payload_ + topics_start, topics_end - topics_start};
+    *action_records = ByteView{payload_ + topics_end, cursor_ - topics_end};
+    topics_seen_ = topic_count_;
+    actions_seen_ = action_count_;
+    state_ = kMfDone;
+    return MessageError::Ok;
+}
+
 // --- FieldRecordReader / EnumEntryReader / ActionErrorReader -------------
 
 FieldRecordReader::FieldRecordReader(ByteView run, std::uint16_t count) noexcept
@@ -1531,6 +1601,8 @@ ManifestWriter::ManifestWriter(std::uint8_t* out, std::size_t capacity) noexcept
       record_start_(0U),
       field_record_start_(0U),
       error_count_slot_(0U),
+      topic_count_slot_(0U),
+      action_count_slot_(0U),
       field_open_(false),
       source_info_open_(false),
       source_info_slot_(0U),
@@ -1583,7 +1655,9 @@ MessageError ManifestWriter::begin(const ManifestHeader& header) noexcept {
     writer.u8(header.source_flags);
     writer.u16(header.catalog_index);
     writer.u16(header.catalog_count);
+    topic_count_slot_ = writer.written();
     writer.u16(header.topic_count);
+    action_count_slot_ = writer.written();
     writer.u16(header.action_count);
     writer.utf8_u16(header.source_name, kMaxUtf8Text);
     if (!writer.ok()) {
@@ -1640,6 +1714,138 @@ void ManifestWriter::close_source_info() noexcept {
         patch.u16(source_info_written_);
         source_info_open_ = false;
     }
+}
+
+MessageError ManifestWriter::put_raw_source_info(ByteView block) noexcept {
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    if (state_ != kMwHeader || !source_info_open_ || source_info_written_ != 0U) {
+        error_ = MessageError::WrongOrder;
+        return error_;
+    }
+    if (block.data == nullptr || block.size < 2U) {
+        error_ = MessageError::InvalidArgument;
+        return error_;
+    }
+    // Re-validate the block framing: info_count then that many key/label/value
+    // triples, within the section-6 cap, consumed exactly.
+    Reader probe(block.data, block.size);
+    const std::uint16_t count = probe.u16();
+    if (probe.ok() && count > kMaxSourceInfoEntries) {
+        error_ = MessageError::CountTooLarge;
+        return error_;
+    }
+    for (std::uint16_t index = 0U; index < count; ++index) {
+        (void)probe.utf8_u16(kMaxSourceInfoKey);
+        (void)probe.utf8_u16(kMaxSourceInfoLabelOrValue);
+        (void)probe.utf8_u16(kMaxSourceInfoLabelOrValue);
+    }
+    const MessageError framing = probe.require_exhausted();
+    if (framing != MessageError::Ok) {
+        error_ = framing;
+        return error_;
+    }
+    // Replace the two-octet placeholder begin() wrote with the block verbatim.
+    cursor_ = source_info_slot_;
+    Writer writer(out_ + cursor_, capacity_ - cursor_);
+    writer.raw(block.data, block.size);
+    if (!writer.ok()) {
+        error_ = writer.error();
+        return error_;
+    }
+    cursor_ += writer.written();
+    source_info_open_ = false;
+    return MessageError::Ok;
+}
+
+bool ManifestWriter::splice_record_run(ByteView run, std::size_t record_cap,
+                                      std::uint16_t* written) noexcept {
+    std::size_t pos = 0U;
+    std::uint16_t count = 0U;
+    while (pos < run.size) {
+        if ((pos + 4U) > run.size) {
+            *written = count;
+            error_ = MessageError::RecordSizeMismatch;
+            return false;
+        }
+        const std::uint32_t record_size =
+            static_cast<std::uint32_t>(run.data[pos]) |
+            (static_cast<std::uint32_t>(run.data[pos + 1U]) << 8U) |
+            (static_cast<std::uint32_t>(run.data[pos + 2U]) << 16U) |
+            (static_cast<std::uint32_t>(run.data[pos + 3U]) << 24U);
+        if (record_size > (run.size - (pos + 4U))) {
+            *written = count;
+            error_ = MessageError::RecordSizeMismatch;
+            return false;
+        }
+        if (count >= record_cap) {
+            *written = count;
+            error_ = MessageError::CountTooLarge;
+            return false;
+        }
+        const std::size_t whole = 4U + static_cast<std::size_t>(record_size);
+        if (whole > (capacity_ - cursor_)) {
+            *written = count;  // does not fit -- stop before a partial record
+            return false;
+        }
+        Writer writer(out_ + cursor_, capacity_ - cursor_);
+        writer.raw(run.data + pos, whole);
+        if (!writer.ok()) {
+            *written = count;
+            error_ = writer.error();
+            return false;
+        }
+        cursor_ += whole;
+        pos += whole;
+        ++count;
+    }
+    *written = count;
+    return true;
+}
+
+MessageError ManifestWriter::put_raw_records(ByteView topic_records,
+                                            ByteView action_records) noexcept {
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    if (state_ != kMwHeader || topics_written_ != 0U || actions_written_ != 0U) {
+        error_ = MessageError::WrongOrder;
+        return error_;
+    }
+    if ((topic_records.data == nullptr && topic_records.size != 0U) ||
+        (action_records.data == nullptr && action_records.size != 0U)) {
+        error_ = MessageError::InvalidArgument;
+        return error_;
+    }
+    close_source_info();  // emit an empty block if put_raw_source_info was skipped
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+
+    std::uint16_t topics_fit = 0U;
+    std::uint16_t actions_fit = 0U;
+    const bool all_topics =
+        splice_record_run(topic_records, kMaxTopicsPerManifest, &topics_fit);
+    if (error_ != MessageError::Ok) {
+        return error_;
+    }
+    if (all_topics) {
+        (void)splice_record_run(action_records, kMaxActionsPerManifest, &actions_fit);
+        if (error_ != MessageError::Ok) {
+            return error_;
+        }
+    }
+
+    Writer patch_topics(out_ + topic_count_slot_, 2U);
+    patch_topics.u16(topics_fit);
+    Writer patch_actions(out_ + action_count_slot_, 2U);
+    patch_actions.u16(actions_fit);
+    topic_count_ = topics_fit;
+    action_count_ = actions_fit;
+    topics_written_ = topics_fit;
+    actions_written_ = actions_fit;
+    return MessageError::Ok;
 }
 
 MessageError ManifestWriter::begin_topic(const TopicRecord& topic) noexcept {

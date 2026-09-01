@@ -588,7 +588,7 @@ followed by exactly `record_size` octets.
 
 The decoder validates the record size before parsing its contents and requires exact consumption of the record.
 
-In `btp::messages` this run is walked, not decoded whole: `ManifestReader::next_topic` / `next_action` hand back the raw record bytes, and `FieldRecordReader` / `EnumEntryReader` / `ActionErrorReader` walk them without allocation ([Using the library §12.3](library.md#123-reading-and-writing-manifest_data)).
+In `btp::messages` this run is walked, not decoded whole: `ManifestReader::next_topic` / `next_action` hand back the raw record bytes, and `FieldRecordReader` / `EnumEntryReader` / `ActionErrorReader` walk them without allocation ([Using the library §12.3](library.md#123-reading-and-writing-manifest_data)). A relay that forwards a manifest without inspecting it skips the walk entirely: `ManifestReader::raw_records` returns the whole topic- and action-record runs as spans and `ManifestWriter::put_raw_records` splices them back.
 
 ---
 

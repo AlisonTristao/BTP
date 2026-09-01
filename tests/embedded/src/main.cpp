@@ -68,6 +68,18 @@ void setup() {
     btp::ManifestReader reader(message_buffer, sizeof(message_buffer));
     btp::ManifestHeader manifest_header = {};
     (void)reader.header(&manifest_header);
+
+    btp::ByteView raw_info = {};
+    btp::ByteView raw_topics = {};
+    btp::ByteView raw_actions = {};
+    (void)reader.raw_source_info(&raw_info);
+    (void)reader.raw_records(&raw_topics, &raw_actions);
+
+    btp::ManifestWriter writer(message_buffer, sizeof(message_buffer));
+    (void)writer.begin(manifest_header);
+    (void)writer.put_raw_source_info(raw_info);
+    (void)writer.put_raw_records(raw_topics, raw_actions);
+    (void)writer.finish(&message_written);
 }
 
 void loop() {}

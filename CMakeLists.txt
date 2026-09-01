@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.2.0 LANGUAGES CXX)
+project(btp VERSION 2.3.0 LANGUAGES CXX)
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the

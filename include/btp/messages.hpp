@@ -18,8 +18,9 @@
 //   * decode is zero-copy -- a ByteView an out-struct receives points into the
 //     payload buffer and is valid only while that buffer is.
 //
-// It adds no wire field and changes no octet: this is library 2.2.0 territory,
-// not a wire change. TELEMETRY bodies (PACKED_LE / TLV_LE) are deliberately
+// It adds no wire field and changes no octet: minor-version territory (the
+// layer landed in 2.2.0), not a wire change. TELEMETRY bodies (PACKED_LE /
+// TLV_LE) are deliberately
 // NOT here -- decoding a sample needs a parsed schema in hand and is a
 // separate layer (a future btp::telemetry). This header does carry the
 // manifest field records that DESCRIBE a schema.
@@ -597,6 +598,13 @@ MessageError encode_status_v2(const StatusV1& base,
 // Every ByteView points into the payload buffer and is valid only while it
 // is. next_source_info is optional: next_topic / next_action / finish skip
 // over any source_info the caller did not iterate.
+//
+// A relay that caches a source's catalog and re-emits it unchanged (the
+// dongle hub) never needs the decoded records -- it forwards the bytes.
+// ManifestReader::raw_source_info / raw_records hand back the still-framed
+// spans instead of the struct walk, and ManifestWriter::put_raw_source_info /
+// put_raw_records splice them back without decomposing. See the block above
+// each pair.
 
 enum class ManifestStep : std::uint8_t { Item, End, Error };
 
@@ -612,6 +620,20 @@ public:
     Step next_action(ActionRecord* out, ByteView* parameter_records,
                      ByteView* result_records, ByteView* error_entries) noexcept;
     MessageError finish() noexcept;
+
+    // Verbatim relay path -- an alternative to the next_* walk, for a cache
+    // that stores and re-emits a catalog without interpreting it. Call right
+    // after header(), on their own reader, not mixed with next_* / finish().
+    //
+    // raw_source_info: the source_info block verbatim, info_count prefix
+    //   included. A format-1 manifest has no block -- `*out` is then size 0.
+    // raw_records: the topic-record run and the action-record run, each a
+    //   ByteView spanning exactly header.topic_count / header.action_count
+    //   record_size-framed records, with the payload consumed exactly
+    //   (TrailingBytes otherwise). Either run may be empty.
+    MessageError raw_source_info(ByteView* out) noexcept;
+    MessageError raw_records(ByteView* topic_records,
+                             ByteView* action_records) noexcept;
 
     MessageError error() const noexcept { return error_; }
 
@@ -716,6 +738,26 @@ public:
     MessageError begin(const ManifestHeader& header) noexcept;
     MessageError add_source_info(const SourceInfoEntry& entry) noexcept;
 
+    // Verbatim relay path -- splice spans captured by
+    // ManifestReader::raw_source_info / raw_records straight in, without
+    // decomposing them. An alternative to add_source_info and the
+    // begin_topic/add_field/... calls:
+    //
+    //   begin(header);                    // topic_count / action_count are
+    //   put_raw_source_info(block);        //   upper bounds here, not exact
+    //   put_raw_records(topics, actions);
+    //   finish(&written);
+    //
+    // put_raw_source_info replaces the empty source_info block begin() opened
+    // (format 2 only; `block` carries its own info_count and must be >= 2
+    // octets). put_raw_records copies as many leading whole records as the
+    // output capacity holds -- never a partial record -- then backpatches the
+    // header topic_count / action_count to what actually landed. record_size
+    // framing is re-validated; record contents are trusted.
+    MessageError put_raw_source_info(ByteView block) noexcept;
+    MessageError put_raw_records(ByteView topic_records,
+                                ByteView action_records) noexcept;
+
     MessageError begin_topic(const TopicRecord& topic) noexcept;
     MessageError add_field(const FieldRecord& field) noexcept;
     MessageError add_enum(const EnumEntry& entry) noexcept;
@@ -740,6 +782,11 @@ private:
     void close_field() noexcept;         // backpatch the open field record_size, check enum count
     void open_action_errors() noexcept;  // close fields, write the error_count slot
     MessageError add_field_common(const FieldRecord& field) noexcept;
+    // Copy leading whole records from `run` until the output is full; returns
+    // false and leaves error_ == Ok when it stopped short on capacity, false
+    // with error_ set on a framing fault, true when the whole run was copied.
+    bool splice_record_run(ByteView run, std::size_t record_cap,
+                           std::uint16_t* written) noexcept;
 
     std::uint8_t* out_;
     std::size_t capacity_;
@@ -758,6 +805,8 @@ private:
     std::size_t record_start_;            // offset of the current topic/action record_size
     std::size_t field_record_start_;      // offset of the current field record_size
     std::size_t error_count_slot_;        // offset of the action error_count u16
+    std::size_t topic_count_slot_;        // offset of the header topic_count u16 (put_raw_records backpatch)
+    std::size_t action_count_slot_;       // offset of the header action_count u16
     bool field_open_;                     // a field record is open (enums may follow)
     bool source_info_open_;               // the info_count slot is reserved, not yet patched
     std::size_t source_info_slot_;

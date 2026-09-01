@@ -1644,7 +1644,7 @@ They must not be confused.
 | Concept            | Example        | Meaning                                 |
 | ------------------ | -------------- | --------------------------------------- |
 | Wire version       | `0x01`, `0x02` | Value stored in the BTP header          |
-| Library version    | `2.2.0`        | Version of the reference implementation |
+| Library version    | `2.3.0`        | Version of the reference implementation |
 | Release tag        | `v1.1.0-beta`  | Repository release                      |
 | Maintenance branch | `1.x`          | Source branch maintaining a major line  |
 
@@ -1655,7 +1655,7 @@ The library version is not.
 For example:
 
 ```text
-library 2.2.0
+library 2.3.0
 ```
 
 and:
@@ -1675,7 +1675,7 @@ BTP wire version 2
 or:
 
 ```text
-BTP library 2.2.0
+BTP library 2.3.0
 ```
 
 rather than an ambiguous:
@@ -1983,6 +1983,36 @@ hidden reader state. `ManifestWriter` mirrors this: `begin`, `add_source_info`,
 `finish`. It backpatches every `record_size`, `info_count`, `field_count`,
 `enum_count` and `error_count`, and `finish` checks the topic and action
 counts against the header.
+
+#### Verbatim relay
+
+A cache that stores a source's catalog and re-emits it unchanged -- a gateway
+that forwards manifests it never inspects -- has no use for the decoded
+records. For that case `ManifestReader` hands back the still-framed spans
+directly, and `ManifestWriter` splices them back without decomposing:
+
+```cpp
+btp::ManifestReader r(payload, size);
+btp::ManifestHeader h;
+r.header(&h);
+btp::ByteView info, topics, actions;
+r.raw_source_info(&info);          // the source_info block, info_count included
+r.raw_records(&topics, &actions);  // the topic- and action-record runs
+
+btp::ManifestWriter w(out, capacity);
+w.begin(h);                        // h.topic_count / h.action_count are bounds
+w.put_raw_source_info(info);       // format 2 only
+w.put_raw_records(topics, actions);
+w.finish(&written);
+```
+
+`raw_source_info` / `raw_records` are an alternative to the `next_*` walk,
+called right after `header()` on their own reader. `put_raw_records` copies as
+many leading whole records as `capacity` holds -- never a partial record --
+and backpatches `topic_count` / `action_count` to what actually landed, so a
+relay serving a catalog into a buffer smaller than the cache emits a
+consistent short manifest rather than failing. `record_size` framing is
+re-validated on both sides; record contents are trusted.
 
 ---
 

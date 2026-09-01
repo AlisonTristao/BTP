@@ -966,6 +966,187 @@ void test_manifest_rejected_response_allows_zero_role() {
 }
 
 // ---------------------------------------------------------------------------
+// MANIFEST_DATA -- verbatim relay path (raw_source_info / raw_records /
+// put_raw_source_info / put_raw_records)
+// ---------------------------------------------------------------------------
+
+// Reads a manifest with the raw spans and rebuilds it from those spans alone;
+// the output must be byte-identical to the input.
+void check_manifest_verbatim_roundtrip(const std::vector<std::uint8_t>& bytes) {
+    btp::ManifestReader reader(bytes.data(), bytes.size());
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+
+    btp::ByteView info = {};
+    CHECK(reader.raw_source_info(&info) == btp::MessageError::Ok);
+    btp::ByteView topics = {};
+    btp::ByteView actions = {};
+    CHECK(reader.raw_records(&topics, &actions) == btp::MessageError::Ok);
+    CHECK((header.manifest_format_version == 2U) == (info.size >= 2U));
+
+    std::vector<std::uint8_t> out(bytes.size() + 64U, 0xCCU);
+    btp::ManifestWriter writer(out.data(), out.size());
+    CHECK(writer.begin(header) == btp::MessageError::Ok);
+    if (header.manifest_format_version == 2U) {
+        CHECK(writer.put_raw_source_info(info) == btp::MessageError::Ok);
+    }
+    CHECK(writer.put_raw_records(topics, actions) == btp::MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(writer.finish(&written) == btp::MessageError::Ok);
+    CHECK(written == bytes.size());
+    CHECK(std::memcmp(out.data(), bytes.data(), bytes.size()) == 0);
+}
+
+void test_manifest_verbatim_roundtrip() {
+    check_manifest_verbatim_roundtrip(
+        read_vector("manifest_data/valid/manifest_data_full.bin"));
+    check_manifest_verbatim_roundtrip(
+        read_vector("manifest_data/valid/manifest_data_source_info_only.bin"));
+    check_manifest_verbatim_roundtrip(
+        read_vector("manifest_data/valid/manifest_data_not_modified.bin"));
+}
+
+void test_manifest_verbatim_truncates() {
+    const std::vector<std::uint8_t> bytes =
+        read_vector("manifest_data/valid/manifest_data_full.bin");
+    btp::ManifestReader reader(bytes.data(), bytes.size());
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+    btp::ByteView info = {};
+    btp::ByteView topics = {};
+    btp::ByteView actions = {};
+    CHECK(reader.raw_source_info(&info) == btp::MessageError::Ok);
+    CHECK(reader.raw_records(&topics, &actions) == btp::MessageError::Ok);
+    CHECK(header.topic_count == 1U);
+    CHECK(header.action_count == 1U);
+
+    std::uint8_t scratch[512];
+
+    // header + source_info, no records.
+    btp::ManifestWriter base_writer(scratch, sizeof(scratch));
+    CHECK(base_writer.begin(header) == btp::MessageError::Ok);
+    CHECK(base_writer.put_raw_source_info(info) == btp::MessageError::Ok);
+    CHECK(base_writer.put_raw_records(btp::ByteView{nullptr, 0U},
+                                     btp::ByteView{nullptr, 0U}) ==
+          btp::MessageError::Ok);
+    std::size_t base = 0U;
+    CHECK(base_writer.finish(&base) == btp::MessageError::Ok);
+
+    // Capacity one octet short of the whole message: the action record is
+    // dropped, action_count patched to 0, the topic still fits.
+    {
+        std::vector<std::uint8_t> out(bytes.size() - 1U, 0xCCU);
+        btp::ManifestWriter writer(out.data(), out.size());
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        CHECK(writer.put_raw_source_info(info) == btp::MessageError::Ok);
+        CHECK(writer.put_raw_records(topics, actions) == btp::MessageError::Ok);
+        std::size_t written = 0U;
+        CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+        btp::ManifestReader back(out.data(), written);
+        btp::ManifestHeader parsed = {};
+        CHECK(back.header(&parsed) == btp::MessageError::Ok);
+        CHECK(parsed.topic_count == 1U);
+        CHECK(parsed.action_count == 0U);
+        btp::ByteView i2 = {};
+        btp::ByteView t2 = {};
+        btp::ByteView a2 = {};
+        CHECK(back.raw_source_info(&i2) == btp::MessageError::Ok);
+        CHECK(back.raw_records(&t2, &a2) == btp::MessageError::Ok);
+        CHECK(t2.size == topics.size);
+        CHECK(a2.size == 0U);
+    }
+
+    // Capacity too small for even the first topic record: both counts 0.
+    {
+        std::vector<std::uint8_t> out(base + 2U, 0xCCU);
+        btp::ManifestWriter writer(out.data(), out.size());
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        CHECK(writer.put_raw_source_info(info) == btp::MessageError::Ok);
+        CHECK(writer.put_raw_records(topics, actions) == btp::MessageError::Ok);
+        std::size_t written = 0U;
+        CHECK(writer.finish(&written) == btp::MessageError::Ok);
+        CHECK(written == base);
+
+        btp::ManifestReader back(out.data(), written);
+        btp::ManifestHeader parsed = {};
+        CHECK(back.header(&parsed) == btp::MessageError::Ok);
+        CHECK(parsed.topic_count == 0U);
+        CHECK(parsed.action_count == 0U);
+    }
+}
+
+void test_manifest_verbatim_wrong_order() {
+    const std::vector<std::uint8_t> bytes =
+        read_vector("manifest_data/valid/manifest_data_full.bin");
+
+    // raw_records once a topic has been walked with next_topic.
+    {
+        btp::ManifestReader reader(bytes.data(), bytes.size());
+        btp::ManifestHeader header = {};
+        CHECK(reader.header(&header) == btp::MessageError::Ok);
+        btp::TopicRecord topic = {};
+        btp::ByteView field_bytes = {};
+        CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::Item);
+        btp::ByteView t = {};
+        btp::ByteView a = {};
+        CHECK(reader.raw_records(&t, &a) == btp::MessageError::WrongOrder);
+    }
+
+    // raw_source_info once raw_records has consumed the payload.
+    {
+        btp::ManifestReader reader(bytes.data(), bytes.size());
+        btp::ManifestHeader header = {};
+        CHECK(reader.header(&header) == btp::MessageError::Ok);
+        btp::ByteView t = {};
+        btp::ByteView a = {};
+        CHECK(reader.raw_records(&t, &a) == btp::MessageError::Ok);
+        btp::ByteView si = {};
+        CHECK(reader.raw_source_info(&si) == btp::MessageError::WrongOrder);
+    }
+
+    // put_raw_records after a structured begin_topic.
+    {
+        std::uint8_t buffer[256] = {};
+        btp::ManifestHeader header = {};
+        header.manifest_format_version = 1U;
+        header.status = 0U;
+        header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+        header.topic_count = 1U;
+        const btp::ByteView name = {reinterpret_cast<const std::uint8_t*>("x"), 1U};
+        header.source_name = name;
+
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        btp::TopicRecord topic = {};
+        topic.topic_id = 1U;
+        topic.schema_version = 1U;
+        topic.name = {reinterpret_cast<const std::uint8_t*>("t"), 1U};
+        CHECK(writer.begin_topic(topic) == btp::MessageError::Ok);
+        CHECK(writer.put_raw_records(btp::ByteView{nullptr, 0U},
+                                    btp::ByteView{nullptr, 0U}) ==
+              btp::MessageError::WrongOrder);
+    }
+
+    // put_raw_source_info needs the block's own info_count prefix.
+    {
+        std::uint8_t buffer[256] = {};
+        btp::ManifestHeader header = {};
+        header.manifest_format_version = 2U;
+        header.status = 0U;
+        header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+        const btp::ByteView name = {reinterpret_cast<const std::uint8_t*>("x"), 1U};
+        header.source_name = name;
+
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        const std::uint8_t one_octet[1] = {0U};
+        CHECK(writer.put_raw_source_info(btp::ByteView{one_octet, 1U}) ==
+              btp::MessageError::InvalidArgument);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // negotiate() and is_message_object()
 // ---------------------------------------------------------------------------
 
@@ -1095,6 +1276,9 @@ int main() {
     test_invalid_manifest_vectors();
     test_manifest_writer_count_mismatch();
     test_manifest_rejected_response_allows_zero_role();
+    test_manifest_verbatim_roundtrip();
+    test_manifest_verbatim_truncates();
+    test_manifest_verbatim_wrong_order();
     test_negotiate();
     test_is_message_object();
     test_invalid_vectors();
