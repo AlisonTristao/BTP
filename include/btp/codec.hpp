@@ -4,16 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace btp {
+#include "btp/version.hpp"  // kLibraryVersion*, kMinimum/MaximumProtocolVersion
 
-// Keep in step with CMakeLists.txt project(VERSION) and library.json. These
-// are the library's own version, which is a different thing from the wire
-// version a frame carries at octet 4.
-static const std::uint8_t kLibraryVersionMajor = 2U;
-static const std::uint8_t kLibraryVersionMinor = 10U;
-static const std::uint8_t kLibraryVersionPatch = 0U;
-static const std::uint8_t kMinimumProtocolVersion = 1U;
-static const std::uint8_t kMaximumProtocolVersion = 2U;
+namespace btp {
 
 static const std::size_t kV1HeaderSize = 36U;
 static const std::size_t kV1CrcSize = 4U;

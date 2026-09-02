@@ -22,13 +22,14 @@ is correct. They ship as one version.
 | The session lifecycle and inactivity watchdog (responder side) | Implemented in `btp::session` (`btp::Session`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
 | Identity, sequencing and the transmit pipeline | Implemented in `btp::endpoint` (`btp::Endpoint`), covered by `tests/test_endpoint.cpp` (orchestration over the codec, no vector tree). |
 | The decode + CRC + reassembly receive path | Implemented in `btp::receiver` (`btp::Receiver`), covered by `tests/test_receiver.cpp` (orchestration over the codec, no vector tree). |
-| Library | `2.10.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
-| Latest published tag | `v2.5.0` on `main` (wire `0x02`); `v1.1.0-beta` on the `1.x` line. |
-| Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
+| Version | `2.10.0` — one number, in [`include/btp/version.hpp`](../include/btp/version.hpp); `CMakeLists.txt` parses it and `library.json` is checked against it. |
+| Branches | `main` carries the newest major (introduced wire `0x02`); [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) keeps the wire `0x01` line alive. |
 
-Wire version, release tag, branch and library version are four different things
-and do not mix. [Versioning and branches](library.md#10-versioning-and-branches) says how to
-refer to each, and which branch holds which.
+BTP is **one** SemVer line, `MAJOR.MINOR.PATCH`. `MAJOR` is also the newest
+wire-version byte and the maintenance-branch name (`MAJOR.x`); the git tag is
+`vMAJOR.MINOR.PATCH`. [Versioning and branches](library.md#10-versioning-and-branches)
+has the rule in full; released versions are on the
+[releases page](https://github.com/AlisonTristao/BTP/releases).
 
 ## Where to start
 

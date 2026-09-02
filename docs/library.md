@@ -1712,103 +1712,78 @@ It changes the protocol representation being tested.
 
 ## 10. Versioning and branches
 
-The specification, reference implementation and conformance vectors are maintained together.
-
-The project uses semantic versioning for the library release line.
-
-The intended interpretation is:
+The specification, the reference library and the conformance vectors are one
+thing with one version: a single SemVer line, `MAJOR.MINOR.PATCH`.
 
 ```text
-MAJOR
-    incompatible wire change
-
-MINOR
-    backward-compatible addition
-
-PATCH
-    correction without changing
-    the established wire representation
+MAJOR   the wire format changed incompatibly
+MINOR   a backward-compatible addition -- a new library layer, an optional
+        field. The wire is unchanged.
+PATCH   a fix with no effect on the wire or the public API
 ```
+
+The git tag is `vMAJOR.MINOR.PATCH` -- the same number. There is no "library
+version" distinct from the release; the two are the same, and this chapter's
+old distinction between them is gone.
+
+### 10.1 One source of truth
+
+The number lives in one file:
+
+```text
+include/btp/version.hpp   kLibraryVersion{Major,Minor,Patch}
+```
+
+Everything else is derived from or checked against it:
+
+* `CMakeLists.txt` parses those three lines for `project(VERSION)` -- it never
+  spells the number itself;
+* `library.json` (which PlatformIO reads, and which never runs CMake) carries a
+  copy that `python tools/version.py` writes and that a plain `cmake -S . -B
+  build` re-checks, refusing to configure on a mismatch;
+* `kMaximumProtocolVersion` -- the highest wire-version byte this library
+  accepts -- equals `kLibraryVersionMajor` by a `static_assert`, because a new
+  wire version *is* what a MAJOR bump is.
+
+To cut a release: `python tools/version.py X.Y.Z`, commit, then `git tag
+vX.Y.Z`. A pre-release suffix (`-beta`) is only for a still-settling `MAJOR.x`
+line and only in `library.json`; CMake's `project(VERSION)` is numeric-only.
+
+### 10.2 The wire-version byte is a frame tag, not a release number
+
+The octet at header offset 4 ([The datagram §2](frame.md#2-header-format)) is a
+frame-format tag:
+
+```text
+0x01   the base frame
+0x02   the payload is AEAD-sealed (ENCRYPTED set, docs/encryption.md)
+```
+
+A library on the `MAJOR.x` line **encodes** the lowest tag a given frame needs
+(so a cleartext frame from a `2.x` build still goes out as `0x01`) and
+**decodes** every tag up to `MAJOR`. So `wire 2` and "the `2.x` line" now name
+the same thing; the one phrasing still worth avoiding is a bare `v2` when you
+specifically mean the byte -- write `wire 2` there.
+
+### 10.3 Branches
+
+`main` always carries the newest major. When a new major lands, the previous one
+is cut to a `MAJOR.x` branch and maintained there.
+
+| Branch | Holds | Newest wire byte |
+| ------ | ----- | ---------------- |
+| `main` | the `2.x` line | `0x02` |
+| `1.x`  | maintenance of the `1.x` line (`v1.1.0-beta`) | `0x01` |
+
+The `1.x` branch is for a deployment that cannot take the whole `2.x` library
+surface, not a sign that `main` dropped wire 1 -- a `2.x` build still speaks it.
+A branch is named after the major it holds, never the one still coming: when
+wire 3 arrives, a `2.x` branch is cut from that day's `main` and `main` moves to
+`3.0`.
 
 ---
 
-### 10.1 Wire version and library version are different
-
-Several different concepts contain version numbers.
-
-They must not be confused.
-
-| Concept            | Example        | Meaning                                 |
-| ------------------ | -------------- | --------------------------------------- |
-| Wire version       | `0x01`, `0x02` | Value stored in the BTP header          |
-| Library version    | `2.5.0`        | Version of the reference implementation |
-| Release tag        | `v1.1.0-beta`  | Repository release                      |
-| Maintenance branch | `1.x`          | Source branch maintaining a major line  |
-
-The wire version is transmitted inside every BTP frame.
-
-The library version is not.
-
-For example:
-
-```text
-library 2.5.0
-```
-
-and:
-
-```text
-wire 0x02
-```
-
-are related project versions but are not the same protocol field.
-
-A document should therefore prefer explicit wording such as:
-
-```text
-BTP wire version 2
-```
-
-or:
-
-```text
-BTP library 2.5.0
-```
-
-rather than an ambiguous:
-
-```text
-BTP v2
-```
-
-when the distinction matters.
-
----
-
-### 10.2 Branch layout
-
-The current branch model keeps the newest major line on:
-
-```text
-main
-```
-
-and retains previous major lines in maintenance branches.
-
-For example:
-
-| Branch | Wire                       |
-| ------ | -------------------------- |
-| `main` | current wire line          |
-| `1.x`  | wire version 1 maintenance |
-
-When a future incompatible wire version is introduced, the previous major line can be preserved on its own maintenance branch.
-
-This allows an existing deployment to remain pinned to the implementation corresponding to the wire contract it uses.
-
----
-
-### 10.3 Protocol changes and vectors
+### 10.4 Protocol changes and vectors
 
 An incompatible wire change requires coordinated updates to:
 

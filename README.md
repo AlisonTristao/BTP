@@ -10,10 +10,9 @@ This repository is the canonical source of three things that ship as one
 version: the wire specification, the C++11 library that implements it, and the
 binary vectors that prove an implementation is correct.
 
-> **You are on `main`** — the wire `version == 0x02` line, library `2.10.0`.
-> The wire v1 line is maintained on branch
-> [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x). See
-> [Versioning and branches](#versioning-and-branches).
+> **You are on `main`** — the current major, `2.x`. The `1.x` line is
+> maintained on branch [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x).
+> See [Versioning and branches](#versioning-and-branches).
 
 **📖 [Read the book](https://alisontristao.github.io/BTP/)** — the full
 documentation, from why the protocol exists down to the octets on the wire.
@@ -161,39 +160,45 @@ docs/           the book
 
 ## Versioning and branches
 
-Specification, library and vectors ship as one SemVer line: an incompatible
-change to the bytes or their meaning is `MAJOR`, a compatible addition is
-`MINOR`, and a correction with no observable effect on the wire is `PATCH`.
+**BTP is one SemVer line, `MAJOR.MINOR.PATCH`.** The number lives in one file,
+[`include/btp/version.hpp`](include/btp/version.hpp); `CMakeLists.txt` parses it
+and `library.json` is checked against it on every configure, so nothing is kept
+in step by hand.
 
-### How the branches are laid out
-
-**`main` always carries the newest major.** When a new one lands, the previous
-is cut to an `N.x` branch and maintained there:
-
-| Branch | Wire | Line |
+| Part | Bumps when | Also is |
 | --- | --- | --- |
-| `main` | `0x02` | Current development, library `2.10.0` — **this branch** |
-| [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) | `0x01` | Maintenance of the wire v1 line, released as `v1.1.0-beta` |
+| `MAJOR` | the wire format changes incompatibly | the newest wire-version byte ([`docs/frame.md`](docs/frame.md)), and the branch name `MAJOR.x` |
+| `MINOR` | a backward-compatible addition — a new library layer, an optional field | — |
+| `PATCH` | a fix with no effect on the wire or the API | — |
 
-If a wire v3 ever arrives, a `2.x` branch is cut from the `main` of that
-moment carrying `2.0`, and `main` moves on to `3.0`. A branch is named after
-the major it holds, never after the one still coming.
+The git tag is `vMAJOR.MINOR.PATCH` — the same number. There is no separate
+"library version"; the tag, the release and `version.hpp` are one thing. So
+`2.x` and `wire 2` now say the same thing, and the only term to keep distinct is
+the header byte itself — write `wire 2`, not a bare `v2`, when you mean that.
 
-### Four things called "the version"
+### Branches
 
-They do not mix:
+**`main` always carries the newest major.** A superseded one is cut to its own
+`MAJOR.x` branch and maintained there.
 
-| Concept | Example | What it is |
+| Branch | Holds | Newest wire byte |
 | --- | --- | --- |
-| Wire version | `wire 0x02` | The octet at offset 4 of the header |
-| Release | `v2.10.0` | The git tag over spec, library and vectors. Library layer added without a wire change: `btp::messages` in `2.2.0`, its verbatim relay path in `2.3.0`, `btp::telemetry` (the `PACKED_LE` / `TLV_LE` sample body) in `2.4.0`, its body-only reader/writer mode in `2.5.0`, `btp::session` (`btp::DedupCache`) in `2.6.0`, `btp::endpoint` (`btp::Endpoint`) in `2.7.0`, `btp::receiver` (`btp::Receiver`) in `2.8.0`, `btp::Session` (the responder session state machine + watchdog) in `2.9.0`, `priority_class()` (the six spec traffic classes) in `2.10.0` |
-| Branch | `1.x` | Holds the previous major; `main` holds the newest |
-| Library | `2.10.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
+| `main` | current development, the `2.x` line — **this branch** | `0x02` (AEAD-sealed payload) |
+| [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) | maintenance of the `1.x` line, `v1.1.0-beta` | `0x01` (base frame) |
 
-Never write "BTP v1" unqualified — it is ambiguous between three of those.
+A `2.x` library still decodes a `0x01` frame — `0x01` is the base frame, `0x02`
+just marks an AEAD-sealed payload. The `1.x` branch is for deployments that
+cannot take the whole `2.x` library, not a sign `main` dropped wire 1. When wire
+3 arrives, a `2.x` branch is cut and `main` moves to `3.0`; a branch is named
+after the major it holds, never the one still coming.
 
-A pre-release suffix belongs to the line that is still settling, not to `main`:
-the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.10.0`.
-Note that only `library.json` can spell a suffix at all — CMake's
-`project(VERSION)` is numeric-only and `kLibraryVersion*` are three `uint8`.
+To cut a release: `python tools/version.py X.Y.Z`, commit, `git tag vX.Y.Z`.
+A pre-release suffix (`-beta`) is only for a still-settling `MAJOR.x` line and
+only in `library.json` — CMake's `project(VERSION)` is numeric-only.
+
+### What each 2.x minor added (no wire change)
+
+`2.2` `btp::messages` · `2.3` verbatim manifest relay · `2.4` `btp::telemetry` ·
+`2.5` body-only sample mode · `2.6` `btp::DedupCache` · `2.7` `btp::Endpoint` ·
+`2.8` `btp::Receiver` · `2.9` `btp::Session` · `2.10` `priority_class()`
 

@@ -1,6 +1,40 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.10.0 LANGUAGES CXX)
+# The version number lives in one place -- include/btp/version.hpp -- so that
+# the header the code sees, the number PlatformIO reads and project(VERSION)
+# below can never drift apart. Parse it here rather than repeat it.
+set(_btp_version_hpp "${CMAKE_CURRENT_SOURCE_DIR}/include/btp/version.hpp")
+file(STRINGS "${_btp_version_hpp}" _btp_version_lines
+     REGEX "kLibraryVersion(Major|Minor|Patch)[ \t]*=[ \t]*[0-9]+")
+string(REGEX MATCH "kLibraryVersionMajor[ \t]*=[ \t]*([0-9]+)"
+       _ "${_btp_version_lines}")
+set(_btp_major "${CMAKE_MATCH_1}")
+string(REGEX MATCH "kLibraryVersionMinor[ \t]*=[ \t]*([0-9]+)"
+       _ "${_btp_version_lines}")
+set(_btp_minor "${CMAKE_MATCH_1}")
+string(REGEX MATCH "kLibraryVersionPatch[ \t]*=[ \t]*([0-9]+)"
+       _ "${_btp_version_lines}")
+set(_btp_patch "${CMAKE_MATCH_1}")
+if(NOT _btp_major MATCHES "^[0-9]+$" OR NOT _btp_minor MATCHES "^[0-9]+$"
+   OR NOT _btp_patch MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "cannot read the version from ${_btp_version_hpp}")
+endif()
+
+project(btp VERSION ${_btp_major}.${_btp_minor}.${_btp_patch} LANGUAGES CXX)
+
+# library.json carries a copy of the version for PlatformIO, which never runs
+# this file. Refuse to configure if the two disagree -- `python tools/version.py`
+# is the one command that changes both, and CI runs it with --check.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/library.json" _btp_json_version_line
+     REGEX "\"version\"[ \t]*:[ \t]*\"[0-9]+\\.[0-9]+\\.[0-9]+\"")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+"
+       _btp_json_version "${_btp_json_version_line}")
+if(NOT _btp_json_version STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR
+        "version mismatch: include/btp/version.hpp is ${PROJECT_VERSION}, "
+        "library.json is ${_btp_json_version}. "
+        "Run: python tools/version.py ${PROJECT_VERSION}")
+endif()
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the
