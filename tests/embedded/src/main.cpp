@@ -3,6 +3,7 @@
 #include <btp/endpoint.hpp>
 #include <btp/fragmentation.hpp>
 #include <btp/messages.hpp>
+#include <btp/receiver.hpp>
 #include <btp/session.hpp>
 #include <btp/stream.hpp>
 #include <btp/telemetry.hpp>
@@ -156,6 +157,26 @@ void setup() {
     (void)endpoint.send_fragment(endpoint_message, btp::TransportProfile::EspNow,
                                  endpoint_sequence, 0U, 1U, &EndpointSink::send,
                                  nullptr);
+
+    // btp::receiver compiles and links on the embedded target: decode + CRC +
+    // reassembly against caller-owned slots, the timeout sweep and the STATUS
+    // counters, no allocation, no exceptions. Feed it the frame the endpoint
+    // just produced.
+    static btp::ReassemblySlot receiver_slots[2];
+    static std::uint8_t receiver_bytes[2][btp::kEspNowMaxPayloadSize];
+    static btp::ReassemblyStorage receiver_storage[2] = {
+        {receiver_bytes[0], sizeof(receiver_bytes[0])},
+        {receiver_bytes[1], sizeof(receiver_bytes[1])},
+    };
+    static btp::Receiver receiver(receiver_slots, receiver_storage, 2U, 4000U,
+                                  btp::TransportProfile::EspNow);
+    static std::uint8_t receiver_out[btp::kEspNowMaxPayloadSize];
+    btp::ReceivedMessage received = {};
+    (void)receiver.submit(endpoint_last_frame, endpoint_last_frame_size, 1U,
+                          receiver_out, sizeof(receiver_out), &received);
+    (void)receiver.expire(10000U);
+    (void)receiver.stats();
+    receiver.clear();
 }
 
 void loop() {}

@@ -76,7 +76,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into eight headers.
+The public API is divided into nine headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -87,9 +87,10 @@ The public API is divided into eight headers.
 | `btp/telemetry.hpp`     | A `TELEMETRY` sample ⇄ values against a schema              |
 | `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
 | `btp/endpoint.hpp`      | `btp::Endpoint` — identity, sequencing and the transmit pipeline |
+| `btp/receiver.hpp`      | `btp::Receiver` — decode, CRC and reassembly on the receive path |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through six CMake targets.
+The implementation is exposed through seven CMake targets.
 
 ### `btp::codec`
 
@@ -182,6 +183,25 @@ message on the wire. Sealing is a caller callback (no cryptographic
 dependency), and an encoded frame is handed to a caller callback (no I/O). It
 adds no wire field. [The endpoint layer](#14-the-endpoint-layer) covers it.
 
+### `btp::receiver`
+
+`btp::receiver` contains:
+
+```text
+receiver.cpp
+```
+
+It links `btp::codec` for `btp::decode()` and `btp::Reassembler` and, like
+`btp::messages`, needs no mbedtls and is always built. Same guarantees as the
+rest of the library.
+
+It is `btp::Receiver`, the mirror of `btp::Endpoint`: `submit()` a received
+datagram and it decodes the frame, checks the CRC, feeds fragments to a
+reassembler, sweeps stale partials, and hands back a whole logical message
+(copied into a caller buffer) — or nothing yet. The routing decision on top,
+and opening an encrypted payload, stay the integration's.
+[The receive layer](#15-the-receive-layer) covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -203,25 +223,26 @@ Disabling AEAD removes the cryptographic dependency from the build.
 Conceptually:
 
 ```text
-                 btp::codec
-                     |
-       +-------------+-------------+
+                       btp::codec
+                           |
+       +-------------------+-------------------+
+       |                   |                   |
+     codec           fragmentation           stream
+                           ^
+       +-------------+------+------+
        |             |             |
-     codec     fragmentation      stream
-                     ^
-              +------+------+
-              |             |
-        btp::messages   btp::endpoint       btp::aead
-              ^                                 |
-       +------+------+                          v
-       |             |                     mbedcrypto
- btp::telemetry  btp::session
+ btp::messages  btp::endpoint  btp::receiver     btp::aead
+       ^                                            |
++------+------+                                     v
+|             |                                mbedcrypto
+btp::telemetry  btp::session
 ```
 
-`btp::messages` and `btp::endpoint` each link `btp::codec`; `btp::telemetry`
-and `btp::session` each link `btp::messages`; `btp::aead` additionally links
-mbedcrypto. Encryption is therefore optional at build time, and the basic frame
-codec requires neither the payload layer nor the cryptographic component.
+`btp::messages`, `btp::endpoint` and `btp::receiver` each link `btp::codec`;
+`btp::telemetry` and `btp::session` each link `btp::messages`; `btp::aead`
+additionally links mbedcrypto. Encryption is therefore optional at build time,
+and the basic frame codec requires neither the payload layer nor the
+cryptographic component.
 
 ---
 
@@ -1400,9 +1421,9 @@ BTP_ENABLE_AEAD
 
 allows applications that do not use BTP encryption to build the codec without the crypto dependency.
 
-`btp::codec`, `btp::messages`, `btp::telemetry`, `btp::session` and
-`btp::endpoint` have no build option: they have no external dependency and are
-always built.
+`btp::codec`, `btp::messages`, `btp::telemetry`, `btp::session`, `btp::endpoint`
+and `btp::receiver` have no build option: they have no external dependency and
+are always built.
 
 ---
 
@@ -2361,18 +2382,87 @@ another endpoint's AEAD nonce.
 
 ### 14.3 What stays out
 
-The **receive** path is not here: `btp::decode()` and `btp::Reassembler`
-already cover it, and the routing decision on top diverges by role — a hub
-relays an unrecognised frame by default, an endpoint drops it — so there is no
-shared receiver. Link **framing** (COBS, HID report padding, ESP-NOW datagram
-boundaries) is `btp::stream`'s or the transport's, applied to the bytes the
-send callback receives. The **session state machine** — HELLO negotiation, the
-watchdog, the console↔protocol transition — stays the integration's
+The **receive** path is its own layer, `btp::Receiver`
+([§15](#15-the-receive-layer)) — the decode + reassembly half — but the
+routing decision on top of a completed message stays the integration's: a hub
+relays an unrecognised frame by default, an endpoint drops it. Link **framing**
+(COBS, HID report padding, ESP-NOW datagram boundaries) is `btp::stream`'s or
+the transport's, applied to the bytes the send callback receives. The
+**session state machine** — HELLO negotiation, the watchdog, the
+console↔protocol transition — stays the integration's
 ([§11.1](#111-the-session-state-machine-is-not-implemented)).
 
 ---
 
-## 15. Putting the library together
+## 15. The receive layer
+
+`btp::Receiver` (`btp/receiver.hpp`, target `btp::receiver`) is the receive
+side of a BTP endpoint written once — the mirror of `btp::Endpoint`
+([§14](#14-the-endpoint-layer)). `btp::decode()` validates one frame and
+`btp::Reassembler` puts fragments back together; the wiring between them is the
+same everywhere and easy to get subtly wrong. Every consumer — an executor
+running `COMMAND`, a plotter reading `TELEMETRY`, a hub relaying both — needs
+that wiring, and before this each integration hand-rolled it.
+
+### 15.1 The contract
+
+Same guarantees as `btp::codec`: no internal allocation (the caller owns the
+reassembly slots and their byte regions — exactly `btp::Reassembler`'s
+storage — plus the buffer `submit()` copies a completed message into),
+`noexcept`, no I/O, no global state. It takes a clock the way `btp::Reassembler`
+does — `now_ms` as an argument — so the fragment timeout needs no time source
+of its own.
+
+It is **not** internally synchronised. One context calls `submit()` (the RX
+path); `stats()` returns a by-value snapshot of plain 32-bit counters, which
+is all a `STATUS` report needs.
+
+### 15.2 Using it
+
+```cpp
+btp::ReassemblySlot slots[4];
+std::uint8_t bytes[4][kMaxPayload];
+btp::ReassemblyStorage storage[4];
+for (std::size_t i = 0; i < 4; ++i) storage[i] = {bytes[i], kMaxPayload};
+btp::Receiver receiver(slots, storage, 4, 4000, btp::TransportProfile::EspNow);
+
+std::uint8_t out[kMaxPayload];
+btp::ReceivedMessage msg{};
+switch (receiver.submit(datagram, datagram_size, now_ms, out, sizeof(out), &msg)) {
+    case btp::ReceiveOutcome::Complete:
+        route(msg.header, msg.payload);   // the integration's one switch
+        break;
+    case btp::ReceiveOutcome::FragmentAccepted:
+    case btp::ReceiveOutcome::DuplicateFragment:
+        break;                            // nothing to deliver yet
+    default:
+        note_drop();                      // DroppedCrc / DroppedDecode / DroppedReassembly
+        break;
+}
+```
+
+`submit()` sweeps stale partials first (each counted as a
+`reassembly_timeout`), then decodes, then — for a fragment — feeds the
+reassembler. On `Complete` the logical payload is **copied** into `out` and the
+slot released before returning, so a slow handler downstream can never hold a
+slot another sender needs. `msg.payload` is that copy, valid until the next
+`submit()`. `msg.reassembled` says whether it came out of the slot pool, since
+the normalised header cannot.
+
+A second `submit()` overload takes a `btp::DecodedFrame` — the output of
+`btp::SerialDecoder` on the COBS / serial receive path — and runs only the
+reassembly stage.
+
+### 15.3 What stays out
+
+The routing switch on a completed message; **opening** an encrypted payload
+(`aead_open()` runs on the whole logical payload, after reassembly —
+`btp::Receiver` hands back the sealed bytes); and link **framing**, which is
+`btp::stream`'s or the transport's.
+
+---
+
+## 16. Putting the library together
 
 A typical unencrypted transmit path is:
 
@@ -2443,6 +2533,11 @@ complete logical message
 higher-level BTP payload handling
 ```
 
+`btp::Receiver` ([§15](#15-the-receive-layer)) is the `decode()` and
+`Reassembler::push()` steps bundled behind one `submit()`, with the timeout
+sweep and the `STATUS` counters; `aead_open()` and the routing switch stay the
+caller's.
+
 For serial:
 
 ```text
@@ -2479,7 +2574,7 @@ through `btp::messages` (§12).
 
 ---
 
-## 16. Summary
+## 17. Summary
 
 The BTP reference library implements the wire:
 
@@ -2493,6 +2588,7 @@ serial COBS
 optional AEAD
 COMMAND / CONTROL payload layout      (btp::messages)
 identity, sequencing, transmit path   (btp::endpoint)
+decode + CRC + reassembly path        (btp::receiver)
 ```
 
 It deliberately does not own the surrounding application.

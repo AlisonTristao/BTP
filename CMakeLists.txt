@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.7.0 LANGUAGES CXX)
+project(btp VERSION 2.8.0 LANGUAGES CXX)
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the
@@ -146,6 +146,28 @@ btp_strict_warnings(btp_endpoint)
 set_target_properties(btp_endpoint PROPERTIES EXPORT_NAME endpoint)
 
 # ---------------------------------------------------------------------------
+# btp::receiver -- the receive side of a BTP endpoint (docs/library.md chapter
+# 15): btp::decode + CRC + btp::Reassembler wired into "one datagram in, one
+# whole logical message out or nothing yet", with the timeout sweep and the
+# STATUS counters. The mirror of btp::endpoint. Same guarantees as btp::codec;
+# NO mbedtls (opening an encrypted payload is above this), so it is always built.
+# ---------------------------------------------------------------------------
+
+add_library(btp_receiver src/receiver.cpp)
+add_library(btp::receiver ALIAS btp_receiver)
+
+target_include_directories(
+    btp_receiver
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_receiver PUBLIC cxx_std_11)
+target_link_libraries(btp_receiver PUBLIC btp::codec)
+btp_strict_warnings(btp_receiver)
+set_target_properties(btp_receiver PROPERTIES EXPORT_NAME receiver)
+
+# ---------------------------------------------------------------------------
 # btp::aead -- optional wire v2 encryption, on top of mbedtls.
 # ---------------------------------------------------------------------------
 
@@ -226,7 +248,7 @@ if(BTP_INSTALL)
     include(CMakePackageConfigHelpers)
 
     set(btp_export_targets btp_codec btp_messages btp_telemetry btp_session
-                           btp_endpoint)
+                           btp_endpoint btp_receiver)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -338,6 +360,15 @@ if(BTP_BUILD_TESTS)
     target_compile_features(btp_endpoint_tests PRIVATE cxx_std_11)
     btp_strict_warnings(btp_endpoint_tests)
     add_test(NAME btp_endpoint_tests COMMAND btp_endpoint_tests)
+
+    # btp::receiver: decode + reassembly wiring, driven by feeding it frames
+    # (built with btp::endpoint, so the RX/TX pair is exercised together) and
+    # checking the outcome and the reconstructed payload. No vector tree.
+    add_executable(btp_receiver_tests tests/test_receiver.cpp)
+    target_link_libraries(btp_receiver_tests PRIVATE btp::receiver btp::endpoint)
+    target_compile_features(btp_receiver_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_receiver_tests)
+    add_test(NAME btp_receiver_tests COMMAND btp_receiver_tests)
 
     target_compile_definitions(
         btp_conformance_tests
