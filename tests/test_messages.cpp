@@ -1217,6 +1217,53 @@ void test_is_message_object() {
     CHECK(!btp::is_message_object(btp::MessageType::Telemetry, 0x0101U));
 }
 
+void test_priority_class() {
+    using btp::MessageType;
+    using btp::PriorityClass;
+    namespace oid = btp::object_id;
+
+    // Class 1 -- session + COMMAND_RESULT.
+    CHECK(btp::priority_class(MessageType::Control, oid::kHello) == PriorityClass::Session);
+    CHECK(btp::priority_class(MessageType::Control, oid::kHelloResult) == PriorityClass::Session);
+    CHECK(btp::priority_class(MessageType::Control, oid::kSessionClose) == PriorityClass::Session);
+    CHECK(btp::priority_class(MessageType::Control, oid::kSessionCloseResult) == PriorityClass::Session);
+    CHECK(btp::priority_class(MessageType::Command, oid::kCommandResult) == PriorityClass::Session);
+
+    // Class 2 -- COMMAND_REQUEST (and any other command object).
+    CHECK(btp::priority_class(MessageType::Command, oid::kCommandRequest) == PriorityClass::Command);
+    CHECK(btp::priority_class(MessageType::Command, 0x00FFU) == PriorityClass::Command);
+
+    // Class 3 -- subscription control, and STATUS only when DEGRADED.
+    CHECK(btp::priority_class(MessageType::Control, oid::kSubscribe) == PriorityClass::Subscription);
+    CHECK(btp::priority_class(MessageType::Control, oid::kSubscribeResult) == PriorityClass::Subscription);
+    CHECK(btp::priority_class(MessageType::Control, oid::kUnsubscribe) == PriorityClass::Subscription);
+    CHECK(btp::priority_class(MessageType::Control, oid::kUnsubscribeResult) == PriorityClass::Subscription);
+    CHECK(btp::priority_class(MessageType::Control, oid::kStatus, /*status_degraded=*/true) ==
+          PriorityClass::Subscription);
+
+    // Class 4 -- terminal.
+    CHECK(btp::priority_class(MessageType::Terminal, oid::kTerminalIn) == PriorityClass::Terminal);
+    CHECK(btp::priority_class(MessageType::Terminal, oid::kTerminalOut) == PriorityClass::Terminal);
+
+    // Class 5 -- manifest, periodic STATUS, log, reserved control.
+    CHECK(btp::priority_class(MessageType::Control, oid::kStatus) == PriorityClass::Bulk);
+    CHECK(btp::priority_class(MessageType::Control, oid::kManifestRequest) == PriorityClass::Bulk);
+    CHECK(btp::priority_class(MessageType::Control, oid::kManifestData) == PriorityClass::Bulk);
+    CHECK(btp::priority_class(MessageType::Log, 0x0001U) == PriorityClass::Bulk);
+    CHECK(btp::priority_class(MessageType::Control, 0x00FFU) == PriorityClass::Bulk);
+
+    // Class 6 -- telemetry, and anything unrecognised.
+    CHECK(btp::priority_class(MessageType::Telemetry, 0x0001U) == PriorityClass::Telemetry);
+    CHECK(btp::priority_class(MessageType::Invalid, 0x0000U) == PriorityClass::Telemetry);
+
+    // Numeric values match the spec table (1 highest, 6 lowest).
+    CHECK(static_cast<std::uint8_t>(PriorityClass::Session) == 1U);
+    CHECK(static_cast<std::uint8_t>(PriorityClass::Telemetry) == 6U);
+
+    CHECK(std::strcmp(btp::priority_class_string(PriorityClass::Terminal), "Terminal") == 0);
+    CHECK(std::strcmp(btp::priority_class_string(PriorityClass::Bulk), "Bulk") == 0);
+}
+
 void test_decode_rejects_null_and_encode_rejects_small_buffer() {
     btp::Hello hello = {};
     CHECK(btp::decode_hello(nullptr, 0U, &hello) == btp::MessageError::InvalidArgument);
@@ -1281,6 +1328,7 @@ int main() {
     test_manifest_verbatim_wrong_order();
     test_negotiate();
     test_is_message_object();
+    test_priority_class();
     test_invalid_vectors();
     test_decode_rejects_null_and_encode_rejects_small_buffer();
 

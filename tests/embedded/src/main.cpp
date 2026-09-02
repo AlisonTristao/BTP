@@ -69,6 +69,10 @@ void setup() {
     (void)btp::decode_hello(message_buffer, sizeof(message_buffer),
                             &parsed_hello);
 
+    (void)btp::priority_class(btp::MessageType::Control, btp::object_id::kStatus);
+    (void)btp::priority_class_string(
+        btp::priority_class(btp::MessageType::Telemetry, 1U));
+
     btp::ManifestReader reader(message_buffer, sizeof(message_buffer));
     btp::ManifestHeader manifest_header = {};
     (void)reader.header(&manifest_header);

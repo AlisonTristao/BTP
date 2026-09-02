@@ -22,7 +22,7 @@ is correct. They ship as one version.
 | The session lifecycle and inactivity watchdog (responder side) | Implemented in `btp::session` (`btp::Session`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
 | Identity, sequencing and the transmit pipeline | Implemented in `btp::endpoint` (`btp::Endpoint`), covered by `tests/test_endpoint.cpp` (orchestration over the codec, no vector tree). |
 | The decode + CRC + reassembly receive path | Implemented in `btp::receiver` (`btp::Receiver`), covered by `tests/test_receiver.cpp` (orchestration over the codec, no vector tree). |
-| Library | `2.9.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
+| Library | `2.10.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
 | Latest published tag | `v2.5.0` on `main` (wire `0x02`); `v1.1.0-beta` on the `1.x` line. |
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 

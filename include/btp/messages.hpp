@@ -133,6 +133,42 @@ const char* message_error_string(MessageError error) noexcept;
 bool is_message_object(MessageType type, std::uint16_t object_id) noexcept;
 
 // ---------------------------------------------------------------------------
+// Traffic priority (docs/model.md section 8, docs/session-and-terminal.md
+// section 8)
+// ---------------------------------------------------------------------------
+// The six logical priority classes the specification defines for outgoing
+// traffic under congestion. Numeric values match the spec table: 1 is the
+// highest priority, 6 the lowest, and telemetry is the first class dropped
+// when capacity runs short. FIFO order holds within a class.
+//
+// This is a classification only. Which queues an integration keeps, how many,
+// and how it drains them are "implementation-dependent" (section 8) -- a
+// dongle that never originates COMMAND_REQUEST collapses classes 1 and 2 into
+// one queue; a robot keeps all six. priority_class() puts the *rule* (which
+// object_id lands in which class) in one place so those queue sets do not each
+// re-derive it from the prose.
+
+enum class PriorityClass : std::uint8_t {
+    Session = 1,       // HELLO(_RESULT), SESSION_CLOSE(_RESULT), COMMAND_RESULT
+    Command = 2,       // COMMAND_REQUEST and other control results
+    Subscription = 3,  // SUBSCRIBE / UNSUBSCRIBE (+ results), STATUS with DEGRADED
+    Terminal = 4,      // TERMINAL_IN / TERMINAL_OUT
+    Bulk = 5,          // MANIFEST_REQUEST / MANIFEST_DATA, periodic STATUS, LOG
+    Telemetry = 6,     // TELEMETRY
+};
+
+const char* priority_class_string(PriorityClass priority) noexcept;
+
+// The priority class of a message, from its envelope type and object_id.
+// `status_degraded` moves a CONTROL/STATUS message from Bulk (periodic status,
+// class 5) to Subscription (degraded status, class 3) -- the DEGRADED bit is
+// in the STATUS payload, which this call does not see, so the caller passes
+// it. An unrecognised (type, object_id) is classed Telemetry: lowest priority,
+// discarded first, never ahead of real control traffic.
+PriorityClass priority_class(MessageType type, std::uint16_t object_id,
+                             bool status_degraded = false) noexcept;
+
+// ---------------------------------------------------------------------------
 // Field-value enums
 // ---------------------------------------------------------------------------
 

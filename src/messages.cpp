@@ -933,6 +933,61 @@ bool is_message_object(MessageType type, std::uint16_t object_id) noexcept {
     return false;
 }
 
+const char* priority_class_string(PriorityClass priority) noexcept {
+    switch (priority) {
+        case PriorityClass::Session: return "Session";
+        case PriorityClass::Command: return "Command";
+        case PriorityClass::Subscription: return "Subscription";
+        case PriorityClass::Terminal: return "Terminal";
+        case PriorityClass::Bulk: return "Bulk";
+        case PriorityClass::Telemetry: return "Telemetry";
+    }
+    return "unknown";
+}
+
+PriorityClass priority_class(MessageType type, std::uint16_t object_id,
+                             bool status_degraded) noexcept {
+    switch (type) {
+        case MessageType::Command:
+            // COMMAND_RESULT completes a request -- class 1, with the session.
+            // COMMAND_REQUEST (and any other command object) is class 2.
+            return object_id == object_id::kCommandResult ? PriorityClass::Session
+                                                          : PriorityClass::Command;
+        case MessageType::Terminal:
+            return PriorityClass::Terminal;
+        case MessageType::Log:
+            return PriorityClass::Bulk;
+        case MessageType::Telemetry:
+            return PriorityClass::Telemetry;
+        case MessageType::Control:
+            switch (object_id) {
+                case object_id::kHello:
+                case object_id::kHelloResult:
+                case object_id::kSessionClose:
+                case object_id::kSessionCloseResult:
+                    return PriorityClass::Session;
+                case object_id::kSubscribe:
+                case object_id::kSubscribeResult:
+                case object_id::kUnsubscribe:
+                case object_id::kUnsubscribeResult:
+                    return PriorityClass::Subscription;
+                case object_id::kStatus:
+                    return status_degraded ? PriorityClass::Subscription
+                                           : PriorityClass::Bulk;
+                case object_id::kManifestRequest:
+                case object_id::kManifestData:
+                    return PriorityClass::Bulk;
+                default:
+                    // A reserved / future CONTROL object: treat it as bulk
+                    // control rather than starving it or jumping it ahead.
+                    return PriorityClass::Bulk;
+            }
+        case MessageType::Invalid:
+        default:
+            return PriorityClass::Telemetry;
+    }
+}
+
 // ===========================================================================
 // MANIFEST_DATA (docs/commands.md section 3)
 // ===========================================================================

@@ -1937,12 +1937,15 @@ table, and never allocates.
 ### 11.5 The priority scheduler is not implemented
 
 `btp::messages` encodes and decodes `SUBSCRIBE` / `SUBSCRIBE_RESULT` /
-`UNSUBSCRIBE` / `UNSUBSCRIBE_RESULT` and `STATUS` (versions 1 and 2).
+`UNSUBSCRIBE` / `UNSUBSCRIBE_RESULT` and `STATUS` (versions 1 and 2), and
+`priority_class()` ([§12.1](#121-what-it-covers)) says which of the six spec
+classes a message belongs to.
 
 It does **not** own a telemetry scheduler, a subscription aggregator, or the
-six-class priority queue. Those decide *when* an outgoing message is sent and
-are inherently transport-specific -- FreeRTOS queues on firmware, an event
-loop on a desktop.
+priority queue itself. Those decide *when* an outgoing message is sent, how
+many queues to keep, and how to drain them -- inherently transport-specific
+(FreeRTOS queues on firmware, an event loop on a desktop), and
+"implementation-dependent" by the spec.
 
 ---
 
@@ -2023,12 +2026,25 @@ it needs a schema in hand. `btp::telemetry` covers it, from the same schema
 | `SUBSCRIBE` (`_RESULT`), `UNSUBSCRIBE` (`_RESULT`) | `decode_subscribe` / …, `decode_unsubscribe_result` / … |
 | `STATUS` v1 and v2 | `decode_status`, `status_topic_count`, `encode_status_v1` / `encode_status_v2` |
 | `HELLO` negotiation | `negotiate(local, remote)` -> `EffectiveLimits` |
+| Traffic priority | `priority_class(type, object_id, status_degraded)` -> `PriorityClass` |
 
-`TERMINAL_IN` / `TERMINAL_OUT` have no entry: their payload is opaque bytes
-with no structure to decode ([Session and terminal](session-and-terminal.md#7-the-terminal)).
+`TERMINAL_IN` / `TERMINAL_OUT` have no decode entry: their payload is opaque
+bytes with no structure ([Session and terminal](session-and-terminal.md#7-the-terminal)).
 `is_message_object(type, object_id)` reports whether a `(type, object_id)`
 pair names a payload this layer decodes -- a router uses it to tell a message
 it should decode from a frame it only relays.
+
+`priority_class(type, object_id, status_degraded = false)` returns which of the
+six spec priority classes ([Model §8](model.md#8-traffic-priority),
+[Session and terminal §8](session-and-terminal.md#8-priority)) a message falls
+in -- `Session` (1) down to `Telemetry` (6), 1 highest. It is the
+classification only: how many send queues an integration keeps and how it
+drains them stays "implementation-dependent" (a dongle that never originates
+`COMMAND_REQUEST` folds classes 1 and 2 into one queue; a robot keeps all
+six). The `DEGRADED` bit lives in the `STATUS` payload, which the call does
+not see, so `status_degraded` is passed in to lift a `STATUS` message from
+`Bulk` (5) to `Subscription` (3). An unrecognised pair is classed `Telemetry`:
+lowest priority, dropped first, never ahead of real control traffic.
 
 ---
 
