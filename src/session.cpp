@@ -347,6 +347,21 @@ const char* session_event_string(SessionEvent event) noexcept {
     return "Unknown";
 }
 
+namespace {
+
+// "The local advertisement is a legal HELLO" is exactly what encode_hello
+// checks -- a valid role, 1..8 ascending non-zero versions, non-zero limits, a
+// non-zero uuid. A HELLO is at most 48 octets (40 fixed + 8 versions), so a
+// 64-byte scratch never limits the check.
+bool hello_is_well_formed(const Hello& hello) noexcept {
+    std::uint8_t scratch[64];
+    std::size_t written = 0U;
+    return encode_hello(hello, scratch, sizeof(scratch), &written) ==
+           MessageError::Ok;
+}
+
+}  // namespace
+
 Session::Session(const Hello& local, std::uint64_t hello_deadline_ms) noexcept
     : local_(local),
       effective_{},
@@ -355,18 +370,15 @@ Session::Session(const Hello& local, std::uint64_t hello_deadline_ms) noexcept
       deadline_ms_(0U),
       peer_source_id_(0U),
       peer_boot_id_(0U),
-      valid_(false) {
-    // "The local advertisement is a legal HELLO" is exactly what encode_hello
-    // checks -- a valid role, 1..8 ascending non-zero versions, non-zero
-    // limits, a non-zero uuid. A HELLO is at most 48 octets (40 fixed + 8
-    // versions), so a 64-byte scratch never limits the check.
-    std::uint8_t scratch[64];
-    std::size_t written = 0U;
-    valid_ = encode_hello(local_, scratch, sizeof(scratch), &written) ==
-             MessageError::Ok;
-}
+      valid_(hello_is_well_formed(local)) {}
 
 bool Session::valid() const noexcept { return valid_; }
+
+bool Session::set_local(const Hello& local) noexcept {
+    local_ = local;
+    valid_ = hello_is_well_formed(local_);
+    return valid_;
+}
 SessionState Session::state() const noexcept { return state_; }
 bool Session::active() const noexcept {
     return state_ == SessionState::Active;

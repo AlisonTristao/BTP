@@ -739,6 +739,39 @@ void test_session_round_trips_a_real_encoded_hello() {
     CHECK(session.effective_limits().session_timeout_ms == 12000U);
 }
 
+void test_session_set_local_updates_the_advertisement() {
+    Session session(make_local(2048U, 30000U), 2000U);
+    CHECK(session.valid());
+
+    // A later manifest revision + a different uuid; still a legal HELLO.
+    Hello updated = make_local(2048U, 30000U);
+    updated.config_revision = 99U;
+    for (std::size_t i = 0U; i < 16U; ++i) {
+        updated.peer_uuid[i] = static_cast<std::uint8_t>(0x40U + i);
+    }
+    CHECK(session.set_local(updated));
+
+    session.arm(0U);
+    const FakeFrame hello = hello_frame(make_local(4096U, 20000U), 7U, 8U, 1U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 5U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::HelloAccepted);
+
+    HelloResult decoded = {};
+    CHECK(btp::decode_hello_result(reply, o.reply_size, &decoded) ==
+          btp::MessageError::Ok);
+    CHECK(decoded.config_revision == 99U);
+    CHECK(decoded.peer_uuid[0] == 0x40U);
+
+    // A malformed advertisement flips valid() and makes every HELLO reject.
+    Hello broken = make_local();
+    broken.peer_uuid[0] = 0U;
+    for (std::size_t i = 1U; i < 16U; ++i) broken.peer_uuid[i] = 0U;
+    CHECK(!session.set_local(broken));
+    CHECK(!session.valid());
+}
+
 void test_session_state_and_event_strings() {
     CHECK(btp::session_state_string(SessionState::Idle) != nullptr);
     CHECK(std::strcmp(btp::session_state_string(SessionState::Active),
@@ -782,6 +815,7 @@ int main() {
     test_session_zero_hello_deadline_never_times_out_awaiting();
     test_session_hello_reply_buffer_too_small_stays_put();
     test_session_round_trips_a_real_encoded_hello();
+    test_session_set_local_updates_the_advertisement();
     test_session_state_and_event_strings();
 
     if (failures != 0) {

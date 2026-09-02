@@ -2371,6 +2371,10 @@ is looked at — `SESSION_CLOSE` is handled here, everything else comes back as
 (ESP-NOW, USB HID) calls `arm()` on link-up instead of after an ENTER line;
 `hello_deadline_ms = 0` disables the initial deadline entirely.
 
+`set_local()` replaces the advertisement between sessions — a peer whose
+`config_revision` moved when its manifest catalogue changed refreshes it so the
+next `HELLO_RESULT` reports the current value.
+
 **What stays out:** the **initiator** side — sending `ENTER` / `HELLO`, the
 retry budget, awaiting `HELLO_RESULT` (a desktop tool's job; a future
 `btp::SessionInitiator`); the plain-ASCII `BTP/1 ENTER|READY|CONSOLE` console

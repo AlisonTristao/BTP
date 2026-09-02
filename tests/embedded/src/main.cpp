@@ -146,6 +146,8 @@ void setup() {
     session_local.config_revision = 1U;
 
     static btp::Session session(session_local, 2000U);
+    session_local.config_revision = 2U;
+    (void)session.set_local(session_local);
     session.arm(0U);
 
     std::uint8_t session_hello[64];

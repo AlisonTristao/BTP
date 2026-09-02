@@ -411,10 +411,19 @@ public:
     // deadline entirely -- only the negotiated session watchdog then applies.
     Session(const Hello& local, std::uint64_t hello_deadline_ms) noexcept;
 
-    // True when `local` is a well-formed HELLO (a valid role, 1..8 ascending
-    // non-zero versions, non-zero limits, non-zero uuid). A false here means
-    // every HELLO will be rejected -- check it once at start-up.
+    // True when the current local advertisement is a well-formed HELLO (a
+    // valid role, 1..8 ascending non-zero versions, non-zero limits, non-zero
+    // uuid). A false here means every HELLO will be rejected -- check it after
+    // construction and after set_local().
     bool valid() const noexcept;
+
+    // Replace the local advertisement. A peer whose config_revision or
+    // announced limits change (its manifest catalogue moved, say) calls this
+    // between sessions so the next HELLO_RESULT reports the current values.
+    // Safe in any state -- local_ is only read while negotiating a HELLO, so a
+    // call during an active session changes nothing until that session ends.
+    // Returns the new valid().
+    bool set_local(const Hello& local) noexcept;
 
     SessionState state() const noexcept;
     bool active() const noexcept;   // state() == SessionState::Active
