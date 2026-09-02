@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <btp/codec.hpp>
+#include <btp/endpoint.hpp>
 #include <btp/fragmentation.hpp>
 #include <btp/messages.hpp>
 #include <btp/session.hpp>
@@ -125,6 +126,36 @@ void setup() {
     (void)dedup.classify(dedup_key, payload, sizeof(payload), &dedup_slot,
                          &dedup_result);
     dedup.clear();
+
+    // btp::endpoint compiles and links on the embedded target: identity, the
+    // atomic sequence counter and the seal -> fragment -> encode pipeline, no
+    // allocation, no exceptions. The send callback copies each frame into a
+    // static buffer so nothing here needs a radio.
+    static btp::Endpoint endpoint;
+    (void)endpoint.configure(0x0A0B0C0DU, 0x01020304U);
+    std::uint32_t endpoint_sequence = 0U;
+    (void)endpoint.reserve_sequence(&endpoint_sequence);
+    (void)endpoint.try_reserve_sequence(&endpoint_sequence);
+
+    static std::uint8_t endpoint_last_frame[btp::kEspNowMaxFrameSize];
+    static std::size_t endpoint_last_frame_size = 0U;
+    struct EndpointSink {
+        static bool send(void*, const std::uint8_t* frame, std::size_t size) {
+            endpoint_last_frame_size =
+                size <= sizeof(endpoint_last_frame) ? size : 0U;
+            for (std::size_t i = 0U; i < endpoint_last_frame_size; ++i) {
+                endpoint_last_frame[i] = frame[i];
+            }
+            return endpoint_last_frame_size != 0U;
+        }
+    };
+    const btp::LogicalMessage endpoint_message = {
+        btp::MessageType::Telemetry, 1U, 0U, {payload, sizeof(payload)}};
+    (void)endpoint.send_logical(endpoint_message, btp::TransportProfile::EspNow,
+                                &EndpointSink::send, nullptr, nullptr, 0U);
+    (void)endpoint.send_fragment(endpoint_message, btp::TransportProfile::EspNow,
+                                 endpoint_sequence, 0U, 1U, &EndpointSink::send,
+                                 nullptr);
 }
 
 void loop() {}

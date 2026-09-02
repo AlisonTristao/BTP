@@ -19,7 +19,8 @@ is correct. They ship as one version.
 | `COMMAND` / `CONTROL` payload layout | Specified, implemented in `btp::messages`, covered by `test-vectors/v2/messages/`. |
 | `TELEMETRY` sample body | Specified, implemented in `btp::telemetry` (`PACKED_LE` / `TLV_LE` against a schema), covered by `test-vectors/v2/telemetry/`. |
 | Command deduplication | Specified, implemented in `btp::session` (`btp::DedupCache`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
-| Library | `2.6.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
+| Identity, sequencing and the transmit pipeline | Implemented in `btp::endpoint` (`btp::Endpoint`), covered by `tests/test_endpoint.cpp` (orchestration over the codec, no vector tree). |
+| Library | `2.7.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
 | Latest published tag | `v2.5.0` on `main` (wire `0x02`); `v1.1.0-beta` on the `1.x` line. |
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 

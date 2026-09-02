@@ -76,7 +76,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into seven headers.
+The public API is divided into eight headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -86,9 +86,10 @@ The public API is divided into seven headers.
 | `btp/messages.hpp`      | Struct ⇄ bytes for every `COMMAND` / `CONTROL` payload      |
 | `btp/telemetry.hpp`     | A `TELEMETRY` sample ⇄ values against a schema              |
 | `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
+| `btp/endpoint.hpp`      | `btp::Endpoint` — identity, sequencing and the transmit pipeline |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through five CMake targets.
+The implementation is exposed through six CMake targets.
 
 ### `btp::codec`
 
@@ -162,6 +163,25 @@ executor feeds it each `COMMAND_REQUEST` identity and it says whether to
 execute, replay a stored `COMMAND_RESULT`, or reject a conflict.
 [The session layer](#13-the-session-layer) covers it.
 
+### `btp::endpoint`
+
+`btp::endpoint` contains:
+
+```text
+endpoint.cpp
+```
+
+It links `btp::codec` for the frame codec and fragmentation and, like
+`btp::messages`, needs no mbedtls and is always built. Same guarantees as the
+rest of the library.
+
+It is `btp::Endpoint`: the transmit side of a BTP endpoint — the local
+`(source_id, boot_id)` identity, the outgoing sequence counter, and the
+`seal → fragment → encode` pipeline every producer runs to put a logical
+message on the wire. Sealing is a caller callback (no cryptographic
+dependency), and an encoded frame is handed to a caller callback (no I/O). It
+adds no wire field. [The endpoint layer](#14-the-endpoint-layer) covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -189,18 +209,19 @@ Conceptually:
        |             |             |
      codec     fragmentation      stream
                      ^
-                     |
-                 btp::messages          btp::aead
-                     ^                      |
-              +------+------+               v
-              |             |          mbedcrypto
-        btp::telemetry  btp::session
+              +------+------+
+              |             |
+        btp::messages   btp::endpoint       btp::aead
+              ^                                 |
+       +------+------+                          v
+       |             |                     mbedcrypto
+ btp::telemetry  btp::session
 ```
 
-`btp::messages` links `btp::codec`; `btp::telemetry` and `btp::session` each
-link `btp::messages`; `btp::aead` additionally links mbedcrypto. Encryption is
-therefore optional at build time, and the basic frame codec requires neither
-the payload layer nor the cryptographic component.
+`btp::messages` and `btp::endpoint` each link `btp::codec`; `btp::telemetry`
+and `btp::session` each link `btp::messages`; `btp::aead` additionally links
+mbedcrypto. Encryption is therefore optional at build time, and the basic frame
+codec requires neither the payload layer nor the cryptographic component.
 
 ---
 
@@ -1379,8 +1400,9 @@ BTP_ENABLE_AEAD
 
 allows applications that do not use BTP encryption to build the codec without the crypto dependency.
 
-`btp::codec`, `btp::messages`, `btp::telemetry` and `btp::session` have no
-build option: they have no external dependency and are always built.
+`btp::codec`, `btp::messages`, `btp::telemetry`, `btp::session` and
+`btp::endpoint` have no build option: they have no external dependency and are
+always built.
 
 ---
 
@@ -1816,10 +1838,13 @@ and `btp::negotiate()` computes the effective limits from two `HELLO`s
 
 It does **not** run the session: the lifetime, the inactivity watchdog and the
 `console`↔`protocol` transition on serial are the integration's state to keep.
-The one piece of stateful session machinery the library *does* provide is
-`btp::DedupCache` ([§13](#13-the-session-layer)) — and it is built boot-scoped
-precisely because [command deduplication outlives a
-session](session-and-terminal.md#53-session-loss-and-command-deduplication).
+`btp::Endpoint` ([§14](#14-the-endpoint-layer)) holds the transmit-side half a
+session needs — the `(source_id, boot_id)` identity and the outgoing sequence
+counter — but not the negotiation or the watchdog that decide *when* that
+identity is allowed to send. The one piece of stateful *receive*-side session
+machinery the library provides is `btp::DedupCache` ([§13](#13-the-session-layer))
+— and it is built boot-scoped precisely because [command deduplication outlives
+a session](session-and-terminal.md#53-session-loss-and-command-deduplication).
 
 ---
 
@@ -2254,7 +2279,100 @@ says.
 
 ---
 
-## 14. Putting the library together
+## 14. The endpoint layer
+
+`btp::Endpoint` (`btp/endpoint.hpp`, target `btp::endpoint`) is the transmit
+side of a BTP endpoint written once. `btp::codec` encodes one frame and
+`btp::fragmentation` slices a payload into frames; neither remembers who *this*
+node is, hands out the next sequence number, or fixes the order the steps go in
+when a message is both encrypted and fragmented. Every producer — `STATUS`,
+`TELEMETRY`, `MANIFEST_DATA`, `COMMAND_RESULT`, `LOG`, `TERMINAL_OUT` — needs
+exactly that, and before this each integration hand-rolled it.
+
+### 14.1 The contract
+
+Same guarantees as `btp::codec`: no internal allocation, `noexcept`, no I/O, no
+clock, no global state. The only state is the identity and one sequence
+counter. What it holds:
+
+* **identity** — `configure(source_id, boot_id)` once at boot; both must be
+  non-zero (BTP reserves `0` for each).
+* **sequencing** — `reserve_sequence()` (a CAS loop that always succeeds while
+  sequences remain) and `try_reserve_sequence()` (a single CAS for a hard
+  non-blocking producer). `0` is never handed out and is the permanent
+  "sequence space exhausted" sentinel. These two are the *only* methods safe to
+  call from more than one context at once.
+
+What the caller still owns:
+
+* **addressing and routing** — which MAC / socket / peer a frame goes to, and
+  any per-peer table, are hidden behind the send callback
+  ([model.md §5](model.md#5-identity-and-transport-addressing): BTP defines no
+  routing identifiers).
+* **the seal** — an `EndpointSealFn` callback, so the class carries no
+  cryptographic dependency (the AEAD backend, key selection and the fail-closed
+  policy are the integration's — see [Encryption §7.1](#71-sealing)).
+* **the transport** — an `EndpointSendFn` callback receives each encoded frame;
+  the class never touches a socket or a radio.
+* **the fragmented-and-encrypted scratch buffer** — a byte region big enough
+  for `payload_size + 16`, whose size is a deployment choice (a
+  microcontroller cannot afford the buffer a desktop can).
+
+### 14.2 The pipeline
+
+`send_logical()` reserves a sequence and then, for an encrypted message:
+
+1. build the **canonical** logical header — `FRAGMENTED` cleared,
+   `fragment_index` 0, `fragment_count` 1, `ENCRYPTED` set — so the associated
+   data matches what a receiver reconstructs
+   ([Encryption §7.2](#72-header-serialization-and-aad));
+2. call the `EndpointSealFn` **once**, over the whole logical payload;
+3. compute `fragment_count` from the **sealed** size (`payload + 16`), never
+   the plaintext size — a message that fits one frame unsealed can need two
+   once the tag is added, and hand-slicing the plaintext would lose the tail;
+4. `make_fragment()` / `encode()` each wire frame from the sealed bytes and
+   hand it to the `EndpointSendFn`.
+
+An unencrypted message skips steps 1–3 and slices the plaintext directly. Both
+paths **fail closed**: a `false` from the seal or the send callback, an
+oversized payload, or an unconfigured endpoint stops the send and returns
+`false`. There is no rollback of frames already handed out.
+
+```cpp
+btp::Endpoint endpoint;
+endpoint.configure(source_id_from_mac(mac), boot_id);
+
+std::uint8_t scratch[kMaxLogicalPayload + btp::kEndpointAeadTagSize];
+btp::LogicalMessage msg{btp::MessageType::Control, kStatusObjectId, now_us,
+                        {payload, payload_size}};
+endpoint.send_logical(msg, btp::TransportProfile::EspNow,
+                      &radio_send, &radio, scratch, sizeof(scratch),
+                      &channel_c_seal, &seal_ctx);
+```
+
+`send_logical_reserved()` runs the same pipeline with a sequence a non-blocking
+producer already took, so a queued large sample keeps its place among its
+one-frame neighbours. `encode_fragment()` / `send_fragment()` build exactly one
+physical frame (a sealed one must be the whole logical message —
+`fragment_count == 1` — because the tag covers a whole payload, never a slice).
+`send_encoded()` hands an already-encoded frame straight to the transport with
+no re-encode and no CRC recomputation, for a relay or playback path carrying
+another endpoint's AEAD nonce.
+
+### 14.3 What stays out
+
+The **receive** path is not here: `btp::decode()` and `btp::Reassembler`
+already cover it, and the routing decision on top diverges by role — a hub
+relays an unrecognised frame by default, an endpoint drops it — so there is no
+shared receiver. Link **framing** (COBS, HID report padding, ESP-NOW datagram
+boundaries) is `btp::stream`'s or the transport's, applied to the bytes the
+send callback receives. The **session state machine** — HELLO negotiation, the
+watchdog, the console↔protocol transition — stays the integration's
+([§11.1](#111-the-session-state-machine-is-not-implemented)).
+
+---
+
+## 15. Putting the library together
 
 A typical unencrypted transmit path is:
 
@@ -2300,6 +2418,10 @@ encode()
        v
 transport
 ```
+
+`btp::Endpoint` ([§14](#14-the-endpoint-layer)) is those two paths bundled
+behind one call, with the identity and sequence filled in and the encrypted
+ordering fixed; a producer that wants the steps by hand still has them.
 
 A receive path for a packet-oriented transport is:
 
@@ -2357,7 +2479,7 @@ through `btp::messages` (§12).
 
 ---
 
-## 15. Summary
+## 16. Summary
 
 The BTP reference library implements the wire:
 
@@ -2369,7 +2491,8 @@ fragmentation
 reassembly
 serial COBS
 optional AEAD
-COMMAND / CONTROL payload layout   (btp::messages)
+COMMAND / CONTROL payload layout      (btp::messages)
+identity, sequencing, transmit path   (btp::endpoint)
 ```
 
 It deliberately does not own the surrounding application.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(btp VERSION 2.6.0 LANGUAGES CXX)
+project(btp VERSION 2.7.0 LANGUAGES CXX)
 
 # Tests are for developing BTP, not for consuming it. A parent project that
 # pulls this in with add_subdirectory() or FetchContent should not inherit the
@@ -123,6 +123,29 @@ btp_strict_warnings(btp_session)
 set_target_properties(btp_session PROPERTIES EXPORT_NAME session)
 
 # ---------------------------------------------------------------------------
+# btp::endpoint -- the transmit side of a BTP endpoint (docs/library.md chapter
+# 14): the local identity, the outgoing sequence counter and the
+# seal -> fragment -> encode pipeline every producer runs. Same guarantees as
+# btp::codec: no allocation, noexcept, caller-owned buffers. Links btp::codec
+# for the frame codec and fragmentation; NO mbedtls (sealing is a caller
+# callback), so it is always built.
+# ---------------------------------------------------------------------------
+
+add_library(btp_endpoint src/endpoint.cpp)
+add_library(btp::endpoint ALIAS btp_endpoint)
+
+target_include_directories(
+    btp_endpoint
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_endpoint PUBLIC cxx_std_11)
+target_link_libraries(btp_endpoint PUBLIC btp::codec)
+btp_strict_warnings(btp_endpoint)
+set_target_properties(btp_endpoint PROPERTIES EXPORT_NAME endpoint)
+
+# ---------------------------------------------------------------------------
 # btp::aead -- optional wire v2 encryption, on top of mbedtls.
 # ---------------------------------------------------------------------------
 
@@ -202,7 +225,8 @@ if(BTP_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
 
-    set(btp_export_targets btp_codec btp_messages btp_telemetry btp_session)
+    set(btp_export_targets btp_codec btp_messages btp_telemetry btp_session
+                           btp_endpoint)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -305,6 +329,15 @@ if(BTP_BUILD_TESTS)
     target_compile_features(btp_session_tests PRIVATE cxx_std_11)
     btp_strict_warnings(btp_session_tests)
     add_test(NAME btp_session_tests COMMAND btp_session_tests)
+
+    # btp::endpoint: the transmit pipeline is orchestration over the codec, not
+    # a wire layout, so it has no vector tree -- the suite drives the endpoint
+    # and decodes what it produced with the public btp::decode / btp::Reassembler.
+    add_executable(btp_endpoint_tests tests/test_endpoint.cpp)
+    target_link_libraries(btp_endpoint_tests PRIVATE btp::endpoint)
+    target_compile_features(btp_endpoint_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_endpoint_tests)
+    add_test(NAME btp_endpoint_tests COMMAND btp_endpoint_tests)
 
     target_compile_definitions(
         btp_conformance_tests
