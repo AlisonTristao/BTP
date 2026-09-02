@@ -2,6 +2,7 @@
 #include <btp/codec.hpp>
 #include <btp/fragmentation.hpp>
 #include <btp/messages.hpp>
+#include <btp/session.hpp>
 #include <btp/stream.hpp>
 #include <btp/telemetry.hpp>
 
@@ -102,6 +103,28 @@ void setup() {
         (void)sample_value.f64(0);
     }
     (void)sample_reader.finish();
+
+    // btp::session compiles and links on the embedded target: a fixed slot
+    // array, one caller storage region per slot and a small requester table,
+    // no allocation, no exceptions.
+    static btp::DedupSlot dedup_slots[2];
+    static std::uint8_t dedup_bytes[2][64];
+    static btp::DedupStorage dedup_storage[2] = {
+        {dedup_bytes[0], sizeof(dedup_bytes[0])},
+        {dedup_bytes[1], sizeof(dedup_bytes[1])},
+    };
+    static btp::DedupRequester dedup_requesters[2];
+    btp::DedupCache dedup(dedup_slots, dedup_storage, 2U, dedup_requesters, 2U);
+    const btp::DedupKey dedup_key = {1U, 1U, 1U};
+    std::size_t dedup_slot = 0U;
+    btp::ByteView dedup_result = {};
+    if (dedup.classify(dedup_key, payload, sizeof(payload), &dedup_slot,
+                       &dedup_result) == btp::DedupVerdict::Fresh) {
+        (void)dedup.record_result(dedup_slot, payload, sizeof(payload));
+    }
+    (void)dedup.classify(dedup_key, payload, sizeof(payload), &dedup_slot,
+                         &dedup_result);
+    dedup.clear();
 }
 
 void loop() {}

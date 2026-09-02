@@ -54,12 +54,16 @@ The library implements the wire: the frame, the fragmentation, the COBS
 framing, the optional AEAD, the byte layout of every `COMMAND` and `CONTROL`
 payload (`btp::messages`, [The message layer](#12-the-message-layer)) and the
 `TELEMETRY` sample body against a schema (`btp::telemetry`,
-[§12.4](#124-decoding-and-encoding-telemetry-samples)).
+[§12.4](#124-decoding-and-encoding-telemetry-samples)). One stateful mechanism
+sits just above that line because getting it wrong is a safety fault, not a
+parse fault: `btp::DedupCache`, the command-deduplication cache
+([The session layer](#13-the-session-layer)).
 
-It deliberately stops below the mechanisms that carry *state*:
+It deliberately stops below the rest of the mechanisms that carry *state*:
 
 * the session state machine and its watchdog;
-* command execution and the deduplication cache;
+* command *execution* (`btp::DedupCache` remembers the result; running the
+  action and sending the reply stay the integration's);
 * the manifest catalogue a consumer keeps;
 * telemetry schema storage (which schemas a consumer caches, and for how long);
 * the priority scheduler.
@@ -72,7 +76,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into six headers.
+The public API is divided into seven headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -81,9 +85,10 @@ The public API is divided into six headers.
 | `btp/stream.hpp`        | COBS and incremental serial decoding                        |
 | `btp/messages.hpp`      | Struct ⇄ bytes for every `COMMAND` / `CONTROL` payload      |
 | `btp/telemetry.hpp`     | A `TELEMETRY` sample ⇄ values against a schema              |
+| `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through four CMake targets.
+The implementation is exposed through five CMake targets.
 
 ### `btp::codec`
 
@@ -138,6 +143,25 @@ schema the caller already holds: `SampleReader` / `SampleWriter` for the
 `raw * scale + offset` conversion. It adds no wire field.
 [The telemetry layer](#124-decoding-and-encoding-telemetry-samples) covers it.
 
+### `btp::session`
+
+`btp::session` contains:
+
+```text
+session.cpp
+```
+
+It links `btp::messages` (for `MessageError` and the shared enums) and, like
+it, needs no mbedtls and is always built. Same guarantees as the rest of the
+library, plus one more: it holds no clock — the deduplication cache is
+boot-scoped with no time-based expiry.
+
+It is `btp::DedupCache`: the bounded, caller-owned command-deduplication cache
+of [Commands and discovery §2.5–2.6](commands.md#25-command-deduplication). An
+executor feeds it each `COMMAND_REQUEST` identity and it says whether to
+execute, replay a stored `COMMAND_RESULT`, or reject a conflict.
+[The session layer](#13-the-session-layer) covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -168,14 +192,15 @@ Conceptually:
                      |
                  btp::messages          btp::aead
                      ^                      |
-                     |                      v
-                 btp::telemetry         mbedcrypto
+              +------+------+               v
+              |             |          mbedcrypto
+        btp::telemetry  btp::session
 ```
 
-`btp::messages` links `btp::codec`; `btp::telemetry` links `btp::messages`;
-`btp::aead` additionally links mbedcrypto. Encryption is therefore optional at
-build time, and the basic frame codec requires neither the payload layer nor
-the cryptographic component.
+`btp::messages` links `btp::codec`; `btp::telemetry` and `btp::session` each
+link `btp::messages`; `btp::aead` additionally links mbedcrypto. Encryption is
+therefore optional at build time, and the basic frame codec requires neither
+the payload layer nor the cryptographic component.
 
 ---
 
@@ -1354,8 +1379,8 @@ BTP_ENABLE_AEAD
 
 allows applications that do not use BTP encryption to build the codec without the crypto dependency.
 
-`btp::codec`, `btp::messages` and `btp::telemetry` have no build option: they
-have no external dependency and are always built.
+`btp::codec`, `btp::messages`, `btp::telemetry` and `btp::session` have no
+build option: they have no external dependency and are always built.
 
 ---
 
@@ -1789,9 +1814,12 @@ SESSION_CLOSE / SESSION_CLOSE_RESULT
 and `btp::negotiate()` computes the effective limits from two `HELLO`s
 (the peer-to-peer minimum; a gateway clamps further for its path).
 
-It does **not** run the session: the lifetime, the inactivity watchdog, the
-`console`↔`protocol` transition on serial, and the rule that command
-deduplication outlives a session are the integration's state to keep.
+It does **not** run the session: the lifetime, the inactivity watchdog and the
+`console`↔`protocol` transition on serial are the integration's state to keep.
+The one piece of stateful session machinery the library *does* provide is
+`btp::DedupCache` ([§13](#13-the-session-layer)) — and it is built boot-scoped
+precisely because [command deduplication outlives a
+session](session-and-terminal.md#53-session-loss-and-command-deduplication).
 
 ---
 
@@ -1838,16 +1866,19 @@ What is still the integration's:
 
 ---
 
-### 11.4 Command execution and deduplication are above the payload layer
+### 11.4 Command *execution* is above the payload layer
 
 `btp::messages` encodes and decodes `COMMAND_REQUEST` / `COMMAND_RESULT`,
 including the request reference that correlates a result to its request.
+`btp::DedupCache` ([§13](#13-the-session-layer)) keeps the bounded
+`(request_source_id, request_boot_id, request_sequence)` cache and applies the
+retransmission and conflict rules of
+[Commands and discovery §2.5–2.6](commands.md#25-command-deduplication).
 
-It does **not** execute an action, keep the deduplication cache, or track
-command state. The `(request_source_id, request_boot_id, request_sequence)`
-key, its bounded cache and the retransmission rules
-([Commands and discovery](commands.md#25-command-deduplication)) are the
-integration's.
+What is still the integration's: **executing the action**, **sealing and
+sending** the `COMMAND_RESULT`, and **choosing the capacities** — the cache
+takes a caller-owned slot array, one storage region per slot and a requester
+table, and never allocates.
 
 ---
 
@@ -2122,7 +2153,108 @@ two-octet prefix to re-supply; `schema_version()` then returns 0.
 
 ---
 
-## 13. Putting the library together
+## 13. The session layer
+
+`btp::session` (`btp/session.hpp`, target `btp::session`) holds the stateful
+session machinery that `btp::messages` deliberately leaves out. Its first
+member is the one whose absence is a safety hazard rather than a parsing
+inconvenience: **`btp::DedupCache`**, the command-deduplication cache of
+[Commands and discovery §2.5–2.6](commands.md#25-command-deduplication) and
+[Session and terminal §5.3](session-and-terminal.md#53-session-loss-and-command-deduplication).
+
+The problem it removes: a requester sends `COMMAND_REQUEST` "fire", the
+`COMMAND_RESULT` is lost, the requester retransmits the identical request. An
+executor that does not remember it fires twice. The rule is that the executor
+keeps the request identity
+`(request_source_id, request_boot_id, request_sequence)` and the
+`COMMAND_RESULT` it produced, replays that result on a retransmission, and
+rejects a *different* request that reuses the identity.
+
+### 13.1 The contract
+
+Same guarantees as the rest of the library, plus **no clock**: the cache is
+scoped to the executor boot with no time-based expiry
+([commands.md §2.6](commands.md#26-deduplication-capacity)), so it needs no
+time source (unlike `btp::Reassembler`). It never allocates — the caller owns:
+
+* a `btp::DedupSlot` array — one entry per tracked command;
+* a `btp::DedupStorage` region per slot — holds the request verbatim, then the
+  `COMMAND_RESULT` after it;
+* a `btp::DedupRequester` table — one row per `(source_id, boot_id)` device,
+  carrying the sequence high-water marks that make eviction safe.
+
+### 13.2 Using it
+
+```cpp
+btp::DedupSlot slots[16];
+std::uint8_t bytes[16][768];
+btp::DedupStorage storage[16];
+for (std::size_t i = 0; i < 16; ++i) storage[i] = {bytes[i], sizeof(bytes[i])};
+btp::DedupRequester requesters[4];
+btp::DedupCache cache(slots, storage, 16, requesters, 4);
+
+// on a COMMAND_REQUEST (payload is the reassembled, opened logical request):
+btp::DedupKey key{header.source_id, header.boot_id, header.sequence};
+std::size_t slot = 0;
+btp::ByteView stored{};
+switch (cache.classify(key, payload.data, payload.size, &slot, &stored)) {
+    case btp::DedupVerdict::Fresh:
+        run_action(payload);                       // execute exactly once
+        encode_command_result(/* ... */ result, &n);
+        cache.record_result(slot, result, n);
+        send(result, n);
+        break;
+    case btp::DedupVerdict::DuplicateComplete:     // replay, do not execute
+        send(stored.data, stored.size);
+        break;
+    case btp::DedupVerdict::DuplicateInFlight:     // first copy still running
+        break;                                     // drop; the peer will retry
+    case btp::DedupVerdict::Conflict:              // same identity, other bytes
+        send_reject(REJECTED, REQUEST_CONFLICT);
+        break;
+    case btp::DedupVerdict::Evicted:               // handled, result aged out
+    case btp::DedupVerdict::CapacityExhausted:
+        send_reject(BUSY, CAPACITY_EXHAUSTED);
+        break;
+    case btp::DedupVerdict::InvalidArgument:
+        break;
+}
+```
+
+`record_result` turns a `Fresh` slot into a completed one; `release` frees a
+`Fresh` slot whose execution was abandoned; `clear` drops everything (test
+isolation — a running executor never calls it).
+
+### 13.3 The ring and the high-water mark
+
+The cache is bounded, so a fresh identity arriving with every slot full evicts
+the **oldest completed** entry — the executor keeps working past its slot count
+rather than wedging. Eviction is made safe by the requester table: each row
+remembers the highest sequence **evicted** for that device, and a later lookup
+whose sequence is at or below that mark, and which is no longer in a slot,
+returns `Evicted` — the caller answers `BUSY / CAPACITY_EXHAUSTED` and **never
+re-executes**. A well-behaved requester's sequence only increases, so this
+never misfires on a genuinely new command; a replayed old sequence is
+conservatively rejected, which is the safe direction for command traffic.
+
+A new `boot_id` from a known `source_id` reuses that device's row (its old boot
+is gone, and [a command for a stale boot is rejected
+anyway](commands.md#22-target-boot-validation)). A requester table full of
+*distinct* devices returns `CapacityExhausted` for a new one rather than risk
+an unprotected identity.
+
+### 13.4 What stays out
+
+The session inactivity watchdog ([Session and terminal
+§5](session-and-terminal.md#5-the-watchdog)) is the obvious next inhabitant of
+this header and is **not** here yet — it needs a clock and a state machine.
+Executing the action and sealing/sending the `COMMAND_RESULT` are the
+integration's, as [§11.4](#114-command-execution-is-above-the-payload-layer)
+says.
+
+---
+
+## 14. Putting the library together
 
 A typical unencrypted transmit path is:
 
@@ -2225,7 +2357,7 @@ through `btp::messages` (§12).
 
 ---
 
-## 14. Summary
+## 15. Summary
 
 The BTP reference library implements the wire:
 

@@ -294,7 +294,7 @@ For a non-success status, the result body is empty unless explicitly defined oth
 
 ### 2.5 Command deduplication
 
-`btp::messages` encodes and decodes `COMMAND_REQUEST` / `COMMAND_RESULT` and the request reference that correlates them, but the deduplication cache below is the integration's state, not the library's ([Using the library §11.4](library.md#114-command-execution-and-deduplication-are-above-the-payload-layer)).
+`btp::messages` encodes and decodes `COMMAND_REQUEST` / `COMMAND_RESULT` and the request reference that correlates them; the reference library also implements the cache described below as `btp::DedupCache` ([Using the library §13](library.md#13-the-session-layer)). Executing the action and sending the result stay the integration's ([§11.4](library.md#114-command-execution-is-above-the-payload-layer)).
 
 Command requests are deduplicated using the request identity:
 

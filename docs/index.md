@@ -18,7 +18,8 @@ is correct. They ship as one version.
 | Wire `version == 0x02` (AEAD payload) | Specified, implemented in `btp::aead` with two ciphers, covered by `test-vectors/v2/`. |
 | `COMMAND` / `CONTROL` payload layout | Specified, implemented in `btp::messages`, covered by `test-vectors/v2/messages/`. |
 | `TELEMETRY` sample body | Specified, implemented in `btp::telemetry` (`PACKED_LE` / `TLV_LE` against a schema), covered by `test-vectors/v2/telemetry/`. |
-| Library | `2.5.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
+| Command deduplication | Specified, implemented in `btp::session` (`btp::DedupCache`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
+| Library | `2.6.0` in `CMakeLists.txt`, `library.json` and `btp::kLibraryVersion*`. |
 | Latest published tag | `v2.5.0` on `main` (wire `0x02`); `v1.1.0-beta` on the `1.x` line. |
 | Branch `1.x` | The wire `0x01` line, kept alive there after `main` moved on to wire `0x02`. |
 
@@ -57,7 +58,7 @@ finished when it produces and consumes the same octets as the vectors.
 | [Telemetry payloads](telemetry.md) | Topics, schemas, encodings, and how a client binds a field. |
 | [Commands and discovery](commands.md) | Requests, results, deduplication, the manifest, subscriptions, status. |
 | [Session and terminal](session-and-terminal.md) | `HELLO`, session lifetime, the opaque terminal, priority under load. |
-| [Using the library](library.md) | The API, `btp::messages`, guarantees, build, vectors, versioning, known limits. |
+| [Using the library](library.md) | The API, `btp::messages`, `btp::telemetry`, `btp::DedupCache`, guarantees, build, vectors, versioning, known limits. |
 
 ## Scope
 

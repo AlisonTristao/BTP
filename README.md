@@ -10,7 +10,7 @@ This repository is the canonical source of three things that ship as one
 version: the wire specification, the C++11 library that implements it, and the
 binary vectors that prove an implementation is correct.
 
-> **You are on `main`** — the wire `version == 0x02` line, library `2.5.0`.
+> **You are on `main`** — the wire `version == 0x02` line, library `2.6.0`.
 > The wire v1 line is maintained on branch
 > [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x). See
 > [Versioning and branches](#versioning-and-branches).
@@ -90,12 +90,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Four targets: **`btp::codec`** (envelope, fragmentation, COBS) has zero
+Five targets: **`btp::codec`** (envelope, fragmentation, COBS) has zero
 dependencies. **`btp::messages`** (the `COMMAND` / `CONTROL` payload layouts)
 links `btp::codec` and nothing else. **`btp::telemetry`** (a `TELEMETRY` sample
-against a schema — `PACKED_LE` / `TLV_LE`) links `btp::messages`. **`btp::aead`**
-(wire v2 encryption) links mbedcrypto and is behind `-DBTP_ENABLE_AEAD=OFF` if
-you do not want it.
+against a schema — `PACKED_LE` / `TLV_LE`) and **`btp::session`**
+(`btp::DedupCache`, the command-deduplication cache) each link `btp::messages`.
+**`btp::aead`** (wire v2 encryption) links mbedcrypto and is behind
+`-DBTP_ENABLE_AEAD=OFF` if you do not want it.
 
 To consume it as an installed package:
 
@@ -144,7 +145,7 @@ vector is changing the contract.
 ## Layout
 
 ```text
-include/btp/    codec, fragmentation, stream, messages, telemetry, aead
+include/btp/    codec, fragmentation, stream, messages, telemetry, session, aead
 src/            the implementation
 tests/          host suites plus an embedded compile target
 test-vectors/   canonical vectors: wire v1, wire v2, message and telemetry payloads
@@ -165,7 +166,7 @@ is cut to an `N.x` branch and maintained there:
 
 | Branch | Wire | Line |
 | --- | --- | --- |
-| `main` | `0x02` | Current development, library `2.5.0` — **this branch** |
+| `main` | `0x02` | Current development, library `2.6.0` — **this branch** |
 | [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) | `0x01` | Maintenance of the wire v1 line, released as `v1.1.0-beta` |
 
 If a wire v3 ever arrives, a `2.x` branch is cut from the `main` of that
@@ -179,14 +180,14 @@ They do not mix:
 | Concept | Example | What it is |
 | --- | --- | --- |
 | Wire version | `wire 0x02` | The octet at offset 4 of the header |
-| Release | `v2.5.0` | The git tag over spec, library and vectors. Library layer added without a wire change: `btp::messages` in `2.2.0`, its verbatim relay path in `2.3.0`, `btp::telemetry` (the `PACKED_LE` / `TLV_LE` sample body) in `2.4.0`, its body-only reader/writer mode in `2.5.0` |
+| Release | `v2.6.0` | The git tag over spec, library and vectors. Library layer added without a wire change: `btp::messages` in `2.2.0`, its verbatim relay path in `2.3.0`, `btp::telemetry` (the `PACKED_LE` / `TLV_LE` sample body) in `2.4.0`, its body-only reader/writer mode in `2.5.0`, `btp::session` (`btp::DedupCache`) in `2.6.0` |
 | Branch | `1.x` | Holds the previous major; `main` holds the newest |
-| Library | `2.5.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
+| Library | `2.6.0` | `CMakeLists.txt`, `library.json`, `kLibraryVersion*` |
 
 Never write "BTP v1" unqualified — it is ambiguous between three of those.
 
 A pre-release suffix belongs to the line that is still settling, not to `main`:
-the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.5.0`.
+the `1.x` line published `v1.1.0-beta`, while `main` declares a plain `2.6.0`.
 Note that only `library.json` can spell a suffix at all — CMake's
 `project(VERSION)` is numeric-only and `kLibraryVersion*` are three `uint8`.
 
