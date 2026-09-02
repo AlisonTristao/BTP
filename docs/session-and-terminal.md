@@ -14,7 +14,7 @@ The session begins with `HELLO` / `HELLO_RESULT` and ends through `SESSION_CLOSE
 
 The terminal channel operates inside an established session but remains logically separate from telemetry, commands and control traffic.
 
-The reference library's `btp::messages` encodes and decodes the `HELLO`, `HELLO_RESULT`, `SESSION_CLOSE` and `SESSION_CLOSE_RESULT` payloads and computes the effective limits (`btp::negotiate`), but it does not run the session -- the lifetime, the watchdog and the serial `console`↔`protocol` transition are the integration's ([Using the library §11.1](library.md#111-the-session-state-machine-is-not-implemented)). The one stateful session mechanism the library does provide is `btp::DedupCache`, the command-deduplication cache ([§5.3](#53-session-loss-and-command-deduplication), [Using the library §13](library.md#13-the-session-layer)).
+The reference library's `btp::messages` encodes and decodes the `HELLO`, `HELLO_RESULT`, `SESSION_CLOSE` and `SESSION_CLOSE_RESULT` payloads and computes the effective limits (`btp::negotiate`); `btp::Session` runs the **responder** state machine on top -- the `HELLO` → active lifetime, the inactivity watchdog and the fall back to console on close or timeout. The **initiator** side (sending `ENTER` / `HELLO`, awaiting `HELLO_RESULT`) and the plain-ASCII serial `console`↔`protocol` text stay the integration's ([Using the library §11.1](library.md#111-the-session-state-machine)). Command deduplication is a separate library mechanism again, `btp::DedupCache` ([§5.3](#53-session-loss-and-command-deduplication), [Using the library §13](library.md#13-the-session-layer)).
 
 ---
 

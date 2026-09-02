@@ -2,8 +2,10 @@
 #define BTP_SESSION_HPP
 
 // The stateful half of a BTP session -- the mechanisms docs/library.md
-// chapter 11 keeps *above* btp::messages because they carry state, starting
-// with the one that matters most for safety: command deduplication.
+// chapter 11 keeps *above* btp::messages because they carry state: command
+// deduplication (btp::DedupCache) and the session lifecycle / inactivity
+// watchdog (btp::Session). This header starts with the one that matters most
+// for safety: command deduplication.
 //
 // btp::messages turns a COMMAND_REQUEST / COMMAND_RESULT payload into a struct
 // and back. It does not remember that it saw a request. docs/commands.md
@@ -29,13 +31,20 @@
 // It adds no wire field: every rule it implements is already in the book.
 // This is library 2.6.0 territory.
 //
-// OUT of scope, on purpose (docs/library.md chapter 11 still applies):
+// OUT of scope for btp::DedupCache, on purpose (docs/library.md chapter 11
+// still applies):
 //   * executing the action, and sealing / sending the COMMAND_RESULT -- the
 //     integration owns the transport and the executor;
-//   * the session inactivity watchdog (docs/session-and-terminal.md chapter 5)
-//     -- a future inhabitant of this header;
 //   * choosing the capacities -- the caller sizes the slot array, the per-slot
 //     storage and the requester table for its own deployment.
+//
+// btp::Session, at the end of this header, is the second inhabitant: the
+// session lifecycle and the inactivity watchdog (docs/session-and-terminal.md
+// chapters 3-5, 9). It wraps btp::negotiate / the HELLO_RESULT and
+// SESSION_CLOSE_RESULT encoders and adds the responder state machine. Library
+// 2.9.0 territory. What it does NOT do: the initiator side (sending ENTER /
+// HELLO and awaiting HELLO_RESULT), the plain-ASCII console<->protocol text on
+// serial, and the priority scheduler -- all the integration's.
 
 #include "btp/codec.hpp"     // ByteView
 #include "btp/messages.hpp"  // MessageError
@@ -272,6 +281,200 @@ private:
     std::uint32_t tick_;
     bool valid_;
     Stats stats_;
+};
+
+// ===========================================================================
+// The session state machine (docs/session-and-terminal.md chapters 3-5, 9)
+// ===========================================================================
+//
+// btp::messages already turns HELLO / HELLO_RESULT / SESSION_CLOSE /
+// SESSION_CLOSE_RESULT into structs and back and computes the effective limits
+// (btp::negotiate). It does not *run* the session: the lifetime, the
+// inactivity watchdog and the console<->protocol transition were the
+// integration's to keep, hand-rolled once per consumer.
+//
+// btp::Session is the responder half of that state machine, with the same
+// guarantees as the rest of the library, plus one it shares with
+// btp::Reassembler: it takes a clock reading, it does not read a clock. Every
+// call that cares about time takes a `now_ms` the caller fills from its own
+// monotonic millisecond source -- millis() / esp_timer_get_time()/1000 on an
+// MCU, QElapsedTimer::elapsed() under Qt, a plain counter in a test. The
+// object only ever computes `now_ms >= deadline`; it never includes <ctime>.
+//
+//   Session on serial:   Idle --arm()--> AwaitingHello --HELLO--> Active
+//                          ^                   |                     |
+//                          | timeout / reject  | HELLO deadline      | SESSION_CLOSE,
+//                          +-------------------<+  or watchdog        | watchdog, reset()
+//                          +--------------------------------------<---+
+//
+// A transport with no console phase (ESP-NOW, USB HID) starts the same way,
+// calling arm() on link-up instead of after a console ENTER line.
+//
+// OUT of scope, on purpose:
+//   * the initiator side -- sending ENTER / HELLO, the retry budget, awaiting
+//     HELLO_RESULT (a desktop tool's job; a future btp::SessionInitiator);
+//   * the plain-ASCII "BTP/1 ENTER|READY|CONSOLE" console text on serial
+//     (docs/session-and-terminal.md sections 3-4) -- link framing, above this;
+//   * routing an accepted frame by object_id, the priority scheduler, and the
+//     STATUS counters -- all the integration's.
+
+enum class SessionState : std::uint8_t {
+    Idle,           // no session. on_frame() ignores frames -- a serial
+                    // "console", or a link not yet armed. arm() leaves this.
+    AwaitingHello,  // armed: the HELLO deadline runs, awaiting the peer's HELLO.
+    Active,         // HELLO_RESULT SUCCESS sent; the inactivity watchdog runs.
+};
+
+const char* session_state_string(SessionState state) noexcept;
+
+enum class SessionEvent : std::uint8_t {
+    None,           // nothing to do: a stray frame in Idle, or a non-HELLO
+                    // frame while AwaitingHello (which does NOT renew the
+                    // deadline -- "no message before HELLO").
+    HelloAccepted,  // *reply_out is HELLO_RESULT SUCCESS; state is now Active.
+    HelloRejected,  // *reply_out is HELLO_RESULT UNSUPPORTED (malformed HELLO
+                    // or no common version); state is back to Idle.
+    FrameAccepted,  // a valid frame renewed the watchdog; the caller routes it
+                    // by object_id. No reply.
+    SessionClosed,  // *reply_out is SESSION_CLOSE_RESULT; state is back to Idle.
+    TimedOut,       // the HELLO deadline (AwaitingHello) or the negotiated
+                    // session_timeout_ms (Active) expired; state is back to
+                    // Idle. Reported once. No reply.
+    Abandoned,      // reset() tore down a live session; state is Idle. Reported
+                    // once. No reply -- nobody is left to receive one.
+};
+
+const char* session_event_string(SessionEvent event) noexcept;
+
+// The largest reply on_frame() writes is HELLO_RESULT: 52 octets
+// (docs/session-and-terminal.md section 2). SESSION_CLOSE_RESULT is 16. Size
+// the reply_out buffer for the maximum.
+static const std::size_t kSessionMaxReplySize = 52U;
+
+struct SessionOutcome {
+    SessionEvent event;
+    // Octets written to reply_out. Non-zero only for HelloAccepted,
+    // HelloRejected and SessionClosed.
+    std::size_t reply_size;
+};
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+//
+//   btp::Hello local{};
+//   local.role = static_cast<std::uint8_t>(btp::Role::Producer);
+//   local.version_count = 1; local.versions[0] = 1;
+//   local.max_logical_payload = 2048;
+//   local.max_inflight_reassemblies = 1;
+//   local.max_subscriptions = 8;
+//   local.max_dedup_entries = 32;
+//   local.session_timeout_ms = 30000;
+//   std::memcpy(local.peer_uuid, my_uuid, 16);
+//   local.config_revision = manifest_revision;
+//
+//   btp::Session session(local, /*hello_deadline_ms=*/2000);
+//
+//   session.arm(now_ms());                        // after the console ENTER line
+//
+//   // per decoded frame (from btp::decode / btp::Receiver):
+//   std::uint8_t reply[btp::kSessionMaxReplySize];
+//   btp::SessionOutcome o =
+//       session.on_frame(frame, now_ms(), reply, sizeof(reply));
+//   switch (o.event) {
+//       case btp::SessionEvent::HelloAccepted:
+//       case btp::SessionEvent::HelloRejected:
+//       case btp::SessionEvent::SessionClosed: send(reply, o.reply_size); break;
+//       case btp::SessionEvent::FrameAccepted: route(frame);               break;
+//       default: break;
+//   }
+//
+//   // from the main loop / a timer:
+//   if (session.poll(now_ms()).event == btp::SessionEvent::TimedOut)
+//       back_to_console();
+//
+// on_frame() and poll() are not internally synchronised -- a caller that runs
+// RX and the timer on different threads wraps them in its own critical
+// section, the same way btp::Reassembler expects a single consumer.
+
+class Session {
+public:
+    // `local` is this peer's own HELLO advertisement -- role, announced
+    // versions, announced limits, peer_uuid, config_revision. btp::negotiate()
+    // mins its limits against the remote HELLO; the HELLO_RESULT reply reuses
+    // its peer_uuid and config_revision. Copied in -- the caller need not keep
+    // it alive.
+    //
+    // `hello_deadline_ms` is how long AwaitingHello waits for the peer's HELLO
+    // (docs/session-and-terminal.md section 5.1: 2000 for a serial console; a
+    // transport with no such bound passes a large value). 0 disables the HELLO
+    // deadline entirely -- only the negotiated session watchdog then applies.
+    Session(const Hello& local, std::uint64_t hello_deadline_ms) noexcept;
+
+    // True when `local` is a well-formed HELLO (a valid role, 1..8 ascending
+    // non-zero versions, non-zero limits, non-zero uuid). A false here means
+    // every HELLO will be rejected -- check it once at start-up.
+    bool valid() const noexcept;
+
+    SessionState state() const noexcept;
+    bool active() const noexcept;   // state() == SessionState::Active
+
+    // Meaningful once a HELLO has been accepted (state() has reached Active at
+    // least once). Before that, zero-initialised.
+    const EffectiveLimits& effective_limits() const noexcept;
+    std::uint32_t peer_source_id() const noexcept;
+    std::uint32_t peer_boot_id() const noexcept;
+
+    // Idle -> AwaitingHello, arming the HELLO deadline at now_ms. A serial
+    // integration calls this once it has answered the console ENTER line; a
+    // transport with no console phase calls it when the link comes up. A no-op
+    // in any other state -- call reset() first to re-arm a live session.
+    void arm(std::uint64_t now_ms) noexcept;
+
+    // Feed every frame btp::decode() / btp::Receiver accepted. `frame` must be
+    // a fully decoded envelope -- a CRC or COBS failure never reaches here and
+    // must not renew the watchdog (docs section 5.2). Expiry is checked first
+    // (like btp::Receiver::submit sweeping timeouts), so a frame that arrives
+    // after the deadline is reported as TimedOut and dropped. In Active, any
+    // valid frame renews the watchdog before it is classified.
+    //
+    // reply_out / reply_capacity receive HELLO_RESULT or SESSION_CLOSE_RESULT
+    // when the event carries one; size reply_out >= kSessionMaxReplySize. A
+    // reply that will not fit leaves the state unchanged and returns None.
+    SessionOutcome on_frame(const DecodedFrame& frame, std::uint64_t now_ms,
+                            std::uint8_t* reply_out,
+                            std::size_t reply_capacity) noexcept;
+
+    // Call from the main loop or a timer. Returns TimedOut exactly once when
+    // the HELLO deadline (AwaitingHello) or the negotiated session_timeout_ms
+    // (Active) has passed at now_ms; None otherwise. The cadence of poll()
+    // only bounds how late a dead session is noticed -- 100..500 ms is ample
+    // against a 2 s / 30 s deadline.
+    SessionOutcome poll(std::uint64_t now_ms) noexcept;
+
+    // The underlying transport is gone (serial DTR dropped, an ESP-NOW peer
+    // forgotten), or a deliberate teardown. Returns Abandoned once if a
+    // session was live (AwaitingHello or Active), None otherwise. Produces no
+    // reply. Doubles as test isolation.
+    SessionOutcome reset() noexcept;
+
+private:
+    SessionOutcome check_expiry(std::uint64_t now_ms) noexcept;
+    std::size_t build_hello_result(const Header& request, bool success,
+                                   std::uint8_t* out,
+                                   std::size_t capacity) noexcept;
+    std::size_t build_session_close_result(const Header& request, bool parsed,
+                                           std::uint8_t* out,
+                                           std::size_t capacity) noexcept;
+
+    Hello local_;
+    EffectiveLimits effective_;
+    SessionState state_;
+    std::uint64_t hello_deadline_ms_;
+    std::uint64_t deadline_ms_;
+    std::uint32_t peer_source_id_;
+    std::uint32_t peer_boot_id_;
+    bool valid_;
 };
 
 }  // namespace btp

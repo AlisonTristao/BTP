@@ -153,16 +153,20 @@ schema the caller already holds: `SampleReader` / `SampleWriter` for the
 session.cpp
 ```
 
-It links `btp::messages` (for `MessageError` and the shared enums) and, like
-it, needs no mbedtls and is always built. Same guarantees as the rest of the
-library, plus one more: it holds no clock — the deduplication cache is
-boot-scoped with no time-based expiry.
+It links `btp::messages` (for `MessageError`, `btp::negotiate` and the shared
+enums) and, like it, needs no mbedtls and is always built. Same guarantees as
+the rest of the library.
 
-It is `btp::DedupCache`: the bounded, caller-owned command-deduplication cache
-of [Commands and discovery §2.5–2.6](commands.md#25-command-deduplication). An
-executor feeds it each `COMMAND_REQUEST` identity and it says whether to
-execute, replay a stored `COMMAND_RESULT`, or reject a conflict.
-[The session layer](#13-the-session-layer) covers it.
+It has two members. `btp::DedupCache` is the bounded, caller-owned
+command-deduplication cache of [Commands and discovery
+§2.5–2.6](commands.md#25-command-deduplication): an executor feeds it each
+`COMMAND_REQUEST` identity and it says whether to execute, replay a stored
+`COMMAND_RESULT`, or reject a conflict — and it holds **no clock** (boot-scoped,
+no time-based expiry). `btp::Session` is the responder state machine of
+[Session and terminal §3–5](session-and-terminal.md#3-entering-protocol-mode-on-serial):
+`HELLO` negotiation, `SESSION_CLOSE`, and the inactivity watchdog — it takes a
+`now_ms` reading on every timed call, the same way `btp::Reassembler` does, but
+reads no clock itself. [The session layer](#13-the-session-layer) covers both.
 
 ### `btp::endpoint`
 
@@ -1845,7 +1849,7 @@ on its own.
 
 ---
 
-### 11.1 The session state machine is not implemented
+### 11.1 The session state machine
 
 `btp::messages` encodes and decodes:
 
@@ -1857,15 +1861,17 @@ SESSION_CLOSE / SESSION_CLOSE_RESULT
 and `btp::negotiate()` computes the effective limits from two `HELLO`s
 (the peer-to-peer minimum; a gateway clamps further for its path).
 
-It does **not** run the session: the lifetime, the inactivity watchdog and the
-`console`↔`protocol` transition on serial are the integration's state to keep.
-`btp::Endpoint` ([§14](#14-the-endpoint-layer)) holds the transmit-side half a
-session needs — the `(source_id, boot_id)` identity and the outgoing sequence
-counter — but not the negotiation or the watchdog that decide *when* that
-identity is allowed to send. The one piece of stateful *receive*-side session
-machinery the library provides is `btp::DedupCache` ([§13](#13-the-session-layer))
-— and it is built boot-scoped precisely because [command deduplication outlives
-a session](session-and-terminal.md#53-session-loss-and-command-deduplication).
+`btp::Session` ([§13.5](#135-the-session-state-machine-btpsession)) runs the
+**responder** half on top of that: the `AwaitingHello` → `Active` lifetime, the
+inactivity watchdog and the fall back to `Idle` on close, timeout or transport
+loss. It does **not** run the **initiator** half — sending `ENTER` / `HELLO`,
+the retry budget and awaiting `HELLO_RESULT` are a desktop tool's, and so is
+the plain-ASCII `console`↔`protocol` text on serial and the priority scheduler.
+`btp::Endpoint` ([§14](#14-the-endpoint-layer)) holds the transmit-side
+identity and sequence counter a session's replies ride on, but not the
+negotiation that decides *when* that identity may send. Command deduplication
+is separate again — `btp::DedupCache` is boot-scoped precisely because [it
+outlives a session](session-and-terminal.md#53-session-loss-and-command-deduplication).
 
 ---
 
@@ -2289,14 +2295,88 @@ anyway](commands.md#22-target-boot-validation)). A requester table full of
 *distinct* devices returns `CapacityExhausted` for a new one rather than risk
 an unprotected identity.
 
-### 13.4 What stays out
+### 13.4 What stays out of the cache
 
-The session inactivity watchdog ([Session and terminal
-§5](session-and-terminal.md#5-the-watchdog)) is the obvious next inhabitant of
-this header and is **not** here yet — it needs a clock and a state machine.
 Executing the action and sealing/sending the `COMMAND_RESULT` are the
 integration's, as [§11.4](#114-command-execution-is-above-the-payload-layer)
 says.
+
+---
+
+### 13.5 The session state machine (`btp::Session`)
+
+`btp::messages` already turns `HELLO` / `HELLO_RESULT` / `SESSION_CLOSE` /
+`SESSION_CLOSE_RESULT` into structs and back and computes the effective limits
+([`btp::negotiate`](#111-the-session-state-machine)). It does not *run* the
+session: the lifetime, the inactivity watchdog ([Session and terminal
+§5](session-and-terminal.md#5-the-watchdog)) and the `console`↔`protocol`
+transition on serial were the integration's to keep, hand-rolled once per
+consumer.
+
+`btp::Session` is the **responder** half of that state machine —
+the peer that *receives* `HELLO`, not the desktop tool that sends it.
+
+```text
+Idle  --arm(now)-->  AwaitingHello  --valid HELLO-->  Active
+  ^                        |                            |
+  |  HELLO deadline,       |  no common version,        |  SESSION_CLOSE,
+  |  reject, reset()       |  malformed HELLO           |  watchdog, reset()
+  +------------------------+----------------------------+
+```
+
+Same guarantees as the rest of the library, plus the one `btp::Reassembler`
+also has: **it takes a clock reading, it does not read a clock.** Every call
+that cares about time takes a `now_ms` the caller fills from its own monotonic
+millisecond source — `millis()` or `esp_timer_get_time() / 1000` on an MCU,
+`QElapsedTimer::elapsed()` under Qt, a plain counter in a test. `btp::Session`
+only ever computes `now_ms >= deadline`; it never includes `<ctime>`.
+
+```cpp
+btp::Hello local{};
+local.role = static_cast<std::uint8_t>(btp::Role::Producer);
+local.version_count = 1; local.versions[0] = 1;
+local.max_logical_payload = 2048;
+local.max_inflight_reassemblies = 1;
+local.max_subscriptions = 8;
+local.max_dedup_entries = 32;
+local.session_timeout_ms = 30000;
+std::memcpy(local.peer_uuid, my_uuid, 16);
+local.config_revision = manifest_revision;
+
+btp::Session session(local, /*hello_deadline_ms=*/2000);  // 2000: serial §5.1
+
+session.arm(now_ms());                    // after answering the console ENTER line
+
+// per decoded frame, from btp::decode() / btp::Receiver:
+std::uint8_t reply[btp::kSessionMaxReplySize];
+btp::SessionOutcome o = session.on_frame(frame, now_ms(), reply, sizeof(reply));
+switch (o.event) {
+    case btp::SessionEvent::HelloAccepted:
+    case btp::SessionEvent::HelloRejected:
+    case btp::SessionEvent::SessionClosed:  send(reply, o.reply_size); break;
+    case btp::SessionEvent::FrameAccepted:  route(frame);              break;
+    default: break;
+}
+
+// from the main loop or a timer:
+if (session.poll(now_ms()).event == btp::SessionEvent::TimedOut)
+    back_to_console();
+```
+
+`on_frame()` sweeps the deadline first (like `btp::Receiver::submit` sweeping
+timeouts), so a frame that arrives after the deadline is a `TimedOut`, not a
+renewal. Once `Active`, *any* valid frame renews the watchdog before its object
+is looked at — `SESSION_CLOSE` is handled here, everything else comes back as
+`FrameAccepted` for the caller to route. A transport with no console phase
+(ESP-NOW, USB HID) calls `arm()` on link-up instead of after an ENTER line;
+`hello_deadline_ms = 0` disables the initial deadline entirely.
+
+**What stays out:** the **initiator** side — sending `ENTER` / `HELLO`, the
+retry budget, awaiting `HELLO_RESULT` (a desktop tool's job; a future
+`btp::SessionInitiator`); the plain-ASCII `BTP/1 ENTER|READY|CONSOLE` console
+text on serial ([§3–4](session-and-terminal.md#3-entering-protocol-mode-on-serial),
+link framing above this layer); and routing an accepted frame by `object_id`,
+the priority scheduler and the `STATUS` counters — all the integration's.
 
 ---
 
@@ -2388,9 +2468,10 @@ routing decision on top of a completed message stays the integration's: a hub
 relays an unrecognised frame by default, an endpoint drops it. Link **framing**
 (COBS, HID report padding, ESP-NOW datagram boundaries) is `btp::stream`'s or
 the transport's, applied to the bytes the send callback receives. The
-**session state machine** — HELLO negotiation, the watchdog, the
-console↔protocol transition — stays the integration's
-([§11.1](#111-the-session-state-machine-is-not-implemented)).
+**session** a reply rides in — `HELLO` negotiation and the watchdog — is
+`btp::Session` ([§13.5](#135-the-session-state-machine-btpsession)) on the
+responder, but the initiator side and the serial console↔protocol text stay
+the integration's ([§11.1](#111-the-session-state-machine)).
 
 ---
 
@@ -2536,7 +2617,10 @@ higher-level BTP payload handling
 `btp::Receiver` ([§15](#15-the-receive-layer)) is the `decode()` and
 `Reassembler::push()` steps bundled behind one `submit()`, with the timeout
 sweep and the `STATUS` counters; `aead_open()` and the routing switch stay the
-caller's.
+caller's. On the responder, each decoded frame also goes to `btp::Session`
+([§13.5](#135-the-session-state-machine-btpsession)), which runs the `HELLO`
+handshake, renews the inactivity watchdog and answers `SESSION_CLOSE` before
+the routing switch sees the frame.
 
 For serial:
 
@@ -2589,6 +2673,7 @@ optional AEAD
 COMMAND / CONTROL payload layout      (btp::messages)
 identity, sequencing, transmit path   (btp::endpoint)
 decode + CRC + reassembly path        (btp::receiver)
+session lifecycle + inactivity watchdog, responder side   (btp::session)
 ```
 
 It deliberately does not own the surrounding application.
@@ -2602,11 +2687,9 @@ manifest catalogue storage
 
 telemetry schema interpretation
 
-the session state machine and watchdog
+the session initiator (sending ENTER / HELLO) and the serial console text
 
 command execution
-
-the command deduplication cache
 
 the subscription aggregator
 

@@ -128,6 +128,47 @@ void setup() {
                          &dedup_result);
     dedup.clear();
 
+    // btp::Session compiles and links on the embedded target: the responder
+    // state machine and the inactivity watchdog, driven by a caller-supplied
+    // now_ms, no allocation, no exceptions, no clock of its own.
+    btp::Hello session_local = {};
+    session_local.role = static_cast<std::uint8_t>(btp::Role::Producer);
+    session_local.version_count = 1U;
+    session_local.versions[0] = 1U;
+    session_local.max_logical_payload = btp::kEspNowMaxPayloadSize;
+    session_local.max_inflight_reassemblies = 1U;
+    session_local.max_subscriptions = 4U;
+    session_local.max_dedup_entries = 8U;
+    session_local.session_timeout_ms = 30000U;
+    for (std::size_t i = 0U; i < 16U; ++i) {
+        session_local.peer_uuid[i] = static_cast<std::uint8_t>(0xC0U + i);
+    }
+    session_local.config_revision = 1U;
+
+    static btp::Session session(session_local, 2000U);
+    session.arm(0U);
+
+    std::uint8_t session_hello[64];
+    std::size_t session_hello_size = 0U;
+    (void)btp::encode_hello(session_local, session_hello, sizeof(session_hello),
+                            &session_hello_size);
+    btp::DecodedFrame session_frame = {};
+    session_frame.header.type = btp::MessageType::Control;
+    session_frame.header.source_id = 0x11111111U;
+    session_frame.header.boot_id = 0x22222222U;
+    session_frame.header.sequence = 1U;
+    session_frame.header.object_id = btp::object_id::kHello;
+    session_frame.header.fragment_count = 1U;
+    session_frame.payload.data = session_hello;
+    session_frame.payload.size = session_hello_size;
+
+    std::uint8_t session_reply[btp::kSessionMaxReplySize];
+    (void)session.on_frame(session_frame, 5U, session_reply,
+                           sizeof(session_reply));
+    (void)session.poll(10U);
+    (void)session.effective_limits();
+    (void)session.reset();
+
     // btp::endpoint compiles and links on the embedded target: identity, the
     // atomic sequence counter and the seal -> fragment -> encode pipeline, no
     // allocation, no exceptions. The send callback copies each frame into a

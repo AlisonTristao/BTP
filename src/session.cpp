@@ -321,4 +321,234 @@ const char* dedup_verdict_string(DedupVerdict verdict) noexcept {
     return "Unknown";
 }
 
+// ===========================================================================
+// Session -- the responder state machine (docs/session-and-terminal.md 3-5, 9)
+// ===========================================================================
+
+const char* session_state_string(SessionState state) noexcept {
+    switch (state) {
+        case SessionState::Idle: return "Idle";
+        case SessionState::AwaitingHello: return "AwaitingHello";
+        case SessionState::Active: return "Active";
+    }
+    return "Unknown";
+}
+
+const char* session_event_string(SessionEvent event) noexcept {
+    switch (event) {
+        case SessionEvent::None: return "None";
+        case SessionEvent::HelloAccepted: return "HelloAccepted";
+        case SessionEvent::HelloRejected: return "HelloRejected";
+        case SessionEvent::FrameAccepted: return "FrameAccepted";
+        case SessionEvent::SessionClosed: return "SessionClosed";
+        case SessionEvent::TimedOut: return "TimedOut";
+        case SessionEvent::Abandoned: return "Abandoned";
+    }
+    return "Unknown";
+}
+
+Session::Session(const Hello& local, std::uint64_t hello_deadline_ms) noexcept
+    : local_(local),
+      effective_{},
+      state_(SessionState::Idle),
+      hello_deadline_ms_(hello_deadline_ms),
+      deadline_ms_(0U),
+      peer_source_id_(0U),
+      peer_boot_id_(0U),
+      valid_(false) {
+    // "The local advertisement is a legal HELLO" is exactly what encode_hello
+    // checks -- a valid role, 1..8 ascending non-zero versions, non-zero
+    // limits, a non-zero uuid. A HELLO is at most 48 octets (40 fixed + 8
+    // versions), so a 64-byte scratch never limits the check.
+    std::uint8_t scratch[64];
+    std::size_t written = 0U;
+    valid_ = encode_hello(local_, scratch, sizeof(scratch), &written) ==
+             MessageError::Ok;
+}
+
+bool Session::valid() const noexcept { return valid_; }
+SessionState Session::state() const noexcept { return state_; }
+bool Session::active() const noexcept {
+    return state_ == SessionState::Active;
+}
+const EffectiveLimits& Session::effective_limits() const noexcept {
+    return effective_;
+}
+std::uint32_t Session::peer_source_id() const noexcept {
+    return peer_source_id_;
+}
+std::uint32_t Session::peer_boot_id() const noexcept { return peer_boot_id_; }
+
+void Session::arm(std::uint64_t now_ms) noexcept {
+    if (state_ != SessionState::Idle) {
+        return;  // re-arm a live session through reset() first
+    }
+    state_ = SessionState::AwaitingHello;
+    deadline_ms_ = now_ms + hello_deadline_ms_;
+    peer_source_id_ = 0U;
+    peer_boot_id_ = 0U;
+}
+
+SessionOutcome Session::check_expiry(std::uint64_t now_ms) noexcept {
+    if (state_ == SessionState::AwaitingHello) {
+        if (hello_deadline_ms_ != 0U && now_ms >= deadline_ms_) {
+            state_ = SessionState::Idle;
+            return SessionOutcome{SessionEvent::TimedOut, 0U};
+        }
+    } else if (state_ == SessionState::Active) {
+        // session_timeout_ms is a negotiated minimum of two non-zero announced
+        // limits, so it is non-zero once Active; the guard is defensive.
+        if (effective_.session_timeout_ms != 0U && now_ms >= deadline_ms_) {
+            state_ = SessionState::Idle;
+            return SessionOutcome{SessionEvent::TimedOut, 0U};
+        }
+    }
+    return SessionOutcome{SessionEvent::None, 0U};
+}
+
+SessionOutcome Session::poll(std::uint64_t now_ms) noexcept {
+    return check_expiry(now_ms);
+}
+
+SessionOutcome Session::reset() noexcept {
+    if (state_ == SessionState::Idle) {
+        return SessionOutcome{SessionEvent::None, 0U};
+    }
+    state_ = SessionState::Idle;
+    return SessionOutcome{SessionEvent::Abandoned, 0U};
+}
+
+std::size_t Session::build_hello_result(const Header& request, bool success,
+                                        std::uint8_t* out,
+                                        std::size_t capacity) noexcept {
+    HelloResult result{};
+    result.request.request_source_id = request.source_id;
+    result.request.request_boot_id = request.boot_id;
+    result.request.reply_to_sequence = request.sequence;
+    if (success) {
+        result.status = static_cast<std::uint8_t>(ResultStatus::Success);
+        result.selected_version = effective_.selected_version;
+        result.error_code = static_cast<std::uint16_t>(ResultError::None);
+        result.max_logical_payload = effective_.max_logical_payload;
+        result.max_inflight_reassemblies = effective_.max_inflight_reassemblies;
+        result.max_subscriptions = effective_.max_subscriptions;
+        result.max_dedup_entries = effective_.max_dedup_entries;
+        result.session_timeout_ms = effective_.session_timeout_ms;
+        std::memcpy(result.peer_uuid, local_.peer_uuid, 16U);
+        result.config_revision = local_.config_revision;
+    } else {
+        result.status = static_cast<std::uint8_t>(ResultStatus::Unsupported);
+        result.selected_version = 0U;
+        result.error_code =
+            static_cast<std::uint16_t>(ResultError::UnsupportedVersion);
+        // limits, peer_uuid and config_revision stay zero.
+    }
+    std::size_t written = 0U;
+    if (encode_hello_result(result, out, capacity, &written) !=
+        MessageError::Ok) {
+        return 0U;
+    }
+    return written;
+}
+
+std::size_t Session::build_session_close_result(const Header& request,
+                                                bool parsed, std::uint8_t* out,
+                                                std::size_t capacity) noexcept {
+    ControlResult result{};
+    result.request.request_source_id = request.source_id;
+    result.request.request_boot_id = request.boot_id;
+    result.request.reply_to_sequence = request.sequence;
+    result.status = static_cast<std::uint8_t>(parsed ? ResultStatus::Success
+                                                     : ResultStatus::Rejected);
+    result.error_code = static_cast<std::uint16_t>(
+        parsed ? ResultError::None : ResultError::MalformedPayload);
+    std::size_t written = 0U;
+    if (encode_session_close_result(result, out, capacity, &written) !=
+        MessageError::Ok) {
+        return 0U;
+    }
+    return written;
+}
+
+SessionOutcome Session::on_frame(const DecodedFrame& frame, std::uint64_t now_ms,
+                                 std::uint8_t* reply_out,
+                                 std::size_t reply_capacity) noexcept {
+    // Sweep the deadline first, the same way btp::Receiver::submit sweeps
+    // reassembly timeouts before it looks at the datagram. A frame that
+    // arrives after the deadline is a TimedOut, not a renewal.
+    const SessionOutcome expiry = check_expiry(now_ms);
+    if (expiry.event == SessionEvent::TimedOut) {
+        return expiry;
+    }
+
+    if (state_ == SessionState::Idle) {
+        return SessionOutcome{SessionEvent::None, 0U};
+    }
+
+    if (state_ == SessionState::AwaitingHello) {
+        const bool is_hello =
+            frame.header.type == MessageType::Control &&
+            frame.header.object_id == object_id::kHello;
+        if (!is_hello) {
+            // docs section 1: "no application message before a successful
+            // HELLO_RESULT". Anything else is ignored and does NOT renew the
+            // HELLO deadline.
+            return SessionOutcome{SessionEvent::None, 0U};
+        }
+
+        Hello remote{};
+        const bool decoded_ok =
+            valid_ && decode_hello(frame.payload.data, frame.payload.size,
+                                   &remote) == MessageError::Ok;
+        EffectiveLimits eff{};
+        if (decoded_ok) {
+            eff = negotiate(local_, remote);
+        }
+        if (!decoded_ok || eff.selected_version == 0U) {
+            // Malformed HELLO or no common version: fail closed, back to Idle
+            // (docs section 2.3).
+            const std::size_t n =
+                build_hello_result(frame.header, false, reply_out, reply_capacity);
+            state_ = SessionState::Idle;
+            return SessionOutcome{SessionEvent::HelloRejected, n};
+        }
+
+        effective_ = eff;
+        const std::size_t n =
+            build_hello_result(frame.header, true, reply_out, reply_capacity);
+        if (n == 0U) {
+            // The SUCCESS reply will not fit the caller's buffer -- a sizing
+            // bug. Undo and stay AwaitingHello rather than half-open a session
+            // whose HELLO_RESULT never went out.
+            effective_ = EffectiveLimits{};
+            return SessionOutcome{SessionEvent::None, 0U};
+        }
+        peer_source_id_ = frame.header.source_id;
+        peer_boot_id_ = frame.header.boot_id;
+        state_ = SessionState::Active;
+        deadline_ms_ = now_ms + effective_.session_timeout_ms;
+        return SessionOutcome{SessionEvent::HelloAccepted, n};
+    }
+
+    // state_ == Active: every valid frame renews the watchdog, whatever its
+    // object turns out to be (docs section 5: "a valid BTP frame").
+    deadline_ms_ = now_ms + effective_.session_timeout_ms;
+
+    if (frame.header.type == MessageType::Control &&
+        frame.header.object_id == object_id::kSessionClose) {
+        SessionClose close{};
+        const bool parsed =
+            decode_session_close(frame.payload.data, frame.payload.size,
+                                 &close) == MessageError::Ok;
+        const std::size_t n = build_session_close_result(
+            frame.header, parsed, reply_out, reply_capacity);
+        state_ = SessionState::Idle;
+        return SessionOutcome{SessionEvent::SessionClosed, n};
+    }
+
+    // A stray HELLO mid-session, or any application object: the caller routes
+    // it. The watchdog is already renewed.
+    return SessionOutcome{SessionEvent::FrameAccepted, 0U};
+}
+
 }  // namespace btp

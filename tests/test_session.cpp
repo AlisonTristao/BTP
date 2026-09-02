@@ -356,6 +356,399 @@ void test_verdict_strings() {
                       "DuplicateComplete") == 0);
 }
 
+// ===========================================================================
+// btp::Session -- the responder state machine
+// ===========================================================================
+
+using btp::EffectiveLimits;
+using btp::Hello;
+using btp::HelloResult;
+using btp::Session;
+using btp::SessionEvent;
+using btp::SessionState;
+
+// This peer's own HELLO advertisement.
+Hello make_local(std::uint32_t max_payload = 2048U,
+                 std::uint32_t timeout_ms = 30000U) {
+    Hello h = {};
+    h.role = static_cast<std::uint8_t>(btp::Role::Producer);
+    h.version_count = 1U;
+    h.versions[0] = 1U;
+    h.max_logical_payload = max_payload;
+    h.max_inflight_reassemblies = 4U;
+    h.max_subscriptions = 8U;
+    h.max_dedup_entries = 32U;
+    h.session_timeout_ms = timeout_ms;
+    for (std::size_t i = 0U; i < 16U; ++i) {
+        h.peer_uuid[i] = static_cast<std::uint8_t>(0xA0U + i);
+    }
+    h.config_revision = 7U;
+    return h;
+}
+
+// A decoded frame whose payload buffer lives inside the struct, so the
+// btp::DecodedFrame handed to on_frame() stays valid for the call.
+struct FakeFrame {
+    std::uint8_t payload[96];
+    btp::DecodedFrame frame;
+
+    FakeFrame() : frame() {}
+};
+
+FakeFrame control_frame(std::uint16_t object_id, const std::uint8_t* payload,
+                        std::size_t payload_size, std::uint32_t source_id,
+                        std::uint32_t boot_id, std::uint32_t sequence) {
+    FakeFrame ff;
+    CHECK(payload_size <= sizeof(ff.payload));
+    std::memcpy(ff.payload, payload, payload_size);
+    ff.frame.header.type = btp::MessageType::Control;
+    ff.frame.header.source_id = source_id;
+    ff.frame.header.boot_id = boot_id;
+    ff.frame.header.sequence = sequence;
+    ff.frame.header.object_id = object_id;
+    ff.frame.header.fragment_count = 1U;
+    ff.frame.payload.data = ff.payload;
+    ff.frame.payload.size = payload_size;
+    return ff;
+}
+
+FakeFrame hello_frame(const Hello& hello, std::uint32_t source_id,
+                      std::uint32_t boot_id, std::uint32_t sequence) {
+    std::uint8_t buffer[64];
+    std::size_t written = 0U;
+    CHECK(btp::encode_hello(hello, buffer, sizeof(buffer), &written) ==
+          btp::MessageError::Ok);
+    return control_frame(btp::object_id::kHello, buffer, written, source_id,
+                         boot_id, sequence);
+}
+
+// Drive a fresh session all the way to Active and return it.
+void bring_up(Session* session, std::uint64_t now_ms) {
+    session->arm(now_ms);
+    const FakeFrame hello = hello_frame(make_local(4096U, 20000U), 0x1111U,
+                                        0x2222U, 1U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session->on_frame(hello.frame, now_ms, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::HelloAccepted);
+    CHECK(session->active());
+}
+
+void test_session_valid_rejects_malformed_local() {
+    Hello bad = make_local();
+    bad.version_count = 0U;  // no announced versions
+    Session session(bad, 2000U);
+    CHECK(!session.valid());
+
+    // A false valid() means every HELLO is rejected.
+    session.arm(0U);
+    const FakeFrame hello = hello_frame(make_local(), 5U, 6U, 1U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 10U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::HelloRejected);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_starts_idle_and_ignores_frames() {
+    Session session(make_local(), 2000U);
+    CHECK(session.valid());
+    CHECK(session.state() == SessionState::Idle);
+
+    const FakeFrame hello = hello_frame(make_local(), 5U, 6U, 1U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 100U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::None);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_hello_accepted_negotiates_minimum() {
+    Session session(make_local(/*max_payload=*/700U, /*timeout_ms=*/15000U),
+                    2000U);
+    session.arm(1000U);
+    CHECK(session.state() == SessionState::AwaitingHello);
+
+    // Remote asks for more room and a shorter watchdog.
+    Hello remote = make_local(/*max_payload=*/53550U, /*timeout_ms=*/5000U);
+    remote.role = static_cast<std::uint8_t>(btp::Role::Consumer);
+    remote.max_inflight_reassemblies = 32U;
+    remote.max_subscriptions = 64U;
+    remote.max_dedup_entries = 128U;
+    const FakeFrame hello = hello_frame(remote, 0x0C0D0E0FU, 0x10203040U, 9U);
+
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 1500U, reply, sizeof(reply));
+
+    CHECK(o.event == SessionEvent::HelloAccepted);
+    CHECK(session.state() == SessionState::Active);
+    CHECK(session.peer_source_id() == 0x0C0D0E0FU);
+    CHECK(session.peer_boot_id() == 0x10203040U);
+
+    HelloResult decoded = {};
+    CHECK(btp::decode_hello_result(reply, o.reply_size, &decoded) ==
+          btp::MessageError::Ok);
+    CHECK(decoded.status == static_cast<std::uint8_t>(btp::ResultStatus::Success));
+    CHECK(decoded.selected_version == 1U);
+    CHECK(decoded.request.request_source_id == 0x0C0D0E0FU);
+    CHECK(decoded.request.reply_to_sequence == 9U);
+    CHECK(decoded.max_logical_payload == 700U);   // min(53550, 700)
+    CHECK(decoded.max_inflight_reassemblies == 4U);   // min(32, 4)
+    CHECK(decoded.max_subscriptions == 8U);           // min(64, 8)
+    CHECK(decoded.max_dedup_entries == 32U);          // min(128, 32)
+    CHECK(decoded.session_timeout_ms == 5000U);       // min(15000, 5000)
+    CHECK(std::memcmp(decoded.peer_uuid, make_local().peer_uuid, 16U) == 0);
+    CHECK(decoded.config_revision == 7U);
+
+    const EffectiveLimits& eff = session.effective_limits();
+    CHECK(eff.max_logical_payload == 700U);
+    CHECK(eff.session_timeout_ms == 5000U);
+}
+
+void test_session_rejects_hello_without_common_version() {
+    Session session(make_local(), 2000U);
+    session.arm(0U);
+
+    Hello remote = make_local();
+    remote.versions[0] = 2U;  // only version 2, which this peer does not speak
+    const FakeFrame hello = hello_frame(remote, 42U, 43U, 7U);
+
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 100U, reply, sizeof(reply));
+
+    CHECK(o.event == SessionEvent::HelloRejected);
+    CHECK(session.state() == SessionState::Idle);
+
+    HelloResult decoded = {};
+    CHECK(btp::decode_hello_result(reply, o.reply_size, &decoded) ==
+          btp::MessageError::Ok);
+    CHECK(decoded.status ==
+          static_cast<std::uint8_t>(btp::ResultStatus::Unsupported));
+    CHECK(decoded.selected_version == 0U);
+}
+
+void test_session_rejects_malformed_hello_payload() {
+    Session session(make_local(), 2000U);
+    session.arm(0U);
+
+    const std::uint8_t junk[6] = {1, 2, 3, 4, 5, 6};
+    const FakeFrame bad =
+        control_frame(btp::object_id::kHello, junk, sizeof(junk), 1U, 1U, 1U);
+
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(bad.frame, 10U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::HelloRejected);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_non_hello_does_not_renew_hello_deadline() {
+    Session session(make_local(), 2000U);
+    session.arm(1000U);
+
+    // A CONTROL frame that is not HELLO, arriving well before the deadline.
+    const std::uint8_t body[4] = {0, 0, 0, 0};
+    const FakeFrame other =
+        control_frame(btp::object_id::kStatus, body, sizeof(body), 1U, 1U, 1U);
+    CHECK(session.on_frame(other.frame, 2000U, nullptr, 0U).event ==
+          SessionEvent::None);
+    CHECK(session.state() == SessionState::AwaitingHello);
+
+    // The deadline is still the original arm() + 2000, not renewed to 4000.
+    CHECK(session.poll(2999U).event == SessionEvent::None);
+    CHECK(session.poll(3000U).event == SessionEvent::TimedOut);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_hello_deadline_times_out_via_poll() {
+    Session session(make_local(), 2000U);
+    session.arm(1000U);
+    CHECK(session.poll(2999U).event == SessionEvent::None);
+    CHECK(session.poll(3000U).event == SessionEvent::TimedOut);
+    CHECK(session.state() == SessionState::Idle);
+    // Reported once.
+    CHECK(session.poll(9999U).event == SessionEvent::None);
+}
+
+void test_session_late_hello_is_dropped_as_timed_out() {
+    Session session(make_local(), 2000U);
+    session.arm(1000U);
+
+    const FakeFrame hello = hello_frame(make_local(), 5U, 6U, 1U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    // now_ms is past arm() + 2000: on_frame sweeps the deadline first.
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 3500U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::TimedOut);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_active_frames_renew_the_watchdog() {
+    Session session(make_local(), 2000U);
+    bring_up(&session, 0U);
+    // negotiated session_timeout_ms is min(30000, 20000) = 20000.
+    CHECK(session.effective_limits().session_timeout_ms == 20000U);
+
+    const std::uint8_t body[8] = {0};
+    std::uint64_t now = 0U;
+    for (int i = 0; i < 10; ++i) {
+        now += 15000U;  // < 20000, so each frame renews before expiry
+        const FakeFrame f = control_frame(btp::object_id::kStatus, body,
+                                          sizeof(body), 0x1111U, 0x2222U,
+                                          static_cast<std::uint32_t>(i + 2));
+        const btp::SessionOutcome o =
+            session.on_frame(f.frame, now, nullptr, 0U);
+        CHECK(o.event == SessionEvent::FrameAccepted);
+        CHECK(session.active());
+    }
+    // Total elapsed 150000 ms, far past one 20 s window -- still alive.
+    CHECK(session.active());
+}
+
+void test_session_watchdog_expires_when_idle() {
+    Session session(make_local(), 2000U);
+    bring_up(&session, 1000U);  // deadline 1000 + 20000
+    CHECK(session.poll(20999U).event == SessionEvent::None);
+    CHECK(session.poll(21000U).event == SessionEvent::TimedOut);
+    CHECK(session.state() == SessionState::Idle);
+    CHECK(session.poll(99999U).event == SessionEvent::None);  // once
+}
+
+void test_session_close_returns_to_idle() {
+    Session session(make_local(), 2000U);
+    bring_up(&session, 0U);
+
+    std::uint8_t close_payload[8] = {0};
+    close_payload[0] = static_cast<std::uint8_t>(btp::CloseReason::ClientShutdown);
+    // drain_timeout_ms at offset 4, little-endian.
+    close_payload[4] = 0xF4U;
+    close_payload[5] = 0x01U;  // 500
+    const FakeFrame close = control_frame(btp::object_id::kSessionClose,
+                                          close_payload, sizeof(close_payload),
+                                          0x1111U, 0x2222U, 5U);
+
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(close.frame, 100U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::SessionClosed);
+    CHECK(session.state() == SessionState::Idle);
+
+    btp::ControlResult decoded = {};
+    CHECK(btp::decode_session_close_result(reply, o.reply_size, &decoded) ==
+          btp::MessageError::Ok);
+    CHECK(decoded.status ==
+          static_cast<std::uint8_t>(btp::ResultStatus::Success));
+    CHECK(decoded.request.request_source_id == 0x1111U);
+    CHECK(decoded.request.reply_to_sequence == 5U);
+}
+
+void test_session_close_malformed_payload_is_rejected() {
+    Session session(make_local(), 2000U);
+    bring_up(&session, 0U);
+
+    const std::uint8_t junk[3] = {9, 9, 9};
+    const FakeFrame close = control_frame(btp::object_id::kSessionClose, junk,
+                                          sizeof(junk), 0x1111U, 0x2222U, 5U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(close.frame, 100U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::SessionClosed);
+    CHECK(session.state() == SessionState::Idle);
+
+    btp::ControlResult decoded = {};
+    CHECK(btp::decode_session_close_result(reply, o.reply_size, &decoded) ==
+          btp::MessageError::Ok);
+    CHECK(decoded.status ==
+          static_cast<std::uint8_t>(btp::ResultStatus::Rejected));
+    CHECK(decoded.error_code ==
+          static_cast<std::uint16_t>(btp::ResultError::MalformedPayload));
+}
+
+void test_session_reset_reports_abandoned_once() {
+    Session session(make_local(), 2000U);
+    bring_up(&session, 0U);
+
+    CHECK(session.reset().event == SessionEvent::Abandoned);
+    CHECK(session.state() == SessionState::Idle);
+    CHECK(session.reset().event == SessionEvent::None);
+
+    // Also from AwaitingHello.
+    session.arm(10U);
+    CHECK(session.reset().event == SessionEvent::Abandoned);
+    CHECK(session.state() == SessionState::Idle);
+}
+
+void test_session_zero_hello_deadline_never_times_out_awaiting() {
+    Session session(make_local(), 0U);  // HELLO deadline disabled
+    session.arm(1000U);
+    CHECK(session.poll(9'999'999U).event == SessionEvent::None);
+    CHECK(session.state() == SessionState::AwaitingHello);
+}
+
+void test_session_hello_reply_buffer_too_small_stays_put() {
+    Session session(make_local(), 2000U);
+    session.arm(0U);
+    const FakeFrame hello = hello_frame(make_local(), 5U, 6U, 1U);
+    std::uint8_t tiny[8];
+    const btp::SessionOutcome o =
+        session.on_frame(hello.frame, 10U, tiny, sizeof(tiny));
+    CHECK(o.event == SessionEvent::None);
+    CHECK(o.reply_size == 0U);
+    CHECK(session.state() == SessionState::AwaitingHello);
+    CHECK(!session.active());
+}
+
+void test_session_round_trips_a_real_encoded_hello() {
+    // The full path: encode_hello -> btp::encode -> btp::decode -> on_frame.
+    Hello remote = make_local(4096U, 12000U);
+    std::uint8_t hello_payload[64];
+    std::size_t payload_size = 0U;
+    CHECK(btp::encode_hello(remote, hello_payload, sizeof(hello_payload),
+                            &payload_size) == btp::MessageError::Ok);
+
+    btp::Frame frame = {};
+    frame.header.type = btp::MessageType::Control;
+    frame.header.source_id = 0xABCDEF01U;
+    frame.header.boot_id = 0x00112233U;
+    frame.header.sequence = 3U;
+    frame.header.object_id = btp::object_id::kHello;
+    frame.header.fragment_count = 1U;
+    frame.payload.data = hello_payload;
+    frame.payload.size = payload_size;
+
+    std::uint8_t wire[128];
+    std::size_t wire_size = 0U;
+    CHECK(btp::encode(frame, btp::TransportProfile::Serial, wire, sizeof(wire),
+                      &wire_size) == btp::Error::Ok);
+
+    btp::DecodedFrame decoded = {};
+    CHECK(btp::decode(wire, wire_size, btp::TransportProfile::Serial, &decoded) ==
+          btp::Error::Ok);
+
+    Session session(make_local(2048U, 30000U), 2000U);
+    session.arm(0U);
+    std::uint8_t reply[btp::kSessionMaxReplySize];
+    const btp::SessionOutcome o =
+        session.on_frame(decoded, 5U, reply, sizeof(reply));
+    CHECK(o.event == SessionEvent::HelloAccepted);
+    CHECK(session.active());
+    CHECK(session.peer_source_id() == 0xABCDEF01U);
+    CHECK(session.effective_limits().max_logical_payload == 2048U);
+    CHECK(session.effective_limits().session_timeout_ms == 12000U);
+}
+
+void test_session_state_and_event_strings() {
+    CHECK(btp::session_state_string(SessionState::Idle) != nullptr);
+    CHECK(std::strcmp(btp::session_state_string(SessionState::Active),
+                      "Active") == 0);
+    CHECK(std::strcmp(btp::session_event_string(SessionEvent::TimedOut),
+                      "TimedOut") == 0);
+    CHECK(std::strcmp(btp::session_event_string(SessionEvent::HelloAccepted),
+                      "HelloAccepted") == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -372,6 +765,24 @@ int main() {
     test_clear_resets_everything();
     test_zero_length_request();
     test_verdict_strings();
+
+    test_session_valid_rejects_malformed_local();
+    test_session_starts_idle_and_ignores_frames();
+    test_session_hello_accepted_negotiates_minimum();
+    test_session_rejects_hello_without_common_version();
+    test_session_rejects_malformed_hello_payload();
+    test_session_non_hello_does_not_renew_hello_deadline();
+    test_session_hello_deadline_times_out_via_poll();
+    test_session_late_hello_is_dropped_as_timed_out();
+    test_session_active_frames_renew_the_watchdog();
+    test_session_watchdog_expires_when_idle();
+    test_session_close_returns_to_idle();
+    test_session_close_malformed_payload_is_rejected();
+    test_session_reset_reports_abandoned_once();
+    test_session_zero_hello_deadline_never_times_out_awaiting();
+    test_session_hello_reply_buffer_too_small_stays_put();
+    test_session_round_trips_a_real_encoded_hello();
+    test_session_state_and_event_strings();
 
     if (failures != 0) {
         std::cerr << failures << " check(s) failed\n";
