@@ -152,6 +152,7 @@ vector is changing the contract.
 ```text
 include/btp/    codec, fragmentation, stream, messages, telemetry, session, endpoint, receiver, aead
 src/            the implementation
+example/        a sender / receiver pair -- the library end to end in ~100 lines each
 tests/          host suites plus an embedded compile target
 test-vectors/   canonical vectors: wire v1, wire v2, message and telemetry payloads
 tools/          independent Python reference decoders

@@ -1,6 +1,8 @@
 /build/
 /.pio/
 /tests/embedded/.pio/
+/example/build/
+/example/frame.bin
 
 /site/
 /.venv-docs/
