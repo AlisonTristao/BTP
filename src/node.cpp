@@ -48,7 +48,10 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       serve_catalog_(nullptr),
       serve_role_(0U),
       serve_uuid_(),
-      serve_name_(nullptr) {}
+      serve_name_(nullptr),
+      publish_slots_(nullptr),
+      publish_slot_capacity_(0U),
+      publish_slot_count_(0U) {}
 
 bool Node::begin() noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
@@ -775,6 +778,50 @@ bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
 
     return send(MessageType::Telemetry, topic_id, scratch_buffer_, written,
                 timestamp_us);
+}
+
+// ---------------------------------------------------------------------------
+// Publish-on-subscribe
+// ---------------------------------------------------------------------------
+
+void Node::enable_publish_registry(PublishRegistration* slots,
+                                   std::size_t slot_count) noexcept {
+    publish_slots_ = slots;
+    publish_slot_capacity_ = slot_count;
+    publish_slot_count_ = 0U;
+}
+
+bool Node::on_publish(std::uint16_t topic_id, NodeNamedFillFn fill,
+                      void* ctx) noexcept {
+    if (publish_slots_ == nullptr || fill == nullptr ||
+        publish_slot_count_ >= publish_slot_capacity_) {
+        return false;
+    }
+    PublishRegistration& slot = publish_slots_[publish_slot_count_];
+    slot.topic_id = topic_id;
+    slot.fill = fill;
+    slot.ctx = ctx;
+    ++publish_slot_count_;
+    return true;
+}
+
+std::size_t Node::publish_subscribed_topics(std::uint64_t now_ms) noexcept {
+    if (publish_slots_ == nullptr || subscriptions_ == nullptr) return 0U;
+
+    std::size_t published = 0U;
+    for (std::size_t i = 0U; i < publish_slot_count_; ++i) {
+        const PublishRegistration& reg = publish_slots_[i];
+        if (!subscriptions_->due(reg.topic_id, now_ms)) continue;
+        // Skipped, not counted as an error, when reg.topic_id is not (or no
+        // longer) in the served catalogue -- same "unknown topic -> false"
+        // rule publish_named() itself already has; there is no separate
+        // "was it even a real topic" outcome for a caller to want back here.
+        if (publish_named(reg.topic_id, reg.fill, reg.ctx, now_ms * 1000ULL)) {
+            subscriptions_->note_published(reg.topic_id, now_ms);
+            ++published;
+        }
+    }
+    return published;
 }
 
 // ---------------------------------------------------------------------------

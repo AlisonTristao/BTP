@@ -102,6 +102,17 @@ using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
 // field, in schema order still, but checked against the name at each step.
 using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 
+// One entry in the registry publish_subscribed_topics() walks: which topic,
+// and the NodeNamedFillFn that fills a sample of it. Registered with
+// on_publish(); plain data otherwise, no invariant of its own to protect --
+// storage is bound by enable_publish_registry() (or, on StaticNode<>, already
+// bound -- see its own comment).
+struct PublishRegistration {
+    std::uint16_t topic_id;
+    NodeNamedFillFn fill;
+    void* ctx;
+};
+
 // Filled by NodeActionFn (below) to describe how a COMMAND_REQUEST's action
 // finished. Zero-initialise before your own fields matter -- status defaults
 // to 0 (ResultStatus::Success) and error_code to 0 (ResultError::None), so a
@@ -517,6 +528,40 @@ public:
     bool publish_named(std::uint16_t topic_id, NodeNamedFillFn fill, void* ctx,
                        std::uint64_t timestamp_us) noexcept;
 
+    // ---- publish-on-subscribe (opt-in) --------------------------------------
+    // Ties publish_named() to the SubscriptionTable's own due()/note_published()
+    // cadence, so a caller with several topics does not hand-write "for each
+    // topic: if due(), fill and publish, then note_published()" once per
+    // topic -- see example/sender.cpp for the walkthrough. StaticNode<> already
+    // has storage for this (below), ready with no setup beyond on_publish()
+    // calls; a raw Node needs enable_publish_registry() first.
+
+    // Points the registry at caller-owned storage (StaticNode<> calls this on
+    // your behalf). nullptr / 0 detaches -- on_publish() then fails closed and
+    // publish_subscribed_topics() is a no-op, same "opt-in, safe when unset"
+    // rule as subscriptions_ / commands_.
+    void enable_publish_registry(PublishRegistration* slots,
+                                 std::size_t slot_count) noexcept;
+
+    // Registers `fill` as the callback that fills a sample of `topic_id` for
+    // publish_subscribed_topics() below. `topic_id` should already be a topic
+    // in the served catalogue (serve_catalog()) -- publish_subscribed_topics()
+    // silently skips a registration whose topic is not (or no longer) there,
+    // the same "unknown topic, nothing sent" rule publish_named() itself
+    // already has. Returns false: no registry attached (enable_publish_registry()
+    // first, or use a StaticNode<>, which already has one), a null `fill`, or
+    // the registry is full.
+    bool on_publish(std::uint16_t topic_id, NodeNamedFillFn fill,
+                    void* ctx) noexcept;
+
+    // Call once per loop pass, in place of your own due() / publish_named() /
+    // note_published() dance: walks every on_publish()-registered topic, and
+    // for each one due() against the attached SubscriptionTable
+    // (enable_subscriptions()), calls publish_named() and note_published().
+    // Returns how many were actually published -- 0 with no registry
+    // attached, no SubscriptionTable attached, or nothing due right now.
+    std::size_t publish_subscribed_topics(std::uint64_t now_ms) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -606,6 +651,10 @@ private:
     std::uint8_t serve_role_;
     std::uint8_t serve_uuid_[16];
     const char* serve_name_;
+
+    PublishRegistration* publish_slots_;  // nullptr until enable_publish_registry()
+    std::size_t publish_slot_capacity_;
+    std::size_t publish_slot_count_;
 };
 
 // ---------------------------------------------------------------------------
@@ -659,6 +708,12 @@ class StaticNode
 
     StaticCatalog<CatalogTopics, CatalogFields, CatalogStringBytes> catalog_;
 
+    // Backs on_publish()/publish_subscribed_topics() -- sized by CatalogTopics
+    // (the node's own catalogue is the only source of topic_ids worth
+    // registering a fill for, so its capacity is already the right bound; no
+    // new template argument needed). Bound in the constructor body below.
+    PublishRegistration publish_registrations_[CatalogTopics];
+
 public:
     explicit StaticNode(
         const NodeConfig& cfg,
@@ -669,7 +724,12 @@ public:
                reassembly_timeout_ms, Storage::rx_buffer, SlotBytes,
                Storage::seal_scratch, SealBytes, Storage::open_buffer, SlotBytes,
                Storage::scratch_buffer, ScratchBytes),
-          catalog_() {}
+          catalog_(),
+          publish_registrations_() {
+        // Ready for on_publish() with no separate setup call -- StaticNode<>
+        // owns all of its storage, this is no different from catalog_ above.
+        enable_publish_registry(publish_registrations_, CatalogTopics);
+    }
 
     // This node's own catalogue -- no separate btp::StaticCatalog to declare
     // in the caller or thread through by pointer. The serve_catalog() /

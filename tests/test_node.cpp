@@ -808,6 +808,59 @@ void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     CHECK(!consumer.unsubscribe(local_id));
 }
 
+// on_publish() + publish_subscribed_topics() together do what the test above
+// does by hand (due() then publish_named() then note_published(), per topic)
+// -- same producer/consumer setup, but the producer registers its fill once
+// and the loop becomes a single call.
+void test_publish_subscribed_topics_walks_registered_topics() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    // Same schema fill_drive_by_name itself expects (left_rpm, right_rpm,
+    // battery_v-nullable) -- not kDriveFields, which is a different one.
+    btp::StaticCatalog<> served;
+    CHECK(served.topic(0x0101U, 2U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.on_publish(0x0101U, &fill_drive_by_name, nullptr));
+    CHECK(producer.begin());
+
+    // Nothing subscribed yet -- nothing to walk.
+    CHECK(producer.publish_subscribed_topics(0U) == 0U);
+    CHECK(prod_tx.count() == 0U);
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    ClientSubscription client_slots[4];
+    SubscriptionClient client(client_slots, 4);
+    consumer.enable_subscription_client(&client);
+    CHECK(consumer.begin());
+
+    // 10000 mHz -> 100 ms period, a 1000 ms lease.
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    CHECK(cons_tx.count() == 1U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    // Due right away -- one call publishes the one registered, due topic.
+    CHECK(producer.publish_subscribed_topics(0U) == 1U);
+    CHECK(prod_tx.count() == 2U);  // SUBSCRIBE_RESULT, then this TELEMETRY
+
+    // note_published() already ran inside that call -- not due again yet.
+    CHECK(producer.publish_subscribed_topics(50U) == 0U);
+    CHECK(prod_tx.count() == 2U);
+
+    // ...and due again once the granted period has actually elapsed.
+    CHECK(producer.publish_subscribed_topics(100U) == 1U);
+    CHECK(prod_tx.count() == 3U);
+}
+
 // ===========================================================================
 // btp::Node -- commands (btp::DedupCache / btp::CommandClient)
 // ===========================================================================
@@ -1015,6 +1068,7 @@ int main() {
 
     test_subscribe_grant_publish_cadence_and_unsubscribe();
     test_subscribe_renews_before_the_lease_runs_out();
+    test_publish_subscribed_topics_walks_registered_topics();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

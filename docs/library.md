@@ -2903,6 +2903,28 @@ if (table.due(0x0101, now_ms) && node.publish(0x0101, &fill, nullptr, ts_us)) {
 }
 ```
 
+That `due()` / `publish()` / `note_published()` triplet is also what
+`on_publish()` + `publish_subscribed_topics()` (2.21.0) do for every topic at
+once, so a producer with more than one does not repeat it per topic:
+
+```cpp
+node.topic(0x0101, 3, "drive_status").f32("left_rpm", "rpm")./*...*/.end();
+node.on_publish(0x0101, &fill_drive_status, nullptr);   // once, next to the topic
+
+// per tick(), instead of the table.due()/publish()/note_published() block above:
+node.publish_subscribed_topics(now_ms);
+```
+
+`on_publish(topic_id, fill, ctx)` registers a `NodeNamedFillFn` for a topic
+already in the served catalogue -- `StaticNode<>` has storage for the
+registry ready with no setup call (sized by its own `CatalogTopics`
+template argument); a raw `Node` needs `enable_publish_registry(slots,
+slot_count)` first, the same "attach caller-owned storage" shape
+`enable_subscriptions()` itself has. `publish_subscribed_topics(now_ms)`
+walks every topic registered that way, `due()`-checks it against the
+attached `SubscriptionTable`, and `publish_named()` + `note_published()`s
+the ones that are -- returning how many it actually sent.
+
 `receive()` answers a `SUBSCRIBE` against the served catalogue --
 `NodeRx::SubscriptionServed` -- checking the topic is subscribable and
 clamping `effective_rate_millihz` to its `max_rate_millihz` (0 = uncapped); a
