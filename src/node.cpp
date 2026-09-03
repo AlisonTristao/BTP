@@ -53,14 +53,25 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       publish_slot_capacity_(0U),
       publish_slot_count_(0U) {}
 
-bool Node::begin() noexcept {
+bool Node::begin(bool arm_and_announce) noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
     if (!receiver_.valid()) return false;
     if (session_on_ && !session_.valid()) return false;
     // cfg_.send is not required here: a receive-only node that never sends and
     // never enables a session does not need one. send() / send_with() and a
     // session reply check for it at the point of use.
+
+    if (arm_and_announce) {
+        if (session_on_) arm_session();
+        if (serve_catalog_ != nullptr) announce_catalog();
+    }
     return true;
+}
+
+bool Node::begin(const Hello& local_hello,
+                 std::uint64_t connect_deadline_ms) noexcept {
+    if (!begin(/*arm_and_announce=*/false)) return false;
+    return connect(local_hello, connect_deadline_ms);
 }
 
 bool Node::configured() const noexcept {
@@ -824,6 +835,20 @@ std::size_t Node::publish_subscribed_topics(std::uint64_t now_ms) noexcept {
     return published;
 }
 
+NodeRx Node::routine(const std::uint8_t* datagram, std::size_t size,
+                     std::uint64_t now_ms, ReceivedMessage* out) noexcept {
+    const NodeRx rx =
+        size != 0U ? receive(datagram, size, now_ms, out) : NodeRx::NoDatagram;
+    publish_subscribed_topics(now_ms);
+    tick(now_ms);
+    return rx;
+}
+
+void Node::routine(std::uint64_t now_ms) noexcept {
+    publish_subscribed_topics(now_ms);
+    tick(now_ms);
+}
+
 // ---------------------------------------------------------------------------
 // Session initiator
 // ---------------------------------------------------------------------------
@@ -958,6 +983,7 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::RequestServed: return "request served";
         case NodeRx::Ignored: return "ignored";
         case NodeRx::DroppedFrame: return "dropped frame";
+        case NodeRx::NoDatagram: return "no datagram";
     }
     return "unknown";
 }

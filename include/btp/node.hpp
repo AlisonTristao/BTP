@@ -196,6 +196,8 @@ enum class NodeRx : std::uint8_t {
                      // Active, or a sample for a topic the catalog has not learned.
     DroppedFrame,    // btp::decode / reassembly / a malformed managed payload rejected it.
                      // Counts are in receiver().stats().
+    NoDatagram,      // routine() was called with nothing that arrived this pass --
+                     // receive() did not run, but the housekeeping still did.
 };
 
 const char* node_rx_string(NodeRx rx) noexcept;
@@ -261,7 +263,25 @@ public:
     // session.valid()). Check once at boot. A missing `send` is not a failure
     // here -- send() / send_with() and a session reply check for it in place --
     // so a receive-only node can leave it null.
-    bool begin() noexcept;
+    //
+    // `arm_and_announce` (default false -- every existing begin() call keeps
+    // meaning exactly what it always did) additionally arm_session()s any
+    // enabled session and announce_catalog()s any served catalogue, once
+    // begin() itself succeeds -- the "just go live" case a producer with
+    // nothing to wait for wants in one call. Leave it false for the OTHER
+    // case: a session armed only on some later trigger of your own (a
+    // console's ENTER line, say) -- arm_session() stays yours to call then.
+    // A false return is still only about identity/storage; a failed
+    // announce_catalog() here is silent, best-effort, same as calling it
+    // separately.
+    bool begin(bool arm_and_announce = false) noexcept;
+
+    // The INITIATOR's analogue of the overload above: begin() (identity /
+    // storage only, no session to arm, no catalogue to announce -- this node
+    // is the one connecting out), then connect(local_hello, deadline_ms) in
+    // the same call. False means either failed -- check connected() /
+    // initiator_event() if you need to tell which.
+    bool begin(const Hello& local_hello, std::uint64_t connect_deadline_ms) noexcept;
     bool configured() const noexcept;
 
     std::uint32_t source_id() const noexcept { return cfg_.source_id; }
@@ -562,6 +582,25 @@ public:
     // attached, no SubscriptionTable attached, or nothing due right now.
     std::size_t publish_subscribed_topics(std::uint64_t now_ms) noexcept;
 
+    // Call once per loop pass with whatever the link produced this pass --
+    // see the loop in example/sender.cpp / receiver.cpp, now down to one
+    // call. `size` == 0 (nothing arrived) skips receive() and returns
+    // NodeRx::NoDatagram; otherwise this IS receive(datagram, size, now_ms,
+    // out), same return value. Either way, publish_subscribed_topics(now_ms)
+    // and tick(now_ms) run right after: due topics get sent (a no-op with
+    // nothing registered, no SubscriptionTable, or nothing due), then the
+    // session/connection watchdog and subscription lease renewal (each a
+    // no-op when not enabled). The SAME call for a producer, a consumer, or
+    // a node that is both -- the parts that don't apply to this node were
+    // already no-ops before this existed.
+    NodeRx routine(const std::uint8_t* datagram, std::size_t size,
+                   std::uint64_t now_ms, ReceivedMessage* out) noexcept;
+
+    // The housekeeping alone, no datagram involved -- for a caller whose
+    // receive() runs elsewhere (its own task/thread/ISR) and only wants
+    // publish_subscribed_topics() + tick() from this call.
+    void routine(std::uint64_t now_ms) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -696,10 +735,14 @@ struct NodeStorage {
 // btp::StaticCatalog's own defaults. A Serial deployment bumps SlotBytes; a
 // large manifest bumps ScratchBytes; a schema with many topics or fields
 // bumps the Catalog* template arguments.
+// MaxSubscriptions last, after every other capacity, so an existing
+// StaticNode<...> spelled out to CatalogStringBytes (or shorter) still
+// compiles unchanged -- it only fixes the ONE new trailing default.
 template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
           std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512,
           std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
-          std::size_t CatalogStringBytes = 1024>
+          std::size_t CatalogStringBytes = 1024,
+          std::size_t MaxSubscriptions = 8>
 class StaticNode
     : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
       public Node {
@@ -714,6 +757,26 @@ class StaticNode
     // new template argument needed). Bound in the constructor body below.
     PublishRegistration publish_registrations_[CatalogTopics];
 
+    // Backs enable_subscriptions() -- unlike publish_registrations_ above,
+    // this genuinely needs its OWN capacity: several requesters can each
+    // hold a subscription on the SAME topic, so the number of live grants
+    // is not bounded by CatalogTopics. subscription_slots_ before
+    // subscriptions_ on purpose -- members initialise in declaration order,
+    // and subscriptions_ points into subscription_slots_.
+    SubscriptionRecord subscription_slots_[MaxSubscriptions];
+    SubscriptionTable subscriptions_;
+
+    // Backs enable_subscription_client() -- the INITIATOR's memory of what
+    // THIS node holds on OTHER peers' catalogues, the other side of the link
+    // from subscription_slots_ / subscriptions_ above. Same per-capacity
+    // reasoning (several subscriptions can be outstanding at once, across
+    // topics and peers) and the same declaration-order requirement (slots
+    // before the object that points into them). Named apart from Node's own
+    // private subscription_client_ pointer on purpose -- this is the storage
+    // it points to, not the pointer itself.
+    ClientSubscription subscription_client_slots_[MaxSubscriptions];
+    SubscriptionClient client_subscriptions_;
+
 public:
     explicit StaticNode(
         const NodeConfig& cfg,
@@ -725,10 +788,17 @@ public:
                Storage::seal_scratch, SealBytes, Storage::open_buffer, SlotBytes,
                Storage::scratch_buffer, ScratchBytes),
           catalog_(),
-          publish_registrations_() {
-        // Ready for on_publish() with no separate setup call -- StaticNode<>
-        // owns all of its storage, this is no different from catalog_ above.
+          publish_registrations_(),
+          subscription_slots_(),
+          subscriptions_(subscription_slots_, MaxSubscriptions),
+          subscription_client_slots_(),
+          client_subscriptions_(subscription_client_slots_, MaxSubscriptions) {
+        // Ready for on_publish() / a peer's SUBSCRIBE / this node's own
+        // subscribe() with no separate setup call -- StaticNode<> owns all
+        // of its storage, same as catalog_.
         enable_publish_registry(publish_registrations_, CatalogTopics);
+        enable_subscriptions(&subscriptions_);
+        enable_subscription_client(&client_subscriptions_);
     }
 
     // This node's own catalogue -- no separate btp::StaticCatalog to declare
@@ -742,6 +812,31 @@ public:
 
     using Node::serve_catalog;
     using Node::learn_catalog;
+    using Node::begin;
+
+    // Convenience for a StaticNode<> producer that serves its own catalogue
+    // and answers a session with `local_hello` -- what a caller otherwise
+    // hand-writes as four separate calls (catalog().set_config_revision(),
+    // serve_catalog(), enable_session(), begin(true)): set the config
+    // revision, serve the catalogue (role read straight off
+    // local_hello.role -- no need to repeat it), enable the session, then go
+    // fully live (arm it, send the catalogue's MANIFEST_DATA unsolicited so
+    // a late joiner needs no request). `source_uuid` stays nullptr (zeroed)
+    // unless this node has one to advertise.
+    //
+    // Doesn't fit a node that needs the deferred-arm case (a session armed
+    // only on some later trigger of your own, e.g. a console's ENTER line):
+    // call serve_catalog() / enable_session() / Node::begin(false) yourself
+    // there and arm_session() later, same as always.
+    bool begin(const char* source_name, const Hello& local_hello,
+              std::uint64_t hello_deadline_ms = 0U,
+              std::uint32_t config_revision = 1U,
+              const std::uint8_t* source_uuid = nullptr) noexcept {
+        catalog_.set_config_revision(config_revision);
+        serve_catalog(local_hello.role, source_uuid, source_name);
+        enable_session(local_hello, hello_deadline_ms);
+        return Node::begin(/*arm_and_announce=*/true);
+    }
 
     void serve_catalog(std::uint8_t role = 0U,
                        const std::uint8_t* source_uuid = nullptr,
@@ -750,13 +845,31 @@ public:
     }
     void learn_catalog() noexcept { Node::learn_catalog(&catalog_); }
 
+    // Same, plus on_sample() in the one call -- the consumer's analogue of
+    // topic(..., fill) above: "learn schemas into my own catalogue AND
+    // decode every sample against it with this callback" is one statement
+    // instead of two. `sample` (default nullptr) leaves on_sample() as it
+    // was -- call it yourself later if you'd rather.
+    void learn_catalog(NodeSampleFn sample, void* ctx = nullptr) noexcept {
+        Node::learn_catalog(&catalog_);
+        if (sample != nullptr) on_sample(sample, ctx);
+    }
+
     // Sugar for catalog().topic(...) -- declare a topic in this node's own
     // catalogue without reaching for catalog() first.
+    // `fill` (default nullptr -- every existing call site keeps declaring a
+    // topic with no fill registered, exactly as before this parameter
+    // existed) is on_publish()'d right here, before the schema chain below
+    // even runs: declaring a topic and saying how to fill it become the one
+    // statement publish_subscribed_topics() (node.hpp) needs, instead of a
+    // separate on_publish() call after .end().
     TopicBuilder topic(std::uint16_t topic_id, std::uint16_t schema_version,
-                       const char* name,
+                       const char* name, NodeNamedFillFn fill = nullptr,
+                       void* fill_ctx = nullptr,
                        TelemetryEncoding encoding = TelemetryEncoding::PackedLe,
                        bool subscribable = true,
                        std::uint32_t max_rate_millihz = 0U) noexcept {
+        if (fill != nullptr) on_publish(topic_id, fill, fill_ctx);
         return catalog_.topic(topic_id, schema_version, name, encoding,
                               subscribable, max_rate_millihz);
     }

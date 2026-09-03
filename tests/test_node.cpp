@@ -861,6 +861,271 @@ void test_publish_subscribed_topics_walks_registered_topics() {
     CHECK(prod_tx.count() == 3U);
 }
 
+// StaticNode<>::topic()'s `fill` argument on_publish()'s the topic right
+// there, in the same statement as its schema -- no separate on_publish()
+// call needed. Same scenario as the test above, but through that one call.
+void test_topic_with_fill_registers_publish_in_one_call() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    ClientSubscription client_slots[4];
+    SubscriptionClient client(client_slots, 4);
+    consumer.enable_subscription_client(&client);
+    CHECK(consumer.begin());
+
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    // publish_subscribed_topics() already finds it -- topic() registered the
+    // fill by itself, nothing else called on_publish() for this topic.
+    CHECK(producer.publish_subscribed_topics(0U) == 1U);
+    CHECK(prod_tx.count() == 2U);  // SUBSCRIBE_RESULT, then this TELEMETRY
+
+    // The old 3-argument form (no fill) still declares a schema with nothing
+    // registered for it -- the default does not silently opt every topic in.
+    CHECK(producer.topic(0x0102U, 1U, "unfilled").f32("x").end() ==
+          MessageError::Ok);
+    CHECK(producer.catalog().topic_count() == 2U);
+}
+
+// StaticNode<> already has a SubscriptionTable ready -- no separate
+// enable_subscriptions() call, the same "owns all of its storage" deal
+// on_publish()/publish_subscribed_topics() already get.
+void test_static_node_grants_subscriptions_with_no_setup_call() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    // No producer.enable_subscriptions(...) here.
+    CHECK(producer.begin());
+    CHECK(producer.subscriptions() != nullptr);
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    // No consumer.enable_subscription_client(...) here either -- StaticNode<>
+    // already has one of its own, same as the producer's subscriptions() above.
+    CHECK(consumer.begin());
+
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SubscriptionHandled);
+    CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);
+
+    CHECK(producer.publish_subscribed_topics(0U) == 1U);
+}
+
+// begin(/*arm_and_announce=*/true) arms any enabled session and sends
+// announce_catalog() by itself -- begin() alone (the default) does neither,
+// same as before this parameter existed.
+void test_begin_can_arm_session_and_announce_catalog() {
+    Sink tx;
+    TestNode plain(base_config(kSenderId, kSenderBoot, &tx));
+    plain.enable_session(make_hello(Role::Producer), 0U);
+    CHECK(plain.begin());  // default: neither armed nor announced
+    CHECK(plain.session()->state() == btp::SessionState::Idle);
+    CHECK(tx.count() == 0U);
+
+    Sink tx2;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx2));
+    CHECK(node.topic(0x0101U, 1U, "drive_status").f32("x").end() ==
+          MessageError::Ok);
+    node.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    node.enable_session(make_hello(Role::Producer), 0U);
+
+    CHECK(node.begin(/*arm_and_announce=*/true));
+    CHECK(node.session()->state() == btp::SessionState::AwaitingHello);
+    CHECK(tx2.count() == 1U);  // the announce_catalog() MANIFEST_DATA
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx2.frames[0].data(), tx2.frames[0].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.object_id == btp::object_id::kManifestData);
+}
+
+// The INITIATOR's analogue: Node::begin(local_hello, deadline_ms) folds
+// begin(/*arm_and_announce=*/false) + connect() into one call -- receiver.cpp
+// no longer writes begin() then connect() as two statements.
+void test_begin_with_hello_connects_out() {
+    Sink tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    CHECK(initiator.begin(make_hello(Role::Consumer), /*connect_deadline_ms=*/2000U));
+    CHECK(tx.count() == 1U);  // the HELLO connect() sent
+    CHECK(!initiator.connected());  // no HELLO_RESULT delivered yet
+}
+
+// StaticNode<> bundles enable_subscription_client() too, same "no setup call"
+// treatment test_static_node_grants_subscriptions_with_no_setup_call above
+// already gives the responder-side table.
+void test_static_node_bundles_subscription_client() {
+    Sink tx;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    CHECK(node.begin());
+    const std::uint32_t id =
+        node.subscribe(kPeerId, kPeerBoot, 0x0101U, /*rate_millihz=*/1000U,
+                       /*lease_ms=*/60000U);
+    CHECK(id != 0U);
+    CHECK(tx.count() == 1U);  // the SUBSCRIBE
+}
+
+// learn_catalog(sample, ctx) registers both the learn catalogue AND the
+// sample callback in the one call -- example/receiver.cpp's analogue of
+// topic(..., fill) on the producer side.
+void test_static_node_learn_catalog_with_sample_registers_on_sample() {
+    btp::StaticCatalog<> producer_cat;
+    CHECK(producer_cat.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    std::uint8_t manifest[512];
+    const std::size_t manifest_n =
+        manifest_of(producer_cat, manifest, sizeof(manifest));
+    CHECK(manifest_n != 0U);
+
+    Sink tx;
+    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    sender.begin();
+
+    Sink rx_out;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &rx_out));
+    SampleCapture capture = {};
+    consumer.learn_catalog(&capture_sample, &capture);  // the one call under test
+    CHECK(consumer.learned_catalog() == &consumer.catalog());
+    consumer.begin();
+
+    ReceivedMessage msg{};
+    sender.send(MessageType::Control, btp::object_id::kManifestData, manifest,
+                manifest_n, 1ULL);
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::CatalogUpdated);
+
+    std::uint8_t body[32];
+    btp::SampleWriter w(body, sizeof(body), producer_cat.topic(0x0101U)->fields, 3U);
+    w.begin(2U);
+    w.put_f64(1400.0);
+    w.put_f64(3.71);
+    w.put_null();
+    std::size_t body_n = 0U;
+    CHECK(w.finish(&body_n) == btp::MessageError::Ok);
+    sender.send(MessageType::Telemetry, 0x0101U, body, body_n, 2ULL);
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::SampleDelivered);
+    CHECK(capture.calls == 1);
+}
+
+// routine(now_ms) == publish_subscribed_topics(now_ms) + tick(now_ms) in one
+// call -- what example/sender.cpp's and example/receiver.cpp's loops now
+// share verbatim, instead of a different tail per role.
+void test_routine_publishes_and_ticks() {
+    // The publish half: a producer's routine() sends a due topic exactly
+    // like publish_subscribed_topics() alone would.
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    CHECK(consumer.begin());
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    prod_tx.clear();
+    producer.routine(0U);
+    CHECK(prod_tx.count() == 1U);
+
+    // The tick half: an initiator's routine() sweeps the connection watchdog
+    // exactly like tick() alone would (test_connect_times_out_without_a_reply).
+    Sink init_tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    CHECK(initiator.begin(make_hello(Role::Consumer),
+                          /*connect_deadline_ms=*/2000U));
+    initiator.routine(1999U);
+    CHECK(initiator.initiator_event() == InitiatorEvent::None);
+    initiator.routine(2000U);
+    CHECK(initiator.initiator_event() == InitiatorEvent::TimedOut);
+}
+
+// routine(datagram, size, now_ms, out): size == 0 skips receive() and
+// returns NodeRx::NoDatagram (the housekeeping still runs); size != 0 IS
+// receive(), same return value, with the housekeeping right after either
+// way -- example/sender.cpp's and example/receiver.cpp's loops no longer
+// branch on "did a datagram arrive" at all.
+void test_routine_with_datagram_decodes_and_still_runs_housekeeping() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    CHECK(consumer.begin());
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    // No datagram this pass -- receive() does not run, but the due topic
+    // still gets published.
+    prod_tx.clear();
+    CHECK(producer.routine(nullptr, 0U, 0U, &msg) == NodeRx::NoDatagram);
+    CHECK(prod_tx.count() == 1U);
+
+    // A real datagram this pass -- routine() decodes it (no learn_catalog()
+    // here, so the raw TELEMETRY comes back Complete, same as receive()
+    // alone would) AND still ran the housekeeping right after. It went out
+    // on prod_tx -- the producer's own send() -- checked above.
+    CHECK(consumer.routine(prod_tx.frames[0].data(), prod_tx.frames[0].size(),
+                           0U, &msg) == NodeRx::Complete);
+}
+
+// StaticNode<>'s begin(source_name, hello, ...) overload folds
+// catalog().set_config_revision() + serve_catalog() + enable_session() +
+// begin(true) into one call -- what example/sender.cpp's old
+// configure_producer() did by hand.
+void test_static_node_begin_folds_catalog_and_session_setup() {
+    Sink tx;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    CHECK(node.topic(0x0101U, 1U, "drive_status").f32("x").end() ==
+          MessageError::Ok);
+
+    const Hello hello = make_hello(Role::Producer);
+    CHECK(node.begin("test-source", hello));
+
+    // config_revision defaulted, role came from hello.role, not repeated.
+    CHECK(node.catalog().config_revision() == 1U);
+    CHECK(node.session()->state() == btp::SessionState::AwaitingHello);
+    CHECK(tx.count() == 1U);  // the announce_catalog() MANIFEST_DATA
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.object_id == btp::object_id::kManifestData);
+}
+
 // ===========================================================================
 // btp::Node -- commands (btp::DedupCache / btp::CommandClient)
 // ===========================================================================
@@ -1069,6 +1334,15 @@ int main() {
     test_subscribe_grant_publish_cadence_and_unsubscribe();
     test_subscribe_renews_before_the_lease_runs_out();
     test_publish_subscribed_topics_walks_registered_topics();
+    test_topic_with_fill_registers_publish_in_one_call();
+    test_static_node_grants_subscriptions_with_no_setup_call();
+    test_begin_can_arm_session_and_announce_catalog();
+    test_static_node_begin_folds_catalog_and_session_setup();
+    test_begin_with_hello_connects_out();
+    test_static_node_bundles_subscription_client();
+    test_static_node_learn_catalog_with_sample_registers_on_sample();
+    test_routine_publishes_and_ticks();
+    test_routine_with_datagram_decodes_and_still_runs_housekeeping();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";
