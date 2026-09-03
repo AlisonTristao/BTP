@@ -23,12 +23,15 @@
 // plus the names.
 
 #include "btp/messages.hpp"   // ManifestReader/Writer, FieldRecord, TelemetryEncoding, MessageError
-#include "btp/telemetry.hpp"  // FieldSpec
+#include "btp/telemetry.hpp"  // FieldSpec, SampleWriter, SampleLayout, the f32/u16/... helpers
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace btp {
+
+class TopicBuilder;  // below Catalog -- topic() returns one
 
 // ---------------------------------------------------------------------------
 // One topic in a Catalog
@@ -113,6 +116,15 @@ public:
                          max_rate_millihz, name, fields, N);
     }
 
+    // The chained alternative to naming a FieldRecord[] and calling
+    // add_topic() on it: catalog.topic(0x0101, 3, "drive_status").f32(...)...
+    // .end(). See TopicBuilder below. Nothing is stored until end() runs.
+    TopicBuilder topic(std::uint16_t topic_id, std::uint16_t schema_version,
+                       const char* name,
+                       TelemetryEncoding encoding = TelemetryEncoding::PackedLe,
+                       bool subscribable = true,
+                       std::uint32_t max_rate_millihz = 0U) noexcept;
+
     // ----- consumer: learn from a MANIFEST_DATA payload ---------------------
     // Walks `payload` (a whole logical MANIFEST_DATA, post-reassembly) and
     // REPLACES the catalogue with the topics it describes. Also copies the
@@ -154,6 +166,254 @@ private:
 
     std::uint32_t config_revision_;
     bool valid_;
+};
+
+// ---------------------------------------------------------------------------
+// TopicBuilder -- declare a topic's schema one field at a time
+// ---------------------------------------------------------------------------
+//
+// The chained alternative to naming a FieldRecord[] and calling add_topic()
+// on it (btp/telemetry.hpp "Schema-declaration helpers") -- the same one-line
+// -per-field feel, for a caller that would rather not name a separate array:
+//
+//   catalog.topic(0x0101, /*schema_version=*/3, "drive_status")
+//       .f32("left_rpm", "rpm")
+//       .f32("right_rpm", "rpm")
+//       .u16("battery_v", 0.001, "V")
+//       .i16("temp_c", 0.1, "Cel", /*is_nullable=*/true)
+//       .end();
+//
+// Fields are buffered on the STACK (kMaxFields -- a per-declaration cap,
+// unrelated to the Catalog's own pool sizing) and committed with one
+// add_topic() call at end(). A one-shot object built by Catalog::topic() and
+// meant to be used and dropped right there -- not for a hot path, not kept
+// around, not default-constructible.
+//
+// A chain call after an error (kMaxFields exceeded, or one end() already
+// reported) is a no-op; end() returns the first error seen, the same "sticky
+// error" rule as btp::SampleWriter / btp::ManifestWriter.
+
+class TopicBuilder {
+public:
+    static const std::size_t kMaxFields = 32U;
+
+    TopicBuilder& u8(const char* name, double scale = 1.0, const char* unit = "",
+                     bool is_nullable = false) noexcept {
+        return add(btp::u8(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& u16(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u16(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& u32(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u32(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& u64(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u64(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& i8(const char* name, double scale = 1.0, const char* unit = "",
+                     bool is_nullable = false) noexcept {
+        return add(btp::i8(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& i16(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i16(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& i32(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i32(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& i64(const char* name, double scale = 1.0,
+                      const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i64(name, scale, unit), is_nullable);
+    }
+    TopicBuilder& f32(const char* name, const char* unit = "",
+                      bool is_nullable = false) noexcept {
+        return add(btp::f32(name, unit), is_nullable);
+    }
+    TopicBuilder& f64(const char* name, const char* unit = "",
+                      bool is_nullable = false) noexcept {
+        return add(btp::f64(name, unit), is_nullable);
+    }
+    TopicBuilder& boolean(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::boolean(name), is_nullable);
+    }
+    TopicBuilder& enum8(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::enum8(name), is_nullable);
+    }
+    TopicBuilder& enum16(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::enum16(name), is_nullable);
+    }
+
+    // Explicit field_id -- schema evolution, mirrors btp::field(): a rename
+    // or reorder that must keep an id in place.
+    TopicBuilder& field(std::uint16_t field_id, WireType type, const char* name,
+                        double scale = 1.0, const char* unit = "",
+                        double offset = 0.0, bool is_nullable = false) noexcept {
+        return add(btp::field(field_id, type, name, scale, unit, offset),
+                   is_nullable);
+    }
+
+    // Commits the buffered fields into the Catalog with one add_topic()
+    // call. Ok on success; otherwise the same errors add_topic() documents,
+    // plus whatever a chain call already stuck (CountTooLarge if a chain
+    // exceeded kMaxFields). Safe to call more than once -- it re-runs
+    // add_topic() each time.
+    MessageError end() noexcept {
+        if (error_ != MessageError::Ok) return error_;
+        error_ = catalog_->add_topic(topic_id_, schema_version_, encoding_,
+                                     subscribable_, max_rate_millihz_, name_,
+                                     fields_, count_);
+        return error_;
+    }
+
+private:
+    friend class Catalog;
+
+    TopicBuilder(Catalog* catalog, std::uint16_t topic_id,
+                std::uint16_t schema_version, const char* name,
+                TelemetryEncoding encoding, bool subscribable,
+                std::uint32_t max_rate_millihz) noexcept
+        : catalog_(catalog),
+          topic_id_(topic_id),
+          schema_version_(schema_version),
+          name_(name),
+          encoding_(encoding),
+          subscribable_(subscribable),
+          max_rate_millihz_(max_rate_millihz),
+          count_(0U),
+          error_(MessageError::Ok) {}
+
+    TopicBuilder& add(FieldRecord field, bool is_nullable) noexcept {
+        if (error_ != MessageError::Ok) return *this;
+        if (count_ >= kMaxFields) {
+            error_ = MessageError::CountTooLarge;
+            return *this;
+        }
+        if (is_nullable) field.flags |= kFieldNullable;
+        fields_[count_++] = field;
+        return *this;
+    }
+
+    Catalog* catalog_;
+    std::uint16_t topic_id_;
+    std::uint16_t schema_version_;
+    const char* name_;
+    TelemetryEncoding encoding_;
+    bool subscribable_;
+    std::uint32_t max_rate_millihz_;
+    FieldRecord fields_[kMaxFields];
+    std::size_t count_;
+    MessageError error_;
+};
+
+inline TopicBuilder Catalog::topic(std::uint16_t topic_id,
+                                   std::uint16_t schema_version,
+                                   const char* name, TelemetryEncoding encoding,
+                                   bool subscribable,
+                                   std::uint32_t max_rate_millihz) noexcept {
+    return TopicBuilder(this, topic_id, schema_version, name, encoding,
+                        subscribable, max_rate_millihz);
+}
+
+// ---------------------------------------------------------------------------
+// NamedSampleWriter -- SampleWriter, checked by field name
+// ---------------------------------------------------------------------------
+//
+// SampleWriter::put_f64() is positional (docs/telemetry.md section 6: a
+// PACKED_LE body is fields in schema order) -- swap two put_f64() calls and it
+// compiles and sends the wrong value on the wire, silently. This wraps a
+// SampleWriter with a CatalogTopic's field_names[] (btp::Catalog already keeps
+// them) and turns that mistake into an InvalidArgument MessageError instead:
+// put() takes the field's NAME, and it must be the schema's next field -- the
+// same cost as put_f64() (one string compare against the one name it could
+// legally be), no allocation, no lookup table.
+//
+//   const btp::CatalogTopic* topic = catalog.topic(kDriveStatus);
+//   btp::NamedSampleWriter w(out, capacity, *topic);
+//   w.begin(topic->schema_version);
+//   w.put("left_rpm", 1450.0);
+//   w.put("right_rpm", -1448.5);
+//   w.put("battery_v", 3.72);
+//   w.put_null("temp_c");
+//   std::size_t written = 0;
+//   if (w.finish(&written) == btp::MessageError::Ok) send(out, written);
+//
+// A name that does not match the expected next field -- the caller's own
+// schema and field order drifted apart -- is InvalidArgument and leaves the
+// writer unusable, loud rather than a silently wrong value on the wire.
+// put_i64 / put_u64 / put_bool mirror SampleWriter's raw-value calls (enum,
+// bool, a field whose raw count is already at hand); array fields are not
+// covered -- reach the underlying SampleWriter (writer()) for those.
+
+class NamedSampleWriter {
+public:
+    NamedSampleWriter(std::uint8_t* out, std::size_t capacity,
+                      const CatalogTopic& topic) noexcept
+        : writer_(out, capacity, topic.fields, topic.field_count),
+          topic_(&topic),
+          next_(0U) {}
+
+    MessageError begin(std::uint16_t schema_version,
+                       SampleLayout layout = SampleLayout::LogicalPayload) noexcept {
+        return writer_.begin(schema_version, layout);
+    }
+
+    MessageError put(const char* name, double engineering_value) noexcept {
+        const MessageError order = check(name);
+        return order != MessageError::Ok ? order
+                                         : advance(writer_.put_f64(engineering_value));
+    }
+    MessageError put_i64(const char* name, std::int64_t raw) noexcept {
+        const MessageError order = check(name);
+        return order != MessageError::Ok ? order : advance(writer_.put_i64(raw));
+    }
+    MessageError put_u64(const char* name, std::uint64_t raw) noexcept {
+        const MessageError order = check(name);
+        return order != MessageError::Ok ? order : advance(writer_.put_u64(raw));
+    }
+    MessageError put_bool(const char* name, bool value) noexcept {
+        const MessageError order = check(name);
+        return order != MessageError::Ok ? order
+                                         : advance(writer_.put_bool(value));
+    }
+    MessageError put_null(const char* name) noexcept {
+        const MessageError order = check(name);
+        return order != MessageError::Ok ? order : advance(writer_.put_null());
+    }
+
+    MessageError finish(std::size_t* written) noexcept {
+        return writer_.finish(written);
+    }
+    std::size_t size() const noexcept { return writer_.size(); }
+
+    // Escape hatch: the array put_array_* calls, or anything else
+    // SampleWriter offers that the by-name calls above do not wrap.
+    SampleWriter& writer() noexcept { return writer_; }
+
+private:
+    MessageError check(const char* name) noexcept {
+        if (name == nullptr || next_ >= topic_->field_count) {
+            return MessageError::InvalidArgument;
+        }
+        const char* expected = topic_->field_names != nullptr
+                                   ? topic_->field_names[next_]
+                                   : "";
+        if (std::strcmp(name, expected) != 0) {
+            return MessageError::InvalidArgument;
+        }
+        return MessageError::Ok;
+    }
+    MessageError advance(MessageError result) noexcept {
+        if (result == MessageError::Ok) ++next_;
+        return result;
+    }
+
+    SampleWriter writer_;
+    const CatalogTopic* topic_;
+    std::size_t next_;
 };
 
 // ---------------------------------------------------------------------------

@@ -244,6 +244,116 @@ void test_bad_manifest() {
     CHECK(cat.topic_count() == 0U);
 }
 
+// ===========================================================================
+// TopicBuilder -- the chained alternative to a FieldRecord[]
+// ===========================================================================
+
+using btp::NamedSampleWriter;
+
+void test_topic_builder_matches_the_array_form() {
+    btp::StaticCatalog<> chained;
+    CHECK(chained.topic(0x0101U, 3U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001)
+             .i16("temp_c", 0.1, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+
+    btp::StaticCatalog<> by_hand;
+    CHECK(by_hand.add_topic(0x0101U, 3U, "drive_status", kDriveStatus) ==
+          MessageError::Ok);
+
+    const CatalogTopic* a = chained.topic(0x0101U);
+    const CatalogTopic* b = by_hand.topic(0x0101U);
+    CHECK(a != nullptr && b != nullptr);
+    CHECK(a->field_count == b->field_count);
+    for (std::size_t i = 0U; i < a->field_count; ++i) {
+        CHECK(a->fields[i].type == b->fields[i].type);
+        CHECK(a->fields[i].scale == b->fields[i].scale);
+        CHECK(a->fields[i].flags == b->fields[i].flags);
+        CHECK(std::strcmp(chained.field_name(*a, i), by_hand.field_name(*b, i)) ==
+              0);
+    }
+}
+
+void test_topic_builder_propagates_add_topic_errors() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0101U, 1U, "first", kDriveStatus) == MessageError::Ok);
+
+    // add_topic() itself rejects the duplicate id -- end() surfaces it.
+    CHECK(cat.topic(0x0101U, 2U, "again").u8("x").end() ==
+          MessageError::InvalidArgument);
+}
+
+void test_topic_builder_caps_fields_per_declaration() {
+    btp::StaticCatalog<1, 64, 512> cat;
+    btp::TopicBuilder b = cat.topic(0x0101U, 1U, "wide");
+    char names[btp::TopicBuilder::kMaxFields + 1U][4];
+    for (std::size_t i = 0U; i < btp::TopicBuilder::kMaxFields + 1U; ++i) {
+        names[i][0] = 'a';
+        names[i][1] = static_cast<char>('A' + (i % 26U));
+        names[i][2] = static_cast<char>('0' + (i / 26U));
+        names[i][3] = '\0';
+        b.u8(names[i]);
+    }
+    // One past the cap -- the chain already stuck CountTooLarge.
+    CHECK(b.end() == MessageError::CountTooLarge);
+}
+
+// ===========================================================================
+// NamedSampleWriter -- SampleWriter, checked by field name
+// ===========================================================================
+
+void test_named_sample_writer_round_trips_by_name() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0101U, 3U, "drive_status", kDriveStatus) ==
+          MessageError::Ok);
+    const CatalogTopic* topic = cat.topic(0x0101U);
+    CHECK(topic != nullptr);
+
+    std::uint8_t buffer[64];
+    NamedSampleWriter w(buffer, sizeof(buffer), *topic);
+    CHECK(w.begin(topic->schema_version) == MessageError::Ok);
+    CHECK(w.put("left_rpm", 1450.0) == MessageError::Ok);
+    CHECK(w.put("right_rpm", -1448.5) == MessageError::Ok);
+    CHECK(w.put("battery_v", 3.72) == MessageError::Ok);
+    CHECK(w.put_null("temp_c") == MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(w.finish(&written) == MessageError::Ok);
+
+    btp::SampleReader r(buffer, written, topic->fields, topic->field_count,
+                        topic->encoding);
+    btp::SampleValue v = {};
+    CHECK(r.next(&v) == btp::SampleStep::Item);
+    CHECK(v.f64(0) == 1450.0);
+    CHECK(r.next(&v) == btp::SampleStep::Item);
+    CHECK(v.f64(0) == -1448.5);
+    CHECK(r.next(&v) == btp::SampleStep::Item);
+    CHECK(v.f64(0) > 3.71 && v.f64(0) < 3.73);  // millivolt scale, rounded
+    CHECK(r.next(&v) == btp::SampleStep::Item);
+    CHECK(v.is_null);
+    CHECK(r.next(&v) == btp::SampleStep::End);
+    CHECK(r.finish() == MessageError::Ok);
+}
+
+void test_named_sample_writer_rejects_the_wrong_field_name() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0101U, 3U, "drive_status", kDriveStatus) ==
+          MessageError::Ok);
+    const CatalogTopic* topic = cat.topic(0x0101U);
+    CHECK(topic != nullptr);
+
+    std::uint8_t buffer[64];
+    NamedSampleWriter w(buffer, sizeof(buffer), *topic);
+    CHECK(w.begin(topic->schema_version) == MessageError::Ok);
+    CHECK(w.put("left_rpm", 1450.0) == MessageError::Ok);
+    // "battery_v" out of order -- the schema's next field is "right_rpm".
+    CHECK(w.put("battery_v", 3.72) == MessageError::InvalidArgument);
+
+    std::size_t written = 0U;
+    CHECK(w.finish(&written) != MessageError::Ok);  // incomplete: never sent
+}
+
 }  // namespace
 
 int main() {
@@ -253,6 +363,12 @@ int main() {
     test_not_modified();
     test_capacity();
     test_bad_manifest();
+
+    test_topic_builder_matches_the_array_form();
+    test_topic_builder_propagates_add_topic_errors();
+    test_topic_builder_caps_fields_per_declaration();
+    test_named_sample_writer_round_trips_by_name();
+    test_named_sample_writer_rejects_the_wrong_field_name();
 
     if (failures == 0) {
         std::cout << "test_catalog: all checks passed\n";
