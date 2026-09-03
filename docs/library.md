@@ -2782,11 +2782,14 @@ the manifest and `btp::telemetry` decodes the sample — the piece between,
 
 `btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes>`, which owns
 the pools) holds one topic per entry — `topic_id`, `schema_version`, encoding,
-`max_rate_millihz`, subscribable, a `FieldSpec[]` and the topic + field names.
-`add_topic()` fills it from `FieldRecord`s (a producer's own schema);
-`ingest(payload, size)` fills it by walking a `MANIFEST_DATA`;
-`write_topics(ManifestWriter*)` serialises it back. Same guarantees as the rest
-of the library.
+`max_rate_millihz`, subscribable, a `FieldSpec[]`, the topic + field names, and
+(since 2.18.0) each field's unit and description, read back with
+`field_unit()`/`field_description()` next to `field_name()` — `""` when that
+pool was not kept or the field is out of range, never `nullptr`. A topic's own
+description does not round-trip yet. `add_topic()` fills it from `FieldRecord`s
+(a producer's own schema); `ingest(payload, size)` fills it by walking a
+`MANIFEST_DATA`; `write_topics(ManifestWriter*)` serialises it back. Same
+guarantees as the rest of the library.
 
 **On the consumer**, `node.learn_catalog(&catalog)` hands it to the node:
 

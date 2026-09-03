@@ -17,10 +17,12 @@
 // no clock, no I/O, no global state.
 //
 // v1 covers TELEMETRY topics and their fields -- field_id, order, type, scale,
-// offset, element counts, nullability, and the topic + field NAMES. NOT yet:
-// units, descriptions, enum labels, action (command) records, the format-2
-// source_info block. A round-tripped manifest keeps what the sample codec needs
-// plus the names.
+// offset, element counts, nullability, the topic + field NAMES, and (v1.1)
+// each field's UNIT and DESCRIPTION. NOT yet: a topic's own description, enum
+// labels, action (command) records, the format-2 source_info block. A
+// round-tripped manifest keeps what the sample codec needs, the names, and
+// what a field-level UI label needs (unit/description); a topic-level one
+// still does not round-trip.
 
 #include "btp/messages.hpp"   // ManifestReader/Writer, FieldRecord, TelemetryEncoding, MessageError
 #include "btp/telemetry.hpp"  // FieldSpec, SampleWriter, SampleLayout, the f32/u16/... helpers
@@ -37,8 +39,9 @@ class TopicBuilder;  // below Catalog -- topic() returns one
 // One topic in a Catalog
 // ---------------------------------------------------------------------------
 //
-// `fields`, `name` and `field_names` point into the Catalog's caller-owned
-// pools and are valid until the next add_topic() / ingest() / clear().
+// `fields`, `name`, `field_names`, `field_units` and `field_descriptions`
+// point into the Catalog's caller-owned pools and are valid until the next
+// add_topic() / ingest() / clear().
 
 struct CatalogTopic {
     std::uint16_t topic_id;
@@ -52,6 +55,11 @@ struct CatalogTopic {
 
     const char* name;                // NUL-terminated; "" without a string pool
     const char* const* field_names;  // field_count NUL-terminated entries
+    // Both nullptr when their pool was not set (Catalog::field_unit() /
+    // field_description() already fold that into "" -- reach through these
+    // directly only to skip the per-call bounds check).
+    const char* const* field_units;
+    const char* const* field_descriptions;
 };
 
 // ---------------------------------------------------------------------------
@@ -62,11 +70,20 @@ class Catalog {
 public:
     // The caller owns every pool. `string_pool` / `name_ptr_pool` may be
     // {nullptr, 0}: names then come back as "" and a producer serialises empty
-    // field names. btp::StaticCatalog bundles the four regions.
+    // field names. `unit_ptr_pool` / `description_ptr_pool` are the same idea,
+    // one field-sized pointer array each, both optional and independent of
+    // `name_ptr_pool` and of each other -- keep names but not units, say, by
+    // passing {nullptr, 0} for just the one not wanted. All interned strings
+    // -- names, units, descriptions alike -- share the one `string_pool`.
+    // btp::StaticCatalog bundles all six regions.
     Catalog(CatalogTopic* topics, std::size_t topic_capacity,
             FieldSpec* field_pool, std::size_t field_pool_capacity,
             const char** name_ptr_pool, std::size_t name_ptr_capacity,
-            char* string_pool, std::size_t string_pool_capacity) noexcept;
+            char* string_pool, std::size_t string_pool_capacity,
+            const char** unit_ptr_pool = nullptr,
+            std::size_t unit_ptr_capacity = 0U,
+            const char** description_ptr_pool = nullptr,
+            std::size_t description_ptr_capacity = 0U) noexcept;
 
     // True when the topic slots and the field pool are non-null and non-empty.
     // Check once after construction.
@@ -85,14 +102,23 @@ public:
     const CatalogTopic* topic(std::uint16_t topic_id) const noexcept;
     const CatalogTopic* topic_at(std::size_t index) const noexcept;
 
-    // The name of field `index` of `t` -- "" when names were not kept or the
-    // index is out of range, so it is always safe to print.
+    // The name / unit / description of field `index` of `t` -- "" when that
+    // pool was not kept or the index is out of range, so each is always safe
+    // to print.
     const char* field_name(const CatalogTopic& t,
                            std::size_t index) const noexcept;
+    const char* field_unit(const CatalogTopic& t,
+                           std::size_t index) const noexcept;
+    const char* field_description(const CatalogTopic& t,
+                                  std::size_t index) const noexcept;
 
     // ----- producer: fill the catalogue by hand -----------------------------
-    // Copies the topic metadata, field_spec() of each FieldRecord, and (when a
-    // string pool is set) the topic name and each field's name.
+    // Copies the topic metadata, field_spec() of each FieldRecord, and (when
+    // the matching pool is set) the topic name and each field's name, unit and
+    // description -- `fields[i].unit` / `.description` come along automatically
+    // once the caller passes a non-empty one, whether built by hand, by
+    // btp::f32(name, unit) and friends, or by TopicBuilder (which only ever
+    // sets unit, never description -- see its own comment).
     //   Ok                 -- stored.
     //   BufferTooSmall     -- a pool is full.
     //   InvalidArgument    -- a null pointer, field_count 0, a duplicate
@@ -138,7 +164,9 @@ public:
     // begin_topic / add_field / end_topic for every topic. The caller opened
     // `writer` with a header whose topic_count == topic_count(); afterwards it
     // adds actions (none in v1) and calls finish(). Field units and
-    // descriptions are written empty.
+    // descriptions round-trip (whatever field_unit()/field_description() would
+    // return); the topic's own description is still written empty -- see this
+    // header's top comment.
     MessageError write_topics(ManifestWriter* writer) const noexcept;
 
 private:
@@ -159,6 +187,14 @@ private:
     const char** name_ptr_pool_;
     std::size_t name_ptr_capacity_;
     std::size_t name_ptr_used_;
+
+    const char** unit_ptr_pool_;
+    std::size_t unit_ptr_capacity_;
+    std::size_t unit_ptr_used_;
+
+    const char** description_ptr_pool_;
+    std::size_t description_ptr_capacity_;
+    std::size_t description_ptr_used_;
 
     char* string_pool_;
     std::size_t string_pool_capacity_;
@@ -427,14 +463,18 @@ struct CatalogStorage {
     CatalogTopic topics[Topics];
     FieldSpec field_pool[Fields];
     const char* name_ptr_pool[Fields];
+    const char* unit_ptr_pool[Fields];
+    const char* description_ptr_pool[Fields];
     char string_pool[StringBytes];
 };
 
 }  // namespace detail
 
-// Defaults: 8 topics, 64 field specs across them, 1 KiB of name text.
+// Defaults: 8 topics, 64 field specs across them, 1.5 KiB of name/unit/
+// description text (up from 1 KiB pre-v1.1 -- units and descriptions now
+// share this same pool, so the same field count needs more of it).
 template <std::size_t Topics = 8, std::size_t Fields = 64,
-          std::size_t StringBytes = 1024>
+          std::size_t StringBytes = 1536>
 class StaticCatalog : private detail::CatalogStorage<Topics, Fields, StringBytes>,
                       public Catalog {
     using Storage = detail::CatalogStorage<Topics, Fields, StringBytes>;
@@ -444,7 +484,8 @@ public:
         : Storage(),
           Catalog(Storage::topics, Topics, Storage::field_pool, Fields,
                   Storage::name_ptr_pool, Fields, Storage::string_pool,
-                  StringBytes) {}
+                  StringBytes, Storage::unit_ptr_pool, Fields,
+                  Storage::description_ptr_pool, Fields) {}
 };
 
 }  // namespace btp
