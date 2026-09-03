@@ -656,6 +656,108 @@ private:
     std::uint32_t peer_boot_id_;
 };
 
+// ===========================================================================
+// CommandClient -- the INITIATOR half of commands (docs/commands.md section 2)
+// ===========================================================================
+//
+// btp::DedupCache above is the RESPONDER's half: execute once, remember the
+// result, replay a retransmission. CommandClient is the other end: send
+// COMMAND_REQUEST, correlate the eventual COMMAND_RESULT against it -- the
+// same RequestRef-matching rule btp::SessionInitiator / a
+// btp::SubscriptionClient slot use for HELLO_RESULT / SUBSCRIBE_RESULT.
+//
+// No I/O, no buffering of the result: on_result() hands back the DECODED
+// CommandResult's own `message` / `result` ByteViews unchanged (they already
+// view the caller's reassembly buffer) rather than copying them into a
+// second buffer of its own -- valid for exactly as long as that buffer is
+// (docs/library.md section 2.5's zero-copy rule), which in practice means
+// "until the next receive()", same as any other decoded payload. No retry
+// budget -- a command that gets no answer within kCommandTimeoutMs reports
+// TimedOut and the caller decides whether to call command() again, the same
+// stance as btp::SessionInitiator / btp::SubscriptionClient.
+
+enum class CommandEvent : std::uint8_t {
+    None,       // nothing to act on: no free slot, or a result that did not correlate
+    Completed,  // a correlated COMMAND_RESULT arrived -- status / error_code /
+                // message / result below are it, whatever the action decided
+                // (Success is not implied -- check status).
+    TimedOut,   // no COMMAND_RESULT within kCommandTimeoutMs -- slot freed.
+};
+
+const char* command_event_string(CommandEvent event) noexcept;
+
+// How long command() waits for COMMAND_RESULT before expire() frees the slot.
+static const std::uint64_t kCommandTimeoutMs = 5000U;
+
+struct CommandOutcome {
+    CommandEvent event;
+    std::uint32_t local_id;   // which slot -- 0 when event == None
+    std::uint8_t status;      // ResultStatus -- meaningful only on Completed
+    std::uint16_t error_code; // ResultError  -- meaningful only on Completed
+    ByteView message;         // meaningful only on Completed; see the zero-copy note above
+    ByteView result;          // ditto
+};
+
+// One outstanding COMMAND_REQUEST. Opaque -- storage is bound by
+// CommandClient's constructor.
+class ClientCommand {
+public:
+    ClientCommand() noexcept;
+
+private:
+    friend class CommandClient;
+
+    bool pending_;
+    std::uint32_t local_id_;
+    std::uint32_t own_source_id_;
+    std::uint32_t own_boot_id_;
+    std::uint32_t own_sequence_;
+    std::uint64_t deadline_ms_;
+};
+
+class CommandClient {
+public:
+    CommandClient(ClientCommand* slots, std::size_t slot_count) noexcept;
+
+    bool valid() const noexcept { return slots_ != nullptr && slot_count_ != 0U; }
+    std::size_t slot_count() const noexcept { return slot_count_; }
+
+    // Encodes COMMAND_REQUEST into `out`; the caller sends it with
+    // `own_source_id` / `own_boot_id` / `own_sequence` -- the identity and
+    // sequence the endpoint puts on that frame, since that is the triple
+    // COMMAND_RESULT's RequestRef must echo back. Returns a local id (!= 0)
+    // to recognise the eventual on_result() outcome by, or 0 (no free slot,
+    // or a malformed request -- encode_command_request()'s errors).
+    std::uint32_t command(std::uint32_t target_source_id, std::uint32_t target_boot_id,
+                          std::uint16_t action_id, std::uint16_t action_version,
+                          const std::uint8_t* parameters, std::size_t parameters_size,
+                          std::uint32_t own_source_id, std::uint32_t own_boot_id,
+                          std::uint32_t own_sequence, std::uint64_t now_ms,
+                          std::uint8_t* out, std::size_t out_capacity,
+                          std::size_t* out_size) noexcept;
+
+    // Feed a decoded COMMAND_RESULT. Finds the slot whose outstanding
+    // request correlates (RequestRef match) and frees it either way --
+    // there is no further state to keep once the result is in the caller's
+    // hands. event.local_id is 0 (event None) when nothing correlated (a
+    // stale / unrelated result -- any slot still waiting is untouched).
+    CommandOutcome on_result(const CommandResult& result) noexcept;
+
+    // Frees ONE Pending slot past kCommandTimeoutMs at now_ms and reports it
+    // (TimedOut), or None if none is due. Call in a loop
+    // (`while (client.expire(now_ms).event != CommandEvent::None) {}`) to
+    // drain every timed-out slot in one tick().
+    CommandOutcome expire(std::uint64_t now_ms) noexcept;
+
+private:
+    ClientCommand* find_pending(std::uint32_t source_id, std::uint32_t boot_id,
+                               std::uint32_t sequence) noexcept;
+
+    ClientCommand* slots_;
+    std::size_t slot_count_;
+    std::uint32_t next_local_id_;
+};
+
 }  // namespace btp
 
 #endif  // BTP_SESSION_HPP

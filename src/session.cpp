@@ -734,4 +734,104 @@ InitiatorOutcome SessionInitiator::reset() noexcept {
     return InitiatorOutcome{InitiatorEvent::Disconnected};
 }
 
+// ---------------------------------------------------------------------------
+// CommandClient
+// ---------------------------------------------------------------------------
+
+const char* command_event_string(CommandEvent event) noexcept {
+    switch (event) {
+        case CommandEvent::None: return "None";
+        case CommandEvent::Completed: return "Completed";
+        case CommandEvent::TimedOut: return "TimedOut";
+    }
+    return "Unknown";
+}
+
+ClientCommand::ClientCommand() noexcept
+    : pending_(false),
+      local_id_(0U),
+      own_source_id_(0U),
+      own_boot_id_(0U),
+      own_sequence_(0U),
+      deadline_ms_(0U) {}
+
+CommandClient::CommandClient(ClientCommand* slots, std::size_t slot_count) noexcept
+    : slots_(slots), slot_count_(slot_count), next_local_id_(1U) {}
+
+ClientCommand* CommandClient::find_pending(std::uint32_t source_id,
+                                           std::uint32_t boot_id,
+                                           std::uint32_t sequence) noexcept {
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        ClientCommand& s = slots_[i];
+        if (s.pending_ && s.own_source_id_ == source_id &&
+            s.own_boot_id_ == boot_id && s.own_sequence_ == sequence) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+std::uint32_t CommandClient::command(
+    std::uint32_t target_source_id, std::uint32_t target_boot_id,
+    std::uint16_t action_id, std::uint16_t action_version,
+    const std::uint8_t* parameters, std::size_t parameters_size,
+    std::uint32_t own_source_id, std::uint32_t own_boot_id,
+    std::uint32_t own_sequence, std::uint64_t now_ms, std::uint8_t* out,
+    std::size_t out_capacity, std::size_t* out_size) noexcept {
+    ClientCommand* slot = nullptr;
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        if (!slots_[i].pending_) {
+            slot = &slots_[i];
+            break;
+        }
+    }
+    if (slot == nullptr) return 0U;
+
+    CommandRequest req = {};
+    req.target_source_id = target_source_id;
+    req.target_boot_id = target_boot_id;
+    req.action_id = action_id;
+    req.action_version = action_version;
+    req.parameters = ByteView{parameters, parameters_size};
+    std::size_t written = 0U;
+    if (encode_command_request(req, out, out_capacity, &written) != MessageError::Ok) {
+        return 0U;
+    }
+    if (out_size != nullptr) *out_size = written;
+
+    slot->pending_ = true;
+    slot->local_id_ = next_local_id_++;
+    slot->own_source_id_ = own_source_id;
+    slot->own_boot_id_ = own_boot_id;
+    slot->own_sequence_ = own_sequence;
+    slot->deadline_ms_ = now_ms + kCommandTimeoutMs;
+    return slot->local_id_;
+}
+
+CommandOutcome CommandClient::on_result(const CommandResult& result) noexcept {
+    ClientCommand* slot =
+        find_pending(result.request.request_source_id, result.request.request_boot_id,
+                    result.request.reply_to_sequence);
+    if (slot == nullptr) {
+        return CommandOutcome{CommandEvent::None, 0U, 0U, 0U, ByteView{}, ByteView{}};
+    }
+    const std::uint32_t local_id = slot->local_id_;
+    *slot = ClientCommand();
+    return CommandOutcome{CommandEvent::Completed, local_id,       result.status,
+                          result.error_code,       result.message, result.result};
+}
+
+CommandOutcome CommandClient::expire(std::uint64_t now_ms) noexcept {
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        ClientCommand& s = slots_[i];
+        if (s.pending_ && now_ms >= s.deadline_ms_) {
+            const std::uint32_t local_id = s.local_id_;
+            s = ClientCommand();
+            return CommandOutcome{CommandEvent::TimedOut, local_id, 0U, 0U, ByteView{},
+                                  ByteView{}};
+        }
+    }
+    return CommandOutcome{CommandEvent::None, 0U, 0U, 0U, ByteView{}, ByteView{}};
+}
+
 }  // namespace btp

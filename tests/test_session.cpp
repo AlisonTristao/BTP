@@ -1000,6 +1000,129 @@ void test_initiator_state_and_event_strings() {
                       "Connected") == 0);
 }
 
+// ===========================================================================
+// btp::CommandClient -- the initiator half of commands
+// ===========================================================================
+
+using btp::ClientCommand;
+using btp::CommandClient;
+using btp::CommandEvent;
+using btp::CommandOutcome;
+using btp::CommandRequest;
+using btp::CommandResult;
+
+std::uint32_t do_command(CommandClient& client, std::uint32_t own_sequence,
+                         std::uint64_t now_ms = 0U, std::uint16_t action_id = 7U) {
+    std::uint8_t out[32];
+    std::size_t n = 0U;
+    const std::uint8_t params[2] = {0xAAU, 0xBBU};
+    return client.command(kOwnSource /*reused as a peer id here*/, kOwnBoot, action_id,
+                          1U, params, sizeof(params), kOwnSource, kOwnBoot, own_sequence,
+                          now_ms, out, sizeof(out), &n);
+}
+
+CommandResult make_command_result(std::uint32_t own_sequence,
+                                  btp::ResultStatus status = btp::ResultStatus::Success) {
+    CommandResult r = {};
+    r.request.request_source_id = kOwnSource;
+    r.request.request_boot_id = kOwnBoot;
+    r.request.reply_to_sequence = own_sequence;
+    r.action_id = 7U;
+    r.action_version = 1U;
+    r.status = static_cast<std::uint8_t>(status);
+    return r;
+}
+
+void test_command_client_encodes_a_real_command_request() {
+    ClientCommand slots[4];
+    CommandClient client(slots, 4);
+    std::uint8_t out[32];
+    std::size_t n = 0U;
+    const std::uint8_t params[3] = {1, 2, 3};
+    const std::uint32_t id =
+        client.command(0x1111U, 0x2222U, 42U, 3U, params, sizeof(params), kOwnSource,
+                       kOwnBoot, 9U, 0U, out, sizeof(out), &n);
+    CHECK(id != 0U);
+
+    CommandRequest decoded = {};
+    CHECK(btp::decode_command_request(out, n, &decoded) == btp::MessageError::Ok);
+    CHECK(decoded.target_source_id == 0x1111U);
+    CHECK(decoded.target_boot_id == 0x2222U);
+    CHECK(decoded.action_id == 42U);
+    CHECK(decoded.action_version == 3U);
+    CHECK(decoded.parameters.size == sizeof(params));
+}
+
+void test_command_client_fails_without_a_free_slot() {
+    ClientCommand slots[1];
+    CommandClient client(slots, 1);
+    CHECK(do_command(client, 1U) != 0U);
+    CHECK(do_command(client, 2U) == 0U);  // the one slot is still pending
+}
+
+void test_command_client_on_result_completes() {
+    ClientCommand slots[4];
+    CommandClient client(slots, 4);
+    const std::uint32_t id = do_command(client, 5U);
+
+    const CommandOutcome o = client.on_result(make_command_result(5U));
+    CHECK(o.event == CommandEvent::Completed);
+    CHECK(o.local_id == id);
+    CHECK(o.status == static_cast<std::uint8_t>(btp::ResultStatus::Success));
+
+    // The slot is free again.
+    CHECK(do_command(client, 6U) != 0U);
+}
+
+void test_command_client_on_result_carries_failure_through() {
+    ClientCommand slots[4];
+    CommandClient client(slots, 4);
+    do_command(client, 5U);
+    const CommandOutcome o =
+        client.on_result(make_command_result(5U, btp::ResultStatus::Rejected));
+    CHECK(o.event == CommandEvent::Completed);  // Completed -- the ACTION was
+                                                // rejected, that is not a
+                                                // transport-level failure
+    CHECK(o.status == static_cast<std::uint8_t>(btp::ResultStatus::Rejected));
+}
+
+void test_command_client_on_result_uncorrelated_is_ignored() {
+    ClientCommand slots[4];
+    CommandClient client(slots, 4);
+    do_command(client, 5U);
+    const CommandOutcome stale = client.on_result(make_command_result(/*seq=*/6U));
+    CHECK(stale.event == CommandEvent::None);
+    CHECK(stale.local_id == 0U);
+
+    CHECK(client.on_result(make_command_result(5U)).event == CommandEvent::Completed);
+}
+
+void test_command_client_expire_drains_every_timed_out_slot() {
+    ClientCommand slots[2];
+    CommandClient client(slots, 2);
+    const std::uint32_t a = do_command(client, 1U, 0U);
+    const std::uint32_t b = do_command(client, 2U, 0U);
+    CHECK(a != 0U && b != 0U && a != b);
+
+    CHECK(client.expire(btp::kCommandTimeoutMs - 1U).event == CommandEvent::None);
+
+    const CommandOutcome first = client.expire(btp::kCommandTimeoutMs);
+    CHECK(first.event == CommandEvent::TimedOut);
+    const CommandOutcome second = client.expire(btp::kCommandTimeoutMs);
+    CHECK(second.event == CommandEvent::TimedOut);
+    CHECK(first.local_id != second.local_id);  // both slots, not the same one twice
+    CHECK(client.expire(btp::kCommandTimeoutMs).event == CommandEvent::None);
+
+    // Both freed -- a fresh command() gets a slot again.
+    CHECK(do_command(client, 3U) != 0U);
+}
+
+void test_command_event_strings() {
+    CHECK(std::strcmp(btp::command_event_string(CommandEvent::Completed),
+                      "Completed") == 0);
+    CHECK(btp::command_event_string(CommandEvent::TimedOut) != nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -1049,6 +1172,14 @@ int main() {
     test_initiator_disconnect_returns_to_idle();
     test_initiator_reset_reports_disconnected_once();
     test_initiator_state_and_event_strings();
+
+    test_command_client_encodes_a_real_command_request();
+    test_command_client_fails_without_a_free_slot();
+    test_command_client_on_result_completes();
+    test_command_client_on_result_carries_failure_through();
+    test_command_client_on_result_uncorrelated_is_ignored();
+    test_command_client_expire_drains_every_timed_out_slot();
+    test_command_event_strings();
 
     if (failures != 0) {
         std::cerr << failures << " check(s) failed\n";
