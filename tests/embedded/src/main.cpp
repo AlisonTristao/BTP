@@ -3,6 +3,7 @@
 #include <btp/endpoint.hpp>
 #include <btp/fragmentation.hpp>
 #include <btp/messages.hpp>
+#include <btp/node.hpp>
 #include <btp/receiver.hpp>
 #include <btp/session.hpp>
 #include <btp/stream.hpp>
@@ -224,6 +225,38 @@ void setup() {
     (void)receiver.expire(10000U);
     (void)receiver.stats();
     receiver.clear();
+
+    // btp::node compiles and links on the embedded target: btp::Endpoint,
+    // btp::Receiver and (opt-in) btp::Session in one object, every dependency a
+    // function pointer, buffers owned by btp::StaticNode, no allocation, no
+    // exceptions.
+    struct NodeSink {
+        static bool send(void*, const std::uint8_t* frame, std::size_t size) {
+            (void)frame;
+            return size != 0U;
+        }
+    };
+    btp::NodeConfig node_config = {};
+    node_config.source_id = 0x0A0B0C0DU;
+    node_config.boot_id = 0x01020304U;
+    node_config.transport = btp::TransportProfile::EspNow;
+    node_config.send = &NodeSink::send;
+    static btp::StaticNode<2U, btp::kEspNowMaxPayloadSize, 256U> node(
+        node_config);
+    (void)node.begin();
+    (void)node.send(btp::MessageType::Telemetry, 1U, payload, sizeof(payload),
+                    0U);
+    node.enable_session(session_local, 0U);
+    node.arm_session(0U);
+    btp::ReceivedMessage node_received = {};
+    (void)node.receive(endpoint_last_frame, endpoint_last_frame_size, 1U,
+                       &node_received);
+    (void)node.tick(2U);
+    (void)node.stats();
+    (void)node.session_event();
+    (void)node.endpoint();
+    (void)node.receiver();
+    (void)btp::node_rx_string(btp::NodeRx::Complete);
 }
 
 void loop() {}

@@ -76,7 +76,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into nine headers.
+The public API is divided into ten headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -88,9 +88,10 @@ The public API is divided into nine headers.
 | `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
 | `btp/endpoint.hpp`      | `btp::Endpoint` — identity, sequencing and the transmit pipeline |
 | `btp/receiver.hpp`      | `btp::Receiver` — decode, CRC and reassembly on the receive path |
+| `btp/node.hpp`          | `btp::Node` — endpoint + receiver + session in one object   |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through seven CMake targets.
+The implementation is exposed through eight CMake targets.
 
 ### `btp::codec`
 
@@ -206,6 +207,25 @@ reassembler, sweeps stale partials, and hands back a whole logical message
 and opening an encrypted payload, stay the integration's.
 [The receive layer](#15-the-receive-layer) covers it.
 
+### `btp::node`
+
+`btp::node` contains:
+
+```text
+node.cpp
+```
+
+It links `btp::endpoint`, `btp::receiver` and `btp::session` — the three
+layers it wires together — and, like them, needs no mbedtls and is always
+built. Same guarantees as the rest of the library.
+
+It is `btp::Node`: `btp::Endpoint`, `btp::Receiver` and — opt-in —
+`btp::Session` in one object, sharing one identity, one `now_ms` notion and one
+set of caller-owned buffers, with every external dependency (`send`, `clock`,
+`seal`, `open`) a C function pointer in a `NodeConfig`. It adds no wire field
+and holds no new state — the three members stay reachable for a caller that
+wants a layer directly. [The node layer](#16-the-node-layer) covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -236,14 +256,15 @@ Conceptually:
        +-------------+------+------+
        |             |             |
  btp::messages  btp::endpoint  btp::receiver     btp::aead
-       ^                                            |
-+------+------+                                     v
-|             |                                mbedcrypto
-btp::telemetry  btp::session
+       ^             ^     ^      ^   ^              |
++------+------+      |     +--+---+   |              v
+|             |      |        |      |         mbedcrypto
+btp::telemetry  btp::session  btp::node
 ```
 
 `btp::messages`, `btp::endpoint` and `btp::receiver` each link `btp::codec`;
-`btp::telemetry` and `btp::session` each link `btp::messages`; `btp::aead`
+`btp::telemetry` and `btp::session` each link `btp::messages`; `btp::node`
+links `btp::endpoint`, `btp::receiver` and `btp::session`; `btp::aead`
 additionally links mbedcrypto. Encryption is therefore optional at build time,
 and the basic frame codec requires neither the payload layer nor the
 cryptographic component.
@@ -2538,7 +2559,113 @@ The routing switch on a completed message; **opening** an encrypted payload
 
 ---
 
-## 16. Putting the library together
+## 16. The node layer
+
+`btp::Node` (`btp/node.hpp`, target `btp::node`) is the friendly facade:
+`btp::Endpoint`, `btp::Receiver` and — opt-in — `btp::Session` in **one
+object**. Those three layers already un-hand-roll the transmit, receive and
+responder-session mechanisms; what stayed the integration's, and what every
+consumer then wrote once by hand, is the *wiring* between them — give the
+endpoint an identity, size and bind the reassembly storage, thread one `now_ms`
+through both, feed each decoded frame to the session before routing it, answer
+`HELLO` / `SESSION_CLOSE` through the same send path. `btp::Node` is that wiring
+written once.
+
+It adds **no wire field** and holds **no new state** — it forwards to the three
+objects it owns, which stay reachable (`endpoint()`, `receiver()`, `session()`)
+for a caller that wants a layer directly. Same guarantees as the rest of the
+library.
+
+### 16.1 The contract
+
+Every external dependency is a **C function pointer** in `NodeConfig` (a `void*`
+context and a plain function — never `std::function`, never virtual):
+
+| field | when | what it does |
+| --- | --- | --- |
+| `send` | **required** | one encoded frame → your radio / UART / HID |
+| `clock` | optional | `→ now_ms`; `nullptr` means you pass `now_ms` to `receive()` / `tick()` |
+| `seal` | optional | encrypt one logical payload; `nullptr` → `send()` is cleartext |
+| `open` | optional | decrypt one received payload; `nullptr` → `receive()` hands back the sealed bytes |
+
+The **key never enters BTP**. `seal` is a `btp::EndpointSealFn` and `open` a
+`btp::NodeOpenFn`; the key lives in *your* functions, which select it from
+`header.source_id` (real: `RadioSeal` / `bally-seal`) and call `btp::aead_seal`
+/ `btp::aead_open`. The nonce (`source_id ‖ boot_id ‖ sequence`) and the AAD
+(the canonical header) are `btp::aead`'s.
+
+Storage stays caller-owned, exactly as `btp::Receiver` and `btp::Endpoint`
+expect: the reassembly slots and their byte regions, a buffer `receive()`
+copies a completed message into, a seal scratch for the fragmented-encrypted
+path, and a buffer `open` writes plaintext into. **`btp::StaticNode<Slots,
+SlotBytes, SealBytes>`** owns all of it as members (defaults `4, 600, 2048` —
+the bally_OS / bally_dongle reassembly shape) for the common embedded case.
+
+**One context** calls `send` / `receive` / `tick`, as `btp::Receiver` and
+`btp::Session` require. A timer may *pace* `tick()` — but by raising a flag the
+loop reads, never by calling `tick()` from the ISR. Reading the *clock* from an
+ISR is fine.
+
+### 16.2 Using it
+
+```cpp
+btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
+                        &radio_send, nullptr,   // send  (required)
+                        &clock_ms,   nullptr,   // clock
+                        &seal_c,     nullptr,   // seal  (the key lives here)
+                        &open_c,     nullptr}); // open
+if (!node.begin()) { /* bad identity / storage / send */ }
+
+// producer:
+node.send(btp::MessageType::Telemetry, 0x0101, body, body_size, now_us());
+
+// consumer, opt-in responder session:
+node.enable_session(local_hello, /*hello_deadline_ms=*/0);
+node.arm_session();
+for (;;) {
+    btp::ReceivedMessage msg{};
+    if (node.receive(datagram, n, &msg) == btp::NodeRx::Complete)
+        route(msg.header, msg.payload);          // the caller's one switch
+    node.tick();                                  // watchdog + reassembly sweep
+}
+```
+
+`send()` reserves a sequence, seals once over the whole payload when
+`cfg.seal` is set, fragments, and hands each frame to `cfg.send` — a `false`
+from the seal sends nothing (fail-closed). `send_with()` takes a seal for one
+message (a hub sealing channel C and channel B with different keys).
+
+`receive()` sweeps stale partials, decodes, checks CRC and reassembles; with a
+session enabled it also runs the `HELLO` handshake, renews the watchdog and
+answers `SESSION_CLOSE` (framing the reply and sending it through `cfg.send`)
+*before* a frame is routed. It returns a `NodeRx` — five outcomes collapsed
+from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
+
+| `NodeRx` | meaning |
+| --- | --- |
+| `Complete` | `*out` is a whole logical message (plaintext if `open` ran) — route it |
+| `Pending` | a fragment stored or a duplicate absorbed — nothing yet |
+| `SessionHandled` | a `HELLO` / `SESSION_CLOSE` / session timeout — the node already replied; see `session_event()` |
+| `Ignored` | a frame arrived with a session enabled but not yet `Active` |
+| `DroppedFrame` | `btp::decode` / reassembly rejected it — the breakdown is in `stats()` |
+
+`tick()` sweeps reassembly timeouts and polls the session watchdog, returning
+the `SessionEvent` (`TimedOut` once when a dead session is noticed).
+
+### 16.3 What stays out
+
+Everything §11 keeps above the wire, unchanged: the **session initiator** (`Node`
+is responder + producer), **routing policy** (`receive()` hands back the whole
+message; relay-or-drop is the caller's one switch), manifest storage, the
+subscription aggregator, the priority scheduler, and **key derivation** (the
+body of your `seal` / `open`). Plus, in this first cut: **serial byte-stream
+framing** — a `Node` speaks packet transports (`receive()` wants one whole
+datagram), and a single encoded frame must fit the ESP-NOW ceiling, so native
+COBS and large-Serial frames are a later addition.
+
+---
+
+## 17. Putting the library together
 
 A typical unencrypted transmit path is:
 
@@ -2651,9 +2778,16 @@ LOG
 according to the corresponding BTP chapter -- for `COMMAND` and `CONTROL`,
 through `btp::messages` (§12).
 
+`btp::Node` ([§16](#16-the-node-layer)) is the transmit path, the receive path
+and the responder session above bundled into one object with one identity, one
+`now_ms` and one set of buffers -- for a packet transport, and with every
+dependency a function pointer. A caller that wants the layers by hand still has
+them, and `node.endpoint()` / `node.receiver()` / `node.session()` reach them
+through the facade.
+
 ---
 
-## 17. Summary
+## 18. Summary
 
 The BTP reference library implements the wire:
 
@@ -2669,6 +2803,7 @@ COMMAND / CONTROL payload layout      (btp::messages)
 identity, sequencing, transmit path   (btp::endpoint)
 decode + CRC + reassembly path        (btp::receiver)
 session lifecycle + inactivity watchdog, responder side   (btp::session)
+endpoint + receiver + session in one object   (btp::node)
 ```
 
 It deliberately does not own the surrounding application.
