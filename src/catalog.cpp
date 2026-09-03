@@ -16,7 +16,10 @@ const char* const kEmptyName = "";
 Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
                  FieldSpec* field_pool, std::size_t field_pool_capacity,
                  const char** name_ptr_pool, std::size_t name_ptr_capacity,
-                 char* string_pool, std::size_t string_pool_capacity) noexcept
+                 char* string_pool, std::size_t string_pool_capacity,
+                 const char** unit_ptr_pool, std::size_t unit_ptr_capacity,
+                 const char** description_ptr_pool,
+                 std::size_t description_ptr_capacity) noexcept
     : topics_(topics),
       topic_capacity_(topic_capacity),
       topic_count_(0U),
@@ -26,6 +29,12 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
       name_ptr_pool_(name_ptr_pool),
       name_ptr_capacity_(name_ptr_capacity),
       name_ptr_used_(0U),
+      unit_ptr_pool_(unit_ptr_pool),
+      unit_ptr_capacity_(unit_ptr_capacity),
+      unit_ptr_used_(0U),
+      description_ptr_pool_(description_ptr_pool),
+      description_ptr_capacity_(description_ptr_capacity),
+      description_ptr_used_(0U),
       string_pool_(string_pool),
       string_pool_capacity_(string_pool_capacity),
       string_pool_used_(0U),
@@ -37,6 +46,8 @@ void Catalog::clear() noexcept {
     topic_count_ = 0U;
     field_pool_used_ = 0U;
     name_ptr_used_ = 0U;
+    unit_ptr_used_ = 0U;
+    description_ptr_used_ = 0U;
     string_pool_used_ = 0U;
 }
 
@@ -79,6 +90,20 @@ const char* Catalog::field_name(const CatalogTopic& t,
     return t.field_names[index];
 }
 
+const char* Catalog::field_unit(const CatalogTopic& t,
+                                std::size_t index) const noexcept {
+    if (t.field_units == nullptr || index >= t.field_count) return kEmptyName;
+    return t.field_units[index];
+}
+
+const char* Catalog::field_description(const CatalogTopic& t,
+                                       std::size_t index) const noexcept {
+    if (t.field_descriptions == nullptr || index >= t.field_count) {
+        return kEmptyName;
+    }
+    return t.field_descriptions[index];
+}
+
 // ---------------------------------------------------------------------------
 // Producer: fill by hand
 // ---------------------------------------------------------------------------
@@ -107,7 +132,12 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
         return MessageError::BufferTooSmall;
     }
     const bool keep_names = name_ptr_pool_ != nullptr;
-    if (keep_names && name_ptr_used_ + field_count > name_ptr_capacity_) {
+    const bool keep_units = unit_ptr_pool_ != nullptr;
+    const bool keep_descriptions = description_ptr_pool_ != nullptr;
+    if ((keep_names && name_ptr_used_ + field_count > name_ptr_capacity_) ||
+        (keep_units && unit_ptr_used_ + field_count > unit_ptr_capacity_) ||
+        (keep_descriptions &&
+         description_ptr_used_ + field_count > description_ptr_capacity_)) {
         return MessageError::BufferTooSmall;
     }
 
@@ -121,6 +151,10 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
     t.field_count = field_count;
     t.name = intern(name);
     t.field_names = keep_names ? &name_ptr_pool_[name_ptr_used_] : nullptr;
+    t.field_units = keep_units ? &unit_ptr_pool_[unit_ptr_used_] : nullptr;
+    t.field_descriptions =
+        keep_descriptions ? &description_ptr_pool_[description_ptr_used_]
+                          : nullptr;
 
     for (std::size_t i = 0U; i < field_count; ++i) {
         FieldSpec spec = field_spec(fields[i]);
@@ -133,9 +167,19 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
             name_ptr_pool_[name_ptr_used_ + i] =
                 intern(fields[i].name.data, fields[i].name.size);
         }
+        if (keep_units) {
+            unit_ptr_pool_[unit_ptr_used_ + i] =
+                intern(fields[i].unit.data, fields[i].unit.size);
+        }
+        if (keep_descriptions) {
+            description_ptr_pool_[description_ptr_used_ + i] =
+                intern(fields[i].description.data, fields[i].description.size);
+        }
     }
     field_pool_used_ += field_count;
     if (keep_names) name_ptr_used_ += field_count;
+    if (keep_units) unit_ptr_used_ += field_count;
+    if (keep_descriptions) description_ptr_used_ += field_count;
     ++topic_count_;
     return MessageError::Ok;
 }
@@ -164,13 +208,19 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
     config_revision_ = header.config_revision;
 
     const bool keep_names = name_ptr_pool_ != nullptr;
+    const bool keep_units = unit_ptr_pool_ != nullptr;
+    const bool keep_descriptions = description_ptr_pool_ != nullptr;
     TopicRecord topic = {};
     ByteView field_bytes = {};
     while (reader.next_topic(&topic, &field_bytes) == ManifestStep::Item) {
         if (topic_count_ >= topic_capacity_ ||
             field_pool_used_ + topic.field_count > field_pool_capacity_ ||
             (keep_names &&
-             name_ptr_used_ + topic.field_count > name_ptr_capacity_)) {
+             name_ptr_used_ + topic.field_count > name_ptr_capacity_) ||
+            (keep_units &&
+             unit_ptr_used_ + topic.field_count > unit_ptr_capacity_) ||
+            (keep_descriptions && description_ptr_used_ + topic.field_count >
+                                      description_ptr_capacity_)) {
             clear();
             return MessageError::BufferTooSmall;
         }
@@ -184,6 +234,10 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
         t.fields = &field_pool_[field_pool_used_];
         t.name = intern(topic.name.data, topic.name.size);
         t.field_names = keep_names ? &name_ptr_pool_[name_ptr_used_] : nullptr;
+        t.field_units = keep_units ? &unit_ptr_pool_[unit_ptr_used_] : nullptr;
+        t.field_descriptions =
+            keep_descriptions ? &description_ptr_pool_[description_ptr_used_]
+                              : nullptr;
 
         FieldRecordReader fields(field_bytes, topic.field_count);
         FieldRecord record = {};
@@ -194,6 +248,14 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
             if (keep_names) {
                 name_ptr_pool_[name_ptr_used_ + n] =
                     intern(record.name.data, record.name.size);
+            }
+            if (keep_units) {
+                unit_ptr_pool_[unit_ptr_used_ + n] =
+                    intern(record.unit.data, record.unit.size);
+            }
+            if (keep_descriptions) {
+                description_ptr_pool_[description_ptr_used_ + n] =
+                    intern(record.description.data, record.description.size);
             }
             ++n;
         }
@@ -206,6 +268,8 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
         t.field_count = n;
         field_pool_used_ += n;
         if (keep_names) name_ptr_used_ += n;
+        if (keep_units) unit_ptr_used_ += n;
+        if (keep_descriptions) description_ptr_used_ += n;
         ++topic_count_;
     }
 
@@ -254,6 +318,8 @@ MessageError Catalog::write_topics(ManifestWriter* writer) const noexcept {
         for (std::size_t fi = 0U; fi < t.field_count; ++fi) {
             const FieldSpec& spec = t.fields[fi];
             const char* fname = field_name(t, fi);
+            const char* funit = field_unit(t, fi);
+            const char* fdesc = field_description(t, fi);
 
             FieldRecord fr = {};
             fr.field_id = spec.field_id;
@@ -267,8 +333,11 @@ MessageError Catalog::write_topics(ManifestWriter* writer) const noexcept {
             fr.enum_count = 0U;
             fr.name = ByteView{reinterpret_cast<const std::uint8_t*>(fname),
                                std::strlen(fname)};
-            fr.unit = ByteView{nullptr, 0U};
-            fr.description = ByteView{nullptr, 0U};
+            fr.unit = ByteView{reinterpret_cast<const std::uint8_t*>(funit),
+                               std::strlen(funit)};
+            fr.description =
+                ByteView{reinterpret_cast<const std::uint8_t*>(fdesc),
+                        std::strlen(fdesc)};
 
             const MessageError ae = writer->add_field(fr);
             if (ae != MessageError::Ok) return ae;

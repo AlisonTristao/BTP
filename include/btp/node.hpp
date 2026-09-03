@@ -851,10 +851,11 @@ struct CommandStorage {
 // COMMAND_REQUEST plus headroom), 2048 octets of seal scratch (the largest
 // UTF-8 status document this family sends), 512 octets of manifest / sample
 // scratch (serve_catalog / publish), and -- for the node's OWN catalogue,
-// below -- 8 topics / 64 field specs / 1 KiB of name text, matching
-// btp::StaticCatalog's own defaults. A Serial deployment bumps SlotBytes; a
-// large manifest bumps ScratchBytes; a schema with many topics or fields
-// bumps the Catalog* template arguments.
+// below -- 8 topics / 64 field specs / 1.5 KiB of name/unit/description
+// text, matching btp::StaticCatalog's own defaults. A Serial deployment
+// bumps SlotBytes; a large manifest bumps ScratchBytes; a schema with many
+// topics, fields, or long unit/description strings bumps the Catalog*
+// template arguments.
 // MaxSubscriptions, MaxCommands and CommandBytes last, after every other
 // capacity, so an existing StaticNode<...> spelled out to CatalogStringBytes
 // (or shorter) still compiles unchanged -- they only fix the new trailing
@@ -869,7 +870,7 @@ struct CommandStorage {
 template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
           std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512,
           std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
-          std::size_t CatalogStringBytes = 1024,
+          std::size_t CatalogStringBytes = 1536,
           std::size_t MaxSubscriptions = 8, std::size_t MaxCommands = 4,
           std::size_t CommandBytes = 128>
 class StaticNode

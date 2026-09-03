@@ -207,6 +207,48 @@ void test_manifest_roundtrip() {
     CHECK(sr.finish() == MessageError::Ok);
 }
 
+// v1.1: a field's unit and description survive add_topic() -> field_unit()/
+// field_description() directly, AND round-trip through a real MANIFEST_DATA
+// (write_topics() -> ingest()) the same way name already did. The topic's OWN
+// description does not (see catalog.hpp's top comment) -- not checked here.
+void test_field_unit_and_description() {
+    // btp::f32/u16 (telemetry.hpp) take `unit` but never `description` --
+    // that one only arrives via a hand-built FieldRecord, so this schema
+    // covers both paths: units from the usual helpers, one description set
+    // directly.
+    FieldRecord fields[] = {
+        btp::f32("speed", "m/s"),
+        btp::u16("volts", 0.001, "V"),
+    };
+    fields[0].description = text("Ground speed, forward positive");
+
+    btp::StaticCatalog<> producer;
+    CHECK(producer.add_topic(0x0400U, 1U, "kinematics", fields) ==
+          MessageError::Ok);
+    const CatalogTopic* pt = producer.topic(0x0400U);
+    CHECK(pt != nullptr);
+    CHECK(std::strcmp(producer.field_unit(*pt, 0), "m/s") == 0);
+    CHECK(std::strcmp(producer.field_unit(*pt, 1), "V") == 0);
+    CHECK(std::strcmp(producer.field_description(*pt, 0),
+                      "Ground speed, forward positive") == 0);
+    CHECK(std::strcmp(producer.field_description(*pt, 1), "") == 0);
+    // Out of range / no field_units at all -- still "", never a crash.
+    CHECK(std::strcmp(producer.field_unit(*pt, 99U), "") == 0);
+
+    std::uint8_t wire[512];
+    const std::size_t n = serialise(producer, wire, sizeof(wire));
+    CHECK(n != 0U);
+
+    btp::StaticCatalog<> consumer;
+    CHECK(consumer.ingest(wire, n) == MessageError::Ok);
+    const CatalogTopic* ct = consumer.topic(0x0400U);
+    CHECK(ct != nullptr);
+    CHECK(std::strcmp(consumer.field_unit(*ct, 0), "m/s") == 0);
+    CHECK(std::strcmp(consumer.field_unit(*ct, 1), "V") == 0);
+    CHECK(std::strcmp(consumer.field_description(*ct, 0),
+                      "Ground speed, forward positive") == 0);
+}
+
 void test_not_modified() {
     btp::StaticCatalog<> consumer;
     consumer.add_topic(0x0101U, 3U, TelemetryEncoding::PackedLe, true, 1000U,
@@ -360,6 +402,7 @@ int main() {
     test_add_and_query();
     test_schema_helpers();
     test_manifest_roundtrip();
+    test_field_unit_and_description();
     test_not_modified();
     test_capacity();
     test_bad_manifest();
