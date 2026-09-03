@@ -1,106 +1,111 @@
 // example/receiver.cpp
 //
-// The consumer half, with btp::Node. Run ./build/sender first.
+// The consumer, with btp::Node. It has NEVER seen the producer's schema and
+// writes nothing about topic 0x0101. It is also the INITIATOR -- it connects
+// OUT to the producer instead of waiting to be connected to:
 //
-// This node has NEVER seen the producer's schema. node.learn_catalog() points
-// it at a btp::Catalog; from then on the node ingests every MANIFEST_DATA into
-// it, and -- with node.on_sample() set -- decodes each TELEMETRY sample against
-// the learned schema. Nothing about topic 0x0101 is written here.
+//   node.connect(my_hello, deadline_ms)  -- HELLO -> HELLO_RESULT; once
+//                                          connected(), every frame from the
+//                                          peer renews the watchdog on its own
+//   node.learn_catalog()                 -- from now on the node ingests
+//                                          every MANIFEST_DATA into its OWN
+//                                          catalogue (node.catalog())
+//   node.on_sample(&on_drive_status)     -- and decodes every TELEMETRY
+//                                          sample of a learned topic, fields
+//                                          already scaled
 //
-// by_hand_receiver.cpp walks the same decode step by step at the wire level.
+// The link is faked -- link_poll() delivers nothing, it is only there to show
+// the shape. by_hand_receiver.cpp is the runnable wire-level version.
 
 #include <btp/node.hpp>
 
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-
 namespace {
 
-// The node calls this for every TELEMETRY sample of a topic in the catalogue --
-// values already converted (raw * scale + offset), matched to the field names
-// the manifest carried.
-void print_sample(void* /*ctx*/, const btp::CatalogTopic& topic,
-                  btp::SampleReader& reader) {
-    std::printf("TELEMETRY topic 0x%04X \"%s\":\n  {", topic.topic_id,
-                topic.name);
-    btp::SampleValue v = {};
-    int i = 0;
-    while (reader.next(&v) == btp::SampleStep::Item) {
-        const char* name = topic.field_names != nullptr
-                               ? topic.field_names[v.field->order]
-                               : "";
-        std::printf("%s\n    \"%s\": ", (i != 0) ? "," : "", name);
-        if (v.is_null) {
-            std::printf("null");
-        } else {
-            std::printf("%g", v.f64(0));
-        }
-        ++i;
-    }
-    std::printf("\n  }\n");
+btp::Hello make_hello(btp::Role role) {
+    btp::Hello h = {};
+    h.role = static_cast<std::uint8_t>(role);
+    h.version_count = 1U;
+    h.versions[0] = 1U;
+    h.max_logical_payload = 2048U;
+    h.max_inflight_reassemblies = 4U;
+    h.max_subscriptions = 8U;
+    h.max_dedup_entries = 32U;
+    h.session_timeout_ms = 30000U;
+    for (int i = 0; i < 16; ++i) h.peer_uuid[i] = static_cast<std::uint8_t>(i + 1);
+    return h;
 }
+
+// The node calls this for each TELEMETRY sample of a topic it has learned.
+// `reader` yields the values in schema order, raw * scale + offset applied.
+void on_drive_status(void* /*ctx*/, const btp::CatalogTopic& topic,
+                     btp::SampleReader& reader) {
+    btp::SampleValue v = {};
+    while (reader.next(&v) == btp::SampleStep::Item) {
+        const char* name  = topic.field_names[v.field->order];  // "left_rpm", ...
+        double      value = v.f64(0);   // scale already applied; skip if v.is_null
+        // ... hand (name, value) to the UI / log
+    }
+}
+
+// Hand one delivered datagram to the node and act on what it was.
+void on_datagram(btp::Node& node, const std::uint8_t* data, std::size_t size) {
+    btp::ReceivedMessage msg = {};
+    switch (node.receive(data, size, /*now_ms=*/0, &msg)) {
+        case btp::NodeRx::InitiatorHandled:
+            // connect()'s HELLO_RESULT arrived, or the connection timed out --
+            // node.initiator_event() says which (Connected / Rejected / TimedOut)
+            break;
+        case btp::NodeRx::CatalogUpdated:
+            // learned / refreshed the schema from a MANIFEST_DATA
+            break;
+        case btp::NodeRx::SampleDelivered:
+            // on_drive_status() already ran for this sample
+            break;
+        case btp::NodeRx::Ignored:
+            // a sample arrived before its schema -- wait for the manifest
+            break;
+        case btp::NodeRx::Pending:
+            // one fragment of a larger message -- more to come
+            break;
+        default:
+            // Complete (a message the node did not consume) / DroppedFrame
+            break;
+    }
+}
+
+// The node hands every finished frame here. Fake: a real node transmits it.
+// Needed now that this node also connect()s out -- that sends a HELLO.
+bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
+    return true;
+}
+
+// Fake link. A real one hands you each datagram as it arrives; this delivers
+// nothing, so the loop below only shows the wiring.
+std::size_t link_poll(std::uint8_t* /*out*/, std::size_t /*cap*/) { return 0U; }
 
 }  // namespace
 
 int main() {
-    std::FILE* f = std::fopen("frame.bin", "rb");
-    if (f == nullptr) {
-        std::printf("cannot open frame.bin -- run ./sender first\n");
-        return 1;
+    btp::NodeConfig cfg = {};
+    cfg.source_id = 0x00B0B0FEU;
+    cfg.boot_id   = 0x0000C0DEU;
+    cfg.transport = btp::TransportProfile::EspNow;
+    cfg.send      = &send_frame;
+
+    btp::StaticNode<> node(cfg);
+    node.learn_catalog();                  // the node's own catalogue
+    node.on_sample(&on_drive_status, nullptr);
+    node.begin();
+
+    node.connect(make_hello(btp::Role::Consumer), /*deadline_ms=*/2000U);
+
+    std::uint8_t datagram[256];
+    for (std::size_t n; (n = link_poll(datagram, sizeof datagram)) != 0U; ) {
+        on_datagram(node, datagram, n);
     }
 
-    btp::NodeConfig config = {};
-    config.source_id = 0x00B0B0FEU;
-    config.boot_id = 0x0000C0DEU;
-    config.transport = btp::TransportProfile::EspNow;
-    // no `send`: this node only receives.
-
-    btp::StaticNode<> node(config);
-    btp::StaticCatalog<> catalog;   // the node fills this from MANIFEST_DATA
-    node.learn_catalog(&catalog);
-    node.on_sample(&print_sample, nullptr);
-    if (!node.begin()) {
-        std::printf("node configuration rejected\n");
-        std::fclose(f);
-        return 1;
-    }
-
-    // Each [uint16 length][frame] block in the file is "one datagram arrived".
-    std::uint8_t length[2];
-    while (std::fread(length, 1, 2, f) == 2) {
-        const std::size_t size = static_cast<std::size_t>(length[0]) |
-                                 (static_cast<std::size_t>(length[1]) << 8);
-        std::uint8_t datagram[btp::kEspNowMaxFrameSize];
-        if (size > sizeof(datagram) ||
-            std::fread(datagram, 1, size, f) != size) {
-            std::printf("truncated frame.bin\n");
-            break;
-        }
-
-        btp::ReceivedMessage msg = {};
-        const btp::NodeRx rx = node.receive(datagram, size, /*now_ms=*/0, &msg);
-        switch (rx) {
-            case btp::NodeRx::CatalogUpdated:
-                std::printf("learned %lu topic(s) from MANIFEST_DATA "
-                            "(config_revision %lu)\n",
-                            static_cast<unsigned long>(catalog.topic_count()),
-                            static_cast<unsigned long>(catalog.config_revision()));
-                break;
-            case btp::NodeRx::SampleDelivered:
-                break;  // print_sample already ran
-            case btp::NodeRx::Ignored:
-                std::printf("(a sample arrived before its manifest)\n");
-                break;
-            case btp::NodeRx::Pending:
-                break;  // a fragment -- more to come
-            default:
-                std::printf("frame: %s\n", btp::node_rx_string(rx));
-                break;
-        }
-    }
-
-    std::fclose(f);
-    std::printf("\nok\n");
+    // Nothing arrived (the link is faked) -- tick() would report TimedOut
+    // here in a real run, InitiatorEvent::TimedOut via initiator_event().
+    node.tick(2000U);
     return 0;
 }

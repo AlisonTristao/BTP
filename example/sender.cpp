@@ -1,113 +1,87 @@
 // example/sender.cpp
 //
-// The producer half, with btp::Node. It exposes one topic through a
-// btp::Catalog:
+// The producer, with btp::Node. It owns ONE topic -- declared once, below, on
+// the node's own catalogue -- and answers a connection from whoever asks:
 //
-//   node.announce_catalog()  -> a MANIFEST_DATA describing topic 0x0101
-//   node.publish(0x0101, ..) -> a typed TELEMETRY sample of it
+//   node.enable_session(...) + arm_session()  -> answers HELLO with
+//                                                HELLO_RESULT, then runs the
+//                                                inactivity watchdog
+//   node.announce_catalog()                   -> MANIFEST_DATA  "here is my schema"
+//   node.publish_named(kDriveStatus, ..)       -> TELEMETRY      "here is a sample"
 //
-// A consumer that has never met this producer learns the schema from the
-// announcement and decodes the sample against it. The schema is written ONCE,
-// here, as the producer's own data model.
-//
-//   cd example && cmake -B build && cmake --build build
-//   ./build/sender      writes frame.bin (manifest frame, then sample frame)
-//   ./build/receiver    reads it back, schema first
-//
-// by_hand_sender.cpp is the wire-level walkthrough of a single sample.
+// receiver.cpp is the other end: it connect()s in and learns the schema from
+// the wire, never from a shared header. The link here is faked -- send_frame()
+// just drops the bytes; a real node hands them to ESP-NOW / a UART / USB-HID
+// untouched. This file is the logic, not a runnable demo. by_hand_sender.cpp
+// is the runnable wire-level walkthrough.
 
 #include <btp/node.hpp>
 
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-
 namespace {
 
-const std::uint16_t kTopicId = 0x0101U;
+const std::uint16_t kDriveStatus = 0x0101U;
 
-// THE schema, written once -- the consumer learns it from the wire. Floats are
-// sent raw; integers carry a scale so a ranged value packs into a small type
-// (engineering value = raw * scale + offset).
-const btp::FieldRecord kSchema[] = {
-    btp::f32("left_rpm", "rpm"),
-    btp::f32("right_rpm", "rpm"),
-    btp::u16("battery_v", 0.001, "V"),   // 3.72 V stored as the raw uint16 3720
-    btp::nullable(btp::i16("temp_c", 0.1, "Cel")),
-};
-
-// "Transmit" one frame: length-prefixed into frame.bin so the receiver can
-// split the frames. A packet transport delivers whole datagrams and needs no
-// such prefix.
-bool transmit(void* /*ctx*/, const std::uint8_t* frame, std::size_t size) {
-    std::FILE* f = std::fopen("frame.bin", "ab");
-    if (f == nullptr) return false;
-    const std::uint8_t len[2] = {static_cast<std::uint8_t>(size & 0xFFU),
-                                 static_cast<std::uint8_t>(size >> 8)};
-    std::fwrite(len, 1, 2, f);
-    std::fwrite(frame, 1, size, f);
-    std::fclose(f);
-    std::printf("  transmitted %lu octets\n", static_cast<unsigned long>(size));
-    return true;
+btp::Hello make_hello(btp::Role role) {
+    btp::Hello h = {};
+    h.role = static_cast<std::uint8_t>(role);
+    h.version_count = 1U;
+    h.versions[0] = 1U;
+    h.max_logical_payload = 2048U;
+    h.max_inflight_reassemblies = 4U;
+    h.max_subscriptions = 8U;
+    h.max_dedup_entries = 32U;
+    h.session_timeout_ms = 30000U;
+    for (int i = 0; i < 16; ++i) h.peer_uuid[i] = static_cast<std::uint8_t>(i + 1);
+    return h;
 }
 
-// publish() calls this to write the field values, in schema order, into an open
-// SampleWriter. put_f64 takes the engineering value (battery_v 3.72 is stored
-// as the raw Uint16 3720); put_null marks the offline temp_c absent.
-void fill_drive_status(void* /*ctx*/, btp::SampleWriter& writer) {
-    writer.put_f64(1450.0);   // left_rpm
-    writer.put_f64(-1448.5);  // right_rpm
-    writer.put_f64(3.72);     // battery_v
-    writer.put_null();        // temp_c
+// publish_named() calls this to write one sample. Each put() must name the
+// schema's NEXT field -- get the order wrong and it fails right there
+// (MessageError::InvalidArgument) instead of sending the wrong value.
+void fill_drive_status(void* /*ctx*/, btp::NamedSampleWriter& w) {
+    w.put("left_rpm", 1450.0);
+    w.put("right_rpm", -1448.5);
+    w.put("battery_v", 3.72);   // 3.72 V <-> raw uint16 3720 (scale 0.001)
+    w.put_null("temp_c");       // sensor offline
+}
+
+// The node hands every finished frame here. Fake: a real node transmits it.
+bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
+    return true;
 }
 
 }  // namespace
 
 int main() {
-    std::remove("frame.bin");  // transmit() appends -- start from empty
+    btp::NodeConfig cfg = {};
+    cfg.source_id = 0x00CAFE01U;   // this robot    (non-zero)
+    cfg.boot_id   = 0x0000B001U;   // new each boot (non-zero)
+    cfg.transport = btp::TransportProfile::EspNow;
+    cfg.send      = &send_frame;
 
-    btp::NodeConfig config = {};
-    config.source_id = 0x00CAFE01U;  // this robot; non-zero
-    config.boot_id = 0x0000B001U;    // changes every reboot
-    config.transport = btp::TransportProfile::EspNow;
-    config.send = &transmit;
+    btp::StaticNode<> node(cfg);
 
-    btp::StaticNode<> node(config);
+    // THE schema, written once, straight on the node's own catalogue -- no
+    // separate btp::StaticCatalog to declare or thread through by pointer.
+    // Floats travel raw; an integer field carries a scale so a ranged value
+    // packs into a small type (engineering value = raw * scale + offset).
+    node.topic(kDriveStatus, /*schema_version=*/3U, "drive_status")
+        .f32("left_rpm", "rpm")
+        .f32("right_rpm", "rpm")
+        .u16("battery_v", 0.001, "V")
+        .i16("temp_c", 0.1, "Cel", /*is_nullable=*/true)
+        .end();
+    node.catalog().set_config_revision(1U);
+    node.serve_catalog(static_cast<std::uint8_t>(btp::Role::Producer), nullptr,
+                       "example-robot");
+    node.enable_session(make_hello(btp::Role::Producer),
+                        /*hello_deadline_ms=*/0U);
 
-    // The catalogue: one topic, its schema, its config revision.
-    btp::StaticCatalog<> catalog;
-    catalog.set_config_revision(1U);
-    if (catalog.add_topic(kTopicId, /*schema_version=*/3U, "drive_status",
-                          kSchema) != btp::MessageError::Ok) {
-        std::printf("catalog rejected the schema\n");
-        return 1;
-    }
+    node.begin();
+    node.arm_session();
 
-    const std::uint8_t uuid[16] = {0xC0, 0xFF, 0xEE, 0x01, 0, 0, 0, 0,
-                                   0,    0,    0,    0,    0, 0, 0, 1};
-    node.serve_catalog(&catalog, static_cast<std::uint8_t>(btp::Role::Producer),
-                       uuid, "example-robot");
-    if (!node.begin()) {
-        std::printf("node configuration rejected\n");
-        return 1;
-    }
-
-    // 1 -- announce the schema (a MANIFEST_DATA with no request behind it).
-    std::printf("announcing MANIFEST_DATA for topic 0x%04X:\n", kTopicId);
-    if (!node.announce_catalog()) {
-        std::printf("announce failed\n");
-        return 1;
-    }
-
-    // 2 -- publish a typed sample. The node finds the schema in the catalogue,
-    // runs the SampleWriter, encodes and sends the frame.
-    std::printf("publishing TELEMETRY topic 0x%04X:\n", kTopicId);
-    if (!node.publish(kTopicId, &fill_drive_status, nullptr,
-                      /*timestamp_us=*/1700000000000000ULL)) {
-        std::printf("publish failed\n");
-        return 1;
-    }
-
-    std::printf("wrote frame.bin -- now run ./receiver\n");
+    node.announce_catalog();                          // -> MANIFEST_DATA
+    node.publish_named(kDriveStatus, &fill_drive_status,
+                       nullptr, /*timestamp_us=*/1700000000000000ULL);
     return 0;
 }

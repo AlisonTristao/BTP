@@ -2,10 +2,12 @@
 #
 #   cmake -B build
 #   cmake --build build
-#   ./build/sender              # writes frame.bin  (btp::Node)
-#   ./build/receiver            # reads it back
-#   ./build/by_hand_sender      # the same exchange step by step at the wire
-#   ./build/by_hand_receiver
+#   ./build/by_hand_sender      # writes frame.bin -- the runnable exchange
+#   ./build/by_hand_receiver    # reads it back, step by step at the wire
+#
+# sender.cpp / receiver.cpp are the btp::Node version of the same flow, kept as
+# readable logic (faked link, no file, no prints) -- they compile but do not
+# transmit anything.
 #
 # It pulls btp::codec / btp::messages / btp::telemetry / btp::endpoint /
 # btp::receiver / btp::session / btp::node straight from the sources one level
