@@ -2583,7 +2583,7 @@ context and a plain function — never `std::function`, never virtual):
 
 | field | when | what it does |
 | --- | --- | --- |
-| `send` | **required** | one encoded frame → your radio / UART / HID |
+| `send` | to send / run a session | one encoded frame → your radio / UART / HID; a receive-only node omits it |
 | `clock` | optional | `→ now_ms`; `nullptr` means you pass `now_ms` to `receive()` / `tick()` |
 | `seal` | optional | encrypt one logical payload; `nullptr` → `send()` is cleartext |
 | `open` | optional | decrypt one received payload; `nullptr` → `receive()` hands back the sealed bytes |
@@ -2614,7 +2614,7 @@ btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
                         &clock_ms,   nullptr,   // clock
                         &seal_c,     nullptr,   // seal  (the key lives here)
                         &open_c,     nullptr}); // open
-if (!node.begin()) { /* bad identity / storage / send */ }
+if (!node.begin()) { /* bad identity or storage */ }
 
 // producer:
 node.send(btp::MessageType::Telemetry, 0x0101, body, body_size, now_us());

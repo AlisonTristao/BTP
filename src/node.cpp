@@ -25,15 +25,17 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       session_path_dropped_decode_(0U) {}
 
 bool Node::begin() noexcept {
-    if (cfg_.send == nullptr) return false;
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
     if (!receiver_.valid()) return false;
     if (session_on_ && !session_.valid()) return false;
+    // cfg_.send is not required here: a receive-only node that never sends and
+    // never enables a session does not need one. send() / send_with() and a
+    // session reply check for it at the point of use.
     return true;
 }
 
 bool Node::configured() const noexcept {
-    return cfg_.send != nullptr && endpoint_.configured() && receiver_.valid() &&
+    return endpoint_.configured() && receiver_.valid() &&
            (!session_on_ || session_.valid());
 }
 
@@ -49,6 +51,7 @@ bool Node::send_with(MessageType type, std::uint16_t object_id,
                      const std::uint8_t* payload, std::size_t size,
                      std::uint64_t timestamp_us, EndpointSealFn seal,
                      void* seal_ctx) noexcept {
+    if (cfg_.send == nullptr) return false;
     const LogicalMessage message{type, object_id, timestamp_us,
                                  {payload, size}};
     return endpoint_.send_logical(message, cfg_.transport, cfg_.send,
@@ -113,9 +116,11 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
         const LogicalMessage reply_msg{
             MessageType::Control, reply_object, resolve_now(0U) * 1000ULL,
             {reply, outcome.reply_size}};
-        endpoint_.send_logical(reply_msg, cfg_.transport, cfg_.send,
-                               cfg_.send_ctx, seal_scratch_, seal_scratch_cap_,
-                               nullptr, nullptr);
+        if (cfg_.send != nullptr) {
+            endpoint_.send_logical(reply_msg, cfg_.transport, cfg_.send,
+                                   cfg_.send_ctx, seal_scratch_,
+                                   seal_scratch_cap_, nullptr, nullptr);
+        }
     }
     switch (outcome.event) {
         case SessionEvent::FrameAccepted:

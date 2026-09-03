@@ -152,10 +152,14 @@ void test_begin() {
     TestNode bad(bad_id);
     CHECK(!bad.begin());
 
-    NodeConfig bad_send = base_config(kSenderId, kSenderBoot, &sink);
-    bad_send.send = nullptr;
-    TestNode nosend(bad_send);
-    CHECK(!nosend.begin());
+    // A receive-only node may omit `send`: begin() still succeeds, but send()
+    // then fails in place.
+    NodeConfig nosend_cfg = base_config(kSenderId, kSenderBoot, &sink);
+    nosend_cfg.send = nullptr;
+    TestNode nosend(nosend_cfg);
+    CHECK(nosend.begin());
+    const std::uint8_t body[4] = {1, 2, 3, 4};
+    CHECK(!nosend.send(MessageType::Telemetry, 0x0101U, body, sizeof(body), 0U));
 }
 
 void test_cleartext_roundtrip() {

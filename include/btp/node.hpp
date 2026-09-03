@@ -23,7 +23,8 @@
 // EVERYTHING the node calls out to is a C-style function pointer in NodeConfig
 // (void* context + a plain function), never std::function / virtual:
 //
-//   send   (required)  one encoded frame -> your radio / UART / HID
+//   send   one encoded frame -> your radio / UART / HID. Needed to send() or
+//          run a session; a receive-only node omits it.
 //   clock  (optional)  -> millis since boot; nullptr means you pass now_ms
 //   seal   (optional)  encrypt one logical payload; nullptr means cleartext.
 //                      The KEY lives in your seal function, never in BTP.
@@ -94,8 +95,8 @@ struct NodeConfig {
     // one that fits your link's MTU.
     TransportProfile transport;
 
-    EndpointSendFn send;      // REQUIRED. One encoded frame -> the wire.
-    void* send_ctx;
+    EndpointSendFn send;      // one encoded frame -> the wire. Needed to send()
+    void* send_ctx;           // or run a session; a receive-only node may omit it.
 
     NodeClockFn clock;        // optional. nullptr -> pass now_ms to receive/tick.
     void* clock_ctx;
@@ -133,11 +134,11 @@ const char* node_rx_string(NodeRx rx) noexcept;
 // ---------------------------------------------------------------------------
 //
 //   btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
-//                           &radio_send, nullptr,   // send  (required)
+//                           &radio_send, nullptr,   // send
 //                           &clock_ms,   nullptr,   // clock
 //                           &seal_c,     nullptr,   // seal  (the key lives here)
 //                           &open_c,     nullptr}); // open
-//   if (!node.begin()) { /* bad identity / storage / send */ }
+//   if (!node.begin()) { /* bad identity or storage */ }
 //
 //   // producer:
 //   node.send(btp::MessageType::Telemetry, 0x0101, body, body_size, now_us());
@@ -180,8 +181,10 @@ public:
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
-    // endpoint.configure() + receiver.valid() + (session enabled? session.valid())
-    // + send callback present. Check once at boot.
+    // endpoint.configure() + receiver.valid() + (session enabled?
+    // session.valid()). Check once at boot. A missing `send` is not a failure
+    // here -- send() / send_with() and a session reply check for it in place --
+    // so a receive-only node can leave it null.
     bool begin() noexcept;
     bool configured() const noexcept;
 
