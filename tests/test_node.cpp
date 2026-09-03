@@ -1265,6 +1265,29 @@ void test_on_terminal_delivers_and_falls_back_to_complete() {
     CHECK(capture.first_byte == 'h');
 }
 
+// cfg.terminal / cfg.terminal_ctx wire on_terminal() from construction --
+// no separate on_terminal() call needed, same round trip as the test above.
+void test_node_config_wires_on_terminal() {
+    Sink src_tx;
+    TestNode source(base_config(kSenderId, kSenderBoot, &src_tx));
+    CHECK(source.begin());
+    const std::uint8_t bytes[] = {'h', 'i'};
+    CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
+                      sizeof(bytes), 0ULL));
+
+    Sink dst_tx;
+    NodeConfig cfg = base_config(kPeerId, kPeerBoot, &dst_tx);
+    TerminalCapture capture = {};
+    cfg.terminal = &capture_terminal;
+    cfg.terminal_ctx = &capture;
+    TestNode node(cfg);
+    CHECK(node.begin());
+
+    ReceivedMessage msg{};
+    CHECK(deliver(node, src_tx, 0U, &msg) == NodeRx::TerminalDelivered);
+    CHECK(capture.calls == 1);
+}
+
 // StaticNode<> bundles the command responder AND initiator too -- the
 // responder side still needs enable_commands(handler, ctx), the DedupCache
 // itself is already there; the initiator side needs no call at all, same
@@ -1293,6 +1316,31 @@ void test_static_node_bundles_commands() {
     CHECK(calls.calls == 1);
     CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CommandHandled);
     CHECK(consumer.command_outcome().event == CommandEvent::Completed);
+}
+
+// cfg.command / cfg.command_ctx wire the responder from construction, same
+// as cfg.terminal above -- no separate enable_commands() call needed. Only
+// takes effect on a StaticNode<> (it owns the DedupCache this binds to).
+void test_static_node_config_wires_commands() {
+    Sink prod_tx;
+    ActionCalls calls = {};
+    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.command = &echo_action;
+    cfg.command_ctx = &calls;
+    TestNode producer(cfg);
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    CHECK(consumer.begin());
+
+    const std::uint8_t params[2] = {9, 8};
+    CHECK(consumer.command(kSenderId, kSenderBoot, 7U, 1U, params,
+                           sizeof(params)) != 0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
 }
 
 // ===========================================================================
@@ -1405,7 +1453,9 @@ int main() {
     test_command_round_trip_and_dedup_replay();
     test_command_times_out_without_a_reply();
     test_on_terminal_delivers_and_falls_back_to_complete();
+    test_node_config_wires_on_terminal();
     test_static_node_bundles_commands();
+    test_static_node_config_wires_commands();
 
     test_status_disabled_by_default();
     test_status_sends_after_the_period_and_counts_frames_tx();

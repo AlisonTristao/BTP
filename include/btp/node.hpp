@@ -180,6 +180,25 @@ struct NodeConfig {
 
     NodeOpenFn open;          // optional. nullptr -> receive() returns sealed bytes.
     void* open_ctx;
+
+    // optional. nullptr -> TERMINAL_IN / TERMINAL_OUT come back as
+    // NodeRx::Complete for the caller to route by hand, same as before
+    // on_terminal() existed. Wired straight from here by every Node (no
+    // extra storage needed, same as seal / open above); on_terminal(...)
+    // stays reachable to set or replace it after construction.
+    NodeTerminalFn terminal;
+    void* terminal_ctx;
+
+    // optional. nullptr -> COMMAND_REQUEST goes unanswered, same as before
+    // enable_commands() existed. Unlike terminal above, this ONLY takes
+    // effect on a StaticNode<> -- it owns the DedupCache this needs
+    // (commands_cache_) and wires it from here in its own constructor; a
+    // bare Node has no such storage to bind it to; call
+    // Node::enable_commands(cache, handler, ctx) yourself there instead, as
+    // always. enable_commands(handler, ctx) (StaticNode<> sugar) stays
+    // reachable to set or replace the handler after construction.
+    NodeActionFn command;
+    void* command_ctx;
 };
 
 // ---------------------------------------------------------------------------
@@ -889,13 +908,17 @@ public:
         // Ready for on_publish() / a peer's SUBSCRIBE / this node's own
         // subscribe() or command() with no separate setup call --
         // StaticNode<> owns all of its storage, same as catalog_.
-        // enable_commands() (the RESPONDER side) is the one exception: it
-        // also needs a handler, so it stays an explicit call -- see
-        // enable_commands(handler, ctx) sugar below.
         enable_publish_registry(publish_registrations_, CatalogTopics);
         enable_subscriptions(&subscriptions_);
         enable_subscription_client(&client_subscriptions_);
         enable_command_client(&client_commands_);
+        // The RESPONDER side wired straight from cfg.command / cfg.command_ctx
+        // -- nullptr either way (the default) leaves commands_ pointed at
+        // commands_cache_ with on_command_ still null, same "attached but
+        // unanswered" no-op as never calling this at all (serve_command()'s
+        // own guard checks on_command_ != nullptr). enable_commands(handler,
+        // ctx) sugar stays reachable to set or replace it after construction.
+        enable_commands(cfg.command, cfg.command_ctx);
     }
 
     // This node's own catalogue -- no separate btp::StaticCatalog to declare
