@@ -1228,7 +1228,8 @@ struct TerminalCapture {
     std::uint8_t first_byte;
 };
 
-void capture_terminal(void* ctx, const btp::Header& header, btp::ByteView payload) {
+void capture_terminal(void* ctx, btp::Node& /*node*/, const btp::Header& header,
+                      btp::ByteView payload, std::uint64_t /*now_ms*/) {
     TerminalCapture* c = static_cast<TerminalCapture*>(ctx);
     ++c->calls;
     c->last_object_id = header.object_id;

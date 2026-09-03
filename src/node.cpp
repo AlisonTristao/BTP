@@ -307,7 +307,7 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
 
     // ----- terminal -----
     if (on_terminal_ != nullptr && out->header.type == MessageType::Terminal) {
-        on_terminal_(on_terminal_ctx_, out->header, out->payload);
+        on_terminal_(on_terminal_ctx_, *this, out->header, out->payload, now_ms);
         return NodeRx::TerminalDelivered;
     }
 

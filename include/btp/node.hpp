@@ -61,6 +61,8 @@
 
 namespace btp {
 
+class Node;  // NodeTerminalFn below needs the name before the class itself.
+
 // ---------------------------------------------------------------------------
 // Callbacks the node calls out to
 // ---------------------------------------------------------------------------
@@ -103,11 +105,18 @@ using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
 using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 
 // Called by receive() for a TERMINAL frame -- see on_terminal() below.
-// `header.object_id` is kTerminalIn or kTerminalOut (object_id namespace);
-// `payload` is the opaque bytes as-is, no struct (docs/session-and-
-// terminal.md section 7 -- that is TERMINAL's whole point). Do not keep
+// `node` is this same node, already mid-receive() -- send() / send_with()
+// are fine to call from here, the same reentrant-from-inside-receive()
+// pattern serve_subscribe() / serve_command() / emit_manifest() already
+// use for their own replies, so a handler that talks back (the usual case:
+// TERMINAL_IN answered with TERMINAL_OUT) needs nothing threaded in via
+// `ctx` to reach it. `now_ms` is receive()'s own now, for a reply's
+// timestamp. `header.object_id` is kTerminalIn or kTerminalOut (object_id
+// namespace); `payload` is the opaque bytes as-is, no struct (docs/session-
+// and-terminal.md section 7 -- that is TERMINAL's whole point). Do not keep
 // `payload` past the callback -- same lifetime as ReceivedMessage::payload.
-using NodeTerminalFn = void (*)(void* ctx, const Header& header, ByteView payload);
+using NodeTerminalFn = void (*)(void* ctx, Node& node, const Header& header,
+                                ByteView payload, std::uint64_t now_ms);
 
 // One entry in the registry publish_subscribed_topics() walks: which topic,
 // and the NodeNamedFillFn that fills a sample of it. Registered with
