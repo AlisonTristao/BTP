@@ -89,6 +89,11 @@ using NodeOpenFn = bool (*)(void* ctx, const Header& header,
 using NodeSampleFn = void (*)(void* ctx, const CatalogTopic& topic,
                               SampleReader& reader);
 
+// Called by publish() to write the fields of one sample, in schema order, into
+// an open SampleWriter (begin() already done): one put_f64 / put_i64 / put_u64
+// / put_bool / put_null / put_array_* per field. Do not call begin() / finish().
+using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -133,6 +138,7 @@ enum class NodeRx : std::uint8_t {
                      // replied (if a reply was due) through `send`. See session_event().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
     SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
+    RequestServed,   // a MANIFEST_REQUEST -- the node built and sent MANIFEST_DATA.
     Ignored,         // a frame the node would manage but cannot yet: a session not
                      // Active, or a sample for a topic the catalog has not learned.
     DroppedFrame,    // btp::decode / reassembly / a malformed managed payload rejected it.
@@ -183,12 +189,17 @@ public:
     //   open_buffer / open_capacity    where `cfg.open` writes the plaintext
     //                                  (>= slot capacity); may be {nullptr, 0}
     //                                  when `cfg.open` is null
+    //   scratch_buffer / scratch_capacity  where serve_catalog() builds a
+    //                                  MANIFEST_DATA and publish() a sample;
+    //                                  may be {nullptr, 0} for a node that does
+    //                                  neither
     Node(const NodeConfig& cfg, ReassemblySlot* slots,
          const ReassemblyStorage* storage, std::size_t slot_count,
          std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
          std::size_t rx_capacity, std::uint8_t* seal_scratch,
          std::size_t seal_scratch_cap, std::uint8_t* open_buffer,
-         std::size_t open_capacity) noexcept;
+         std::size_t open_capacity, std::uint8_t* scratch_buffer,
+         std::size_t scratch_capacity) noexcept;
 
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
@@ -287,6 +298,32 @@ public:
     // the caller to decode itself.
     void on_sample(NodeSampleFn callback, void* ctx) noexcept;
 
+    // ---- discovery: producer side (opt-in) -------------------------------
+    // Attach a catalogue the node SERVES: on a MANIFEST_REQUEST for this source
+    // (or a full-catalog request) receive() builds a MANIFEST_DATA from it and
+    // sends it (NodeRx::RequestServed), honouring known_config_revision with a
+    // NOT_MODIFIED reply (compared against catalog->config_revision(), read
+    // live). `source_uuid` is 16 octets (nullptr -> zero), `role` a btp::Role
+    // (0 -> Producer), `source_name` NUL-terminated (nullptr -> ""); all three
+    // go in the manifest header. Needs `cfg.send` and a scratch buffer. The
+    // same Catalog may also be the learn catalogue. nullptr detaches.
+    void serve_catalog(Catalog* catalog, std::uint8_t role,
+                       const std::uint8_t* source_uuid,
+                       const char* source_name) noexcept;
+
+    // Send the served catalogue as an UNSOLICITED MANIFEST_DATA (request
+    // reference zero) -- a producer broadcasting its schema on boot so a
+    // late-joining consumer needs no MANIFEST_REQUEST. Needs a served catalogue,
+    // `cfg.send` and a scratch buffer.
+    bool announce_catalog() noexcept;
+
+    // Encode one sample of `topic_id` -- must be a topic in the SERVED catalogue
+    // -- and send it as TELEMETRY. `fill` writes the field values in schema
+    // order into the SampleWriter. Returns false for an unknown topic, a fill
+    // that under/over-runs the schema, or a send failure.
+    bool publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
+                 std::uint64_t timestamp_us) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -310,6 +347,10 @@ public:
 private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
     NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept;
+    void serve_manifest(const Header& request, ByteView payload) noexcept;
+    void emit_manifest(const RequestRef& reply_to, std::uint8_t status,
+                       std::uint8_t flags, std::uint16_t error_code,
+                       bool with_topics) noexcept;
 
     NodeConfig cfg_;
     std::uint8_t* rx_buffer_;
@@ -318,6 +359,8 @@ private:
     std::size_t seal_scratch_cap_;
     std::uint8_t* open_buffer_;
     std::size_t open_capacity_;
+    std::uint8_t* scratch_buffer_;
+    std::size_t scratch_capacity_;
 
     Endpoint endpoint_;
     Receiver receiver_;
@@ -330,6 +373,11 @@ private:
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;
     void* on_sample_ctx_;
+
+    Catalog* serve_catalog_;
+    std::uint8_t serve_role_;
+    std::uint8_t serve_uuid_[16];
+    const char* serve_name_;
 };
 
 // ---------------------------------------------------------------------------
@@ -342,7 +390,8 @@ static const std::uint64_t kNodeDefaultReassemblyTimeoutMs = 4000U;
 
 namespace detail {
 
-template <std::size_t Slots, std::size_t SlotBytes, std::size_t SealBytes>
+template <std::size_t Slots, std::size_t SlotBytes, std::size_t SealBytes,
+          std::size_t ScratchBytes>
 struct NodeStorage {
     ReassemblySlot slots[Slots];
     std::uint8_t storage_bytes[Slots][SlotBytes];
@@ -350,6 +399,7 @@ struct NodeStorage {
     std::uint8_t rx_buffer[SlotBytes];
     std::uint8_t open_buffer[SlotBytes];
     std::uint8_t seal_scratch[SealBytes];
+    std::uint8_t scratch_buffer[ScratchBytes];
 
     NodeStorage() noexcept {
         for (std::size_t i = 0; i < Slots; ++i) {
@@ -363,12 +413,16 @@ struct NodeStorage {
 
 // Defaults: 4 concurrent reassemblies, 600 octets each (a fragmented
 // COMMAND_REQUEST plus headroom), 2048 octets of seal scratch (the largest
-// UTF-8 status document this family sends). A Serial deployment bumps SlotBytes.
+// UTF-8 status document this family sends), 512 octets of manifest / sample
+// scratch (serve_catalog / publish). A Serial deployment bumps SlotBytes; a
+// large manifest bumps ScratchBytes.
 template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
-          std::size_t SealBytes = 2048>
-class StaticNode : private detail::NodeStorage<Slots, SlotBytes, SealBytes>,
-                   public Node {
-    using Storage = detail::NodeStorage<Slots, SlotBytes, SealBytes>;
+          std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512>
+class StaticNode
+    : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
+      public Node {
+    using Storage =
+        detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>;
 
 public:
     explicit StaticNode(
@@ -378,8 +432,8 @@ public:
         : Storage(),
           Node(cfg, Storage::slots, Storage::storage, Slots,
                reassembly_timeout_ms, Storage::rx_buffer, SlotBytes,
-               Storage::seal_scratch, SealBytes, Storage::open_buffer,
-               SlotBytes) {}
+               Storage::seal_scratch, SealBytes, Storage::open_buffer, SlotBytes,
+               Storage::scratch_buffer, ScratchBytes) {}
 };
 
 }  // namespace btp

@@ -1,5 +1,7 @@
 #include "btp/node.hpp"
 
+#include <cstring>
+
 namespace btp {
 
 Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
@@ -7,7 +9,8 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
            std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
            std::size_t rx_capacity, std::uint8_t* seal_scratch,
            std::size_t seal_scratch_cap, std::uint8_t* open_buffer,
-           std::size_t open_capacity) noexcept
+           std::size_t open_capacity, std::uint8_t* scratch_buffer,
+           std::size_t scratch_capacity) noexcept
     : cfg_(cfg),
       rx_buffer_(rx_buffer),
       rx_capacity_(rx_capacity),
@@ -15,6 +18,8 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       seal_scratch_cap_(seal_scratch_cap),
       open_buffer_(open_buffer),
       open_capacity_(open_capacity),
+      scratch_buffer_(scratch_buffer),
+      scratch_capacity_(scratch_capacity),
       endpoint_(),
       receiver_(slots, storage, slot_count, reassembly_timeout_ms,
                 cfg.transport),
@@ -25,7 +30,11 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       session_path_dropped_decode_(0U),
       learn_catalog_(nullptr),
       on_sample_(nullptr),
-      on_sample_ctx_(nullptr) {}
+      on_sample_ctx_(nullptr),
+      serve_catalog_(nullptr),
+      serve_role_(0U),
+      serve_uuid_(),
+      serve_name_(nullptr) {}
 
 bool Node::begin() noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
@@ -171,7 +180,12 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept {
             ByteView{open_buffer_, out->payload.size - kEndpointAeadTagSize};
     }
 
-    // ----- discovery the node manages itself (consumer side) -----
+    // ----- discovery the node manages itself -----
+    if (serve_catalog_ != nullptr && out->header.type == MessageType::Control &&
+        out->header.object_id == object_id::kManifestRequest) {
+        serve_manifest(out->header, out->payload);
+        return NodeRx::RequestServed;
+    }
     if (learn_catalog_ != nullptr &&
         out->header.type == MessageType::Control &&
         out->header.object_id == object_id::kManifestData) {
@@ -225,6 +239,135 @@ bool Node::request_manifest(std::uint32_t target_source_id,
 }
 
 // ---------------------------------------------------------------------------
+// Discovery: producer side
+// ---------------------------------------------------------------------------
+
+void Node::serve_catalog(Catalog* catalog, std::uint8_t role,
+                         const std::uint8_t* source_uuid,
+                         const char* source_name) noexcept {
+    serve_catalog_ = catalog;
+    serve_role_ = role;
+    serve_name_ = source_name;
+    if (source_uuid != nullptr) {
+        std::memcpy(serve_uuid_, source_uuid, sizeof(serve_uuid_));
+    } else {
+        std::memset(serve_uuid_, 0, sizeof(serve_uuid_));
+    }
+}
+
+void Node::emit_manifest(const RequestRef& reply_to, std::uint8_t status,
+                         std::uint8_t flags, std::uint16_t error_code,
+                         bool with_topics) noexcept {
+    if (serve_catalog_ == nullptr || cfg_.send == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return;
+    }
+
+    ManifestHeader header = {};
+    header.request = reply_to;
+    header.status = status;
+    header.flags = flags;
+    header.error_code = error_code;
+    header.manifest_format_version = 1U;
+    header.config_revision = serve_catalog_->config_revision();
+    std::memcpy(header.source_uuid, serve_uuid_, sizeof(header.source_uuid));
+    header.described_source_id = cfg_.source_id;
+    header.described_boot_id = cfg_.boot_id;
+    header.source_role = serve_role_ != 0U
+                             ? serve_role_
+                             : static_cast<std::uint8_t>(Role::Producer);
+    header.source_flags = kSourceOnline;
+    header.catalog_count = 1U;
+    header.topic_count =
+        with_topics
+            ? static_cast<std::uint16_t>(serve_catalog_->topic_count())
+            : 0U;
+    if (serve_name_ != nullptr) {
+        header.source_name =
+            ByteView{reinterpret_cast<const std::uint8_t*>(serve_name_),
+                     std::strlen(serve_name_)};
+    }
+
+    ManifestWriter writer(scratch_buffer_, scratch_capacity_);
+    if (writer.begin(header) != MessageError::Ok) return;
+    if (with_topics && serve_catalog_->write_topics(&writer) != MessageError::Ok) {
+        return;
+    }
+    std::size_t written = 0U;
+    if (writer.finish(&written) != MessageError::Ok) return;
+
+    send(MessageType::Control, object_id::kManifestData, scratch_buffer_,
+         written, resolve_now(0U) * 1000ULL);
+}
+
+void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
+    if (serve_catalog_ == nullptr) return;
+
+    ManifestRequest req = {};
+    if (decode_manifest_request(payload.data, payload.size, &req) !=
+        MessageError::Ok) {
+        return;
+    }
+    // Targeted at another source? ignore (0 == the full-catalog request).
+    if (req.target_source_id != 0U && req.target_source_id != cfg_.source_id) {
+        return;
+    }
+
+    RequestRef reply_to = {};
+    reply_to.request_source_id = request.source_id;
+    reply_to.request_boot_id = request.boot_id;
+    reply_to.reply_to_sequence = request.sequence;
+
+    if (req.target_boot_id != 0U && req.target_boot_id != cfg_.boot_id) {
+        emit_manifest(reply_to,
+                      static_cast<std::uint8_t>(ResultStatus::Rejected),
+                      0U,
+                      static_cast<std::uint16_t>(ResultError::StaleTargetBoot),
+                      /*with_topics=*/false);
+        return;
+    }
+    if (req.known_config_revision != 0U &&
+        req.known_config_revision == serve_catalog_->config_revision()) {
+        emit_manifest(reply_to,
+                      static_cast<std::uint8_t>(ResultStatus::Success),
+                      kManifestNotModified, 0U, /*with_topics=*/false);
+        return;
+    }
+    emit_manifest(reply_to, static_cast<std::uint8_t>(ResultStatus::Success),
+                  kManifestCatalogComplete, 0U, /*with_topics=*/true);
+}
+
+bool Node::announce_catalog() noexcept {
+    if (serve_catalog_ == nullptr || cfg_.send == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return false;
+    }
+    emit_manifest(RequestRef{}, static_cast<std::uint8_t>(ResultStatus::Success),
+                  kManifestCatalogComplete, 0U, /*with_topics=*/true);
+    return true;
+}
+
+bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
+                   std::uint64_t timestamp_us) noexcept {
+    if (serve_catalog_ == nullptr || fill == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return false;
+    }
+    const CatalogTopic* topic = serve_catalog_->topic(topic_id);
+    if (topic == nullptr) return false;
+
+    SampleWriter writer(scratch_buffer_, scratch_capacity_, topic->fields,
+                        topic->field_count);
+    if (writer.begin(topic->schema_version) != MessageError::Ok) return false;
+    fill(ctx, writer);
+    std::size_t written = 0U;
+    if (writer.finish(&written) != MessageError::Ok) return false;
+
+    return send(MessageType::Telemetry, topic_id, scratch_buffer_, written,
+                timestamp_us);
+}
+
+// ---------------------------------------------------------------------------
 // Session responder
 // ---------------------------------------------------------------------------
 
@@ -265,6 +408,7 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::SessionHandled: return "session handled";
         case NodeRx::CatalogUpdated: return "catalog updated";
         case NodeRx::SampleDelivered: return "sample delivered";
+        case NodeRx::RequestServed: return "request served";
         case NodeRx::Ignored: return "ignored";
         case NodeRx::DroppedFrame: return "dropped frame";
     }

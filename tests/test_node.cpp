@@ -484,6 +484,86 @@ void test_catalog_discovery() {
     CHECK(std::strcmp(capture.names[1], "battery_v") == 0);
 }
 
+void fill_drive(void* /*ctx*/, btp::SampleWriter& w) {
+    w.put_f64(1450.0);
+    w.put_f64(3.72);
+    w.put_null();
+}
+
+void test_catalog_serve_and_publish() {
+    static const btp::FieldRecord kDrive[] = {
+        frecord(1, 0, btp::WireType::Float32, 0U, 1.0, "left_rpm"),
+        frecord(2, 1, btp::WireType::Uint16, 0U, 0.001, "battery_v"),
+        frecord(3, 2, btp::WireType::Int16, btp::kFieldNullable, 0.1, "temp_c"),
+    };
+    const std::uint8_t uuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
+                                   9, 10, 11, 12, 13, 14, 15, 16};
+
+    // Producer: a served catalogue.
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    btp::StaticCatalog<> served;
+    served.set_config_revision(4U);
+    CHECK(served.add_topic(0x0101U, 2U, btp::TelemetryEncoding::PackedLe, true,
+                           0U, "drive_status", kDrive, 3U) ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           uuid, "example-robot");
+    producer.begin();
+
+    // Consumer: a learn catalogue.
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    btp::StaticCatalog<> learned;
+    consumer.learn_catalog(&learned);
+    SampleCapture capture = {};
+    consumer.on_sample(&capture_sample, &capture);
+    consumer.begin();
+
+    // Consumer asks; producer serves; consumer learns.
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(prod_tx.count() >= 1U);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(learned.topic(0x0101U) != nullptr);
+    CHECK(learned.config_revision() == 4U);
+    CHECK(std::strcmp(learned.field_name(*learned.topic(0x0101U), 1),
+                      "battery_v") == 0);
+
+    // Producer publishes a typed sample; consumer decodes it.
+    prod_tx.clear();
+    CHECK(producer.publish(0x0101U, &fill_drive, nullptr, 42ULL));
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SampleDelivered);
+    CHECK(capture.calls == 1);
+    CHECK(capture.values[0] == 1450.0);
+    CHECK(capture.values[2] == -999.0);  // null
+
+    // Publishing an unknown topic fails.
+    CHECK(!producer.publish(0x0999U, &fill_drive, nullptr, 1ULL));
+
+    // A second request carrying the current revision gets NOT_MODIFIED, which
+    // ingest() treats as "keep what I have".
+    cons_tx.clear();
+    prod_tx.clear();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 4U));
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(learned.topic_count() == 1U);
+
+    // Unsolicited announce also works.
+    prod_tx.clear();
+    CHECK(producer.announce_catalog());
+    CHECK(prod_tx.count() >= 1U);
+    btp::StaticCatalog<> late;
+    Sink late_tx;
+    TestNode latecomer(base_config(0x00A1A1A1U, 0x00B2B2B2U, &late_tx));
+    latecomer.learn_catalog(&late);
+    latecomer.begin();
+    CHECK(deliver(latecomer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(late.topic(0x0101U) != nullptr);
+}
+
 // --- consumer sends MANIFEST_REQUEST ---------------------------------------
 
 void test_request_manifest() {
@@ -516,6 +596,7 @@ int main() {
     test_session_ignores_frame_before_hello();
     test_stats();
     test_catalog_discovery();
+    test_catalog_serve_and_publish();
     test_request_manifest();
 
     if (failures == 0) {

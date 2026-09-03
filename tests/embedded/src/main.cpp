@@ -289,6 +289,21 @@ void setup() {
     node.learn_catalog(&catalog);
     node.on_sample(nullptr, nullptr);
     (void)node.request_manifest(0x11111111U, 0x22222222U, 0U);
+
+    static const std::uint8_t catalog_uuid[16] = {
+        0xC0U, 0xFFU, 0xEEU, 0x01U, 0U, 0U, 0U, 0U,
+        0U,    0U,    0U,    0U,    0U, 0U, 0U, 1U};
+    node.serve_catalog(&catalog,
+                       static_cast<std::uint8_t>(btp::Role::Producer),
+                       catalog_uuid, "embedded");
+    (void)node.announce_catalog();
+    struct CatalogFill {
+        static void fill(void*, btp::SampleWriter& w) {
+            (void)w.put_f64(1.0);
+            (void)w.put_f64(2.0);
+        }
+    };
+    (void)node.publish(0x0101U, &CatalogFill::fill, nullptr, 0U);
 }
 
 void loop() {}

@@ -1,15 +1,14 @@
 // example/sender.cpp
 //
-// The producer half, with btp::Node. It publishes two frames:
+// The producer half, with btp::Node. It exposes one topic through a
+// btp::Catalog:
 //
-//   1. a MANIFEST_DATA that DESCRIBES topic 0x0101 -- every field's type,
-//      order, scale, offset, nullability, name and unit;
-//   2. a TELEMETRY sample of that topic.
+//   node.announce_catalog()  -> a MANIFEST_DATA describing topic 0x0101
+//   node.publish(0x0101, ..) -> a typed TELEMETRY sample of it
 //
-// A consumer that has never seen this producer learns the schema from the
-// manifest and decodes the sample against it -- nothing about the topic is
-// hard-coded on the receiving side. The schema is written ONCE here, as the
-// producer's own data model.
+// A consumer that has never met this producer learns the schema from the
+// announcement and decodes the sample against it. The schema is written ONCE,
+// here, as the producer's own data model.
 //
 //   cd example && cmake -B build && cmake --build build
 //   ./build/sender      writes frame.bin (manifest frame, then sample frame)
@@ -17,9 +16,7 @@
 //
 // by_hand_sender.cpp is the wire-level walkthrough of a single sample.
 
-#include <btp/messages.hpp>
 #include <btp/node.hpp>
-#include <btp/telemetry.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -29,16 +26,15 @@
 namespace {
 
 const std::uint16_t kTopicId = 0x0101U;
-const std::uint16_t kSchemaVersion = 3U;
-const std::uint32_t kSourceId = 0x00CAFE01U;
-const std::uint32_t kBootId = 0x0000B001U;
 
 btp::ByteView text(const char* s) {
-    return {reinterpret_cast<const std::uint8_t*>(s), std::strlen(s)};
+    return btp::ByteView{reinterpret_cast<const std::uint8_t*>(s),
+                         std::strlen(s)};
 }
 
-// THE schema, defined once: a btp::FieldRecord per field. The manifest carries
-// these; the sample codec narrows each to a btp::FieldSpec with field_spec().
+// THE schema, defined once: a btp::FieldRecord per field. The catalogue holds
+// it; announce_catalog() serialises it into MANIFEST_DATA and publish() encodes
+// samples against it.
 btp::FieldRecord field(std::uint16_t id, std::uint16_t order, btp::WireType type,
                        std::uint8_t flags, double scale, const char* name,
                        const char* unit) {
@@ -47,12 +43,10 @@ btp::FieldRecord field(std::uint16_t id, std::uint16_t order, btp::WireType type
     f.order = order;
     f.type = static_cast<std::uint8_t>(type);
     f.flags = flags;
-    f.element_count = 1;
+    f.element_count = 1U;
     f.scale = scale;
-    f.offset = 0.0;
     f.name = text(name);
     f.unit = text(unit);
-    f.description = text("");
     return f;
 }
 
@@ -65,8 +59,8 @@ const btp::FieldRecord kSchema[] = {
 const std::size_t kFieldCount = sizeof(kSchema) / sizeof(kSchema[0]);
 
 // "Transmit" one frame: length-prefixed into frame.bin so the receiver can
-// split the two. A packet transport (ESP-NOW, USB HID) delivers whole
-// datagrams and needs no such prefix.
+// split the frames. A packet transport delivers whole datagrams and needs no
+// such prefix.
 bool transmit(void* /*ctx*/, const std::uint8_t* frame, std::size_t size) {
     std::FILE* f = std::fopen("frame.bin", "ab");
     if (f == nullptr) return false;
@@ -79,39 +73,14 @@ bool transmit(void* /*ctx*/, const std::uint8_t* frame, std::size_t size) {
     return true;
 }
 
-// The MANIFEST_DATA payload describing our one topic.
-std::size_t build_manifest(std::uint8_t* out, std::size_t capacity) {
-    btp::ManifestHeader header = {};
-    header.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
-    header.flags = btp::kManifestCatalogComplete;
-    header.manifest_format_version = 1U;
-    header.config_revision = 1U;
-    header.described_source_id = kSourceId;
-    header.described_boot_id = kBootId;
-    header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
-    header.source_flags = btp::kSourceOnline;
-    header.catalog_count = 1U;
-    header.topic_count = 1U;
-    header.source_name = text("example-robot");
-
-    btp::TopicRecord topic = {};
-    topic.topic_id = kTopicId;
-    topic.schema_version = kSchemaVersion;
-    topic.encoding = static_cast<std::uint8_t>(btp::TelemetryEncoding::PackedLe);
-    topic.flags = btp::kTopicSubscribable;
-    topic.field_count = static_cast<std::uint16_t>(kFieldCount);
-    topic.name = text("drive_status");
-    topic.description = text("wheel speeds, battery, temperature");
-
-    btp::ManifestWriter w(out, capacity);
-    if (w.begin(header) != btp::MessageError::Ok) return 0;
-    if (w.begin_topic(topic) != btp::MessageError::Ok) return 0;
-    for (std::size_t i = 0; i < kFieldCount; ++i) {
-        if (w.add_field(kSchema[i]) != btp::MessageError::Ok) return 0;
-    }
-    if (w.end_topic() != btp::MessageError::Ok) return 0;
-    std::size_t written = 0;
-    return w.finish(&written) == btp::MessageError::Ok ? written : 0;
+// publish() calls this to write the field values, in schema order, into an open
+// SampleWriter. put_f64 takes the engineering value (battery_v 3.72 is stored
+// as the raw Uint16 3720); put_null marks the offline temp_c absent.
+void fill_drive_status(void* /*ctx*/, btp::SampleWriter& writer) {
+    writer.put_f64(1450.0);   // left_rpm
+    writer.put_f64(-1448.5);  // right_rpm
+    writer.put_f64(3.72);     // battery_v
+    writer.put_null();        // temp_c
 }
 
 }  // namespace
@@ -120,56 +89,46 @@ int main() {
     std::remove("frame.bin");  // transmit() appends -- start from empty
 
     btp::NodeConfig config = {};
-    config.source_id = kSourceId;
-    config.boot_id = kBootId;
+    config.source_id = 0x00CAFE01U;  // this robot; non-zero
+    config.boot_id = 0x0000B001U;    // changes every reboot
     config.transport = btp::TransportProfile::EspNow;
     config.send = &transmit;
 
     btp::StaticNode<> node(config);
+
+    // The catalogue: one topic, its schema, its config revision.
+    btp::StaticCatalog<> catalog;
+    catalog.set_config_revision(1U);
+    if (catalog.add_topic(kTopicId, /*schema_version=*/3U,
+                          btp::TelemetryEncoding::PackedLe, /*subscribable=*/true,
+                          /*max_rate_millihz=*/0U, "drive_status", kSchema,
+                          kFieldCount) != btp::MessageError::Ok) {
+        std::printf("catalog rejected the schema\n");
+        return 1;
+    }
+
+    const std::uint8_t uuid[16] = {0xC0, 0xFF, 0xEE, 0x01, 0, 0, 0, 0,
+                                   0,    0,    0,    0,    0, 0, 0, 1};
+    node.serve_catalog(&catalog, static_cast<std::uint8_t>(btp::Role::Producer),
+                       uuid, "example-robot");
     if (!node.begin()) {
         std::printf("node configuration rejected\n");
         return 1;
     }
 
-    // 1 -- publish the schema, as a MANIFEST_DATA CONTROL message.
-    std::uint8_t manifest[512];
-    const std::size_t manifest_size = build_manifest(manifest, sizeof(manifest));
-    if (manifest_size == 0) {
-        std::printf("manifest build failed\n");
-        return 1;
-    }
-    std::printf("sending MANIFEST_DATA for topic 0x%04X:\n", kTopicId);
-    if (!node.send(btp::MessageType::Control, btp::object_id::kManifestData,
-                   manifest, manifest_size, 1700000000000000ULL)) {
-        std::printf("send failed\n");
+    // 1 -- announce the schema (a MANIFEST_DATA with no request behind it).
+    std::printf("announcing MANIFEST_DATA for topic 0x%04X:\n", kTopicId);
+    if (!node.announce_catalog()) {
+        std::printf("announce failed\n");
         return 1;
     }
 
-    // 2 -- the sample body, against the SAME schema (narrowed to the codec's
-    // view with field_spec()).
-    btp::FieldSpec spec[kFieldCount];
-    for (std::size_t i = 0; i < kFieldCount; ++i) {
-        spec[i] = btp::field_spec(kSchema[i]);
-    }
-
-    std::uint8_t body[64];
-    btp::SampleWriter writer(body, sizeof(body), spec, kFieldCount);
-    writer.begin(kSchemaVersion);
-    writer.put_f64(1450.0);      // left_rpm
-    writer.put_f64(-1448.5);     // right_rpm
-    writer.put_f64(3.72);        // battery_v -> raw 3720
-    writer.put_null();           // temp_c -- sensor offline
-    std::size_t body_size = 0;
-    if (writer.finish(&body_size) != btp::MessageError::Ok) {
-        std::printf("sample encode failed\n");
-        return 1;
-    }
-
-    std::printf("sending TELEMETRY topic 0x%04X (%lu-octet body):\n", kTopicId,
-                static_cast<unsigned long>(body_size));
-    if (!node.send(btp::MessageType::Telemetry, kTopicId, body, body_size,
-                   1700000000000000ULL)) {
-        std::printf("send failed\n");
+    // 2 -- publish a typed sample. The node finds the schema in the catalogue,
+    // runs the SampleWriter, encodes and sends the frame.
+    std::printf("publishing TELEMETRY topic 0x%04X:\n", kTopicId);
+    if (!node.publish(kTopicId, &fill_drive_status, nullptr,
+                      /*timestamp_us=*/1700000000000000ULL)) {
+        std::printf("publish failed\n");
         return 1;
     }
 

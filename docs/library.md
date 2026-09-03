@@ -2720,10 +2720,31 @@ the callback with a `SampleReader` positioned at the first field
 (`NodeRx::SampleDelivered`); a sample for a topic not yet in the catalogue is
 `NodeRx::Ignored`. `NOT_MODIFIED` keeps the current contents.
 
-The **producer** side — the node serving `MANIFEST_DATA` from a catalogue on a
-`MANIFEST_REQUEST`, and `node.publish(topic_id, fill)` — is not wired yet;
-today a producer builds the manifest with `ManifestWriter` (or
-`Catalog::write_topics`) and sends it with `node.send()`.
+**On the producer**, `node.serve_catalog(&catalog, role, uuid, name)` hands over
+a catalogue the node answers from:
+
+```cpp
+btp::StaticCatalog<> catalog;
+catalog.set_config_revision(1);
+catalog.add_topic(0x0101, /*schema_version=*/3, btp::TelemetryEncoding::PackedLe,
+                  /*subscribable=*/true, /*max_rate_millihz=*/0, "drive_status",
+                  fields, field_count);            // fields is btp::FieldRecord[]
+node.serve_catalog(&catalog, uint8_t(btp::Role::Producer), uuid, "robot");
+
+node.announce_catalog();                            // unsolicited MANIFEST_DATA
+node.publish(0x0101, &fill_drive_status, &ctx, now_us());   // a typed sample
+```
+
+`receive()` answers a `MANIFEST_REQUEST` for this source (or a full-catalog
+request) by building a `MANIFEST_DATA` from the catalogue and sending it
+(`NodeRx::RequestServed`) — a `NOT_MODIFIED` reply when the request's
+`known_config_revision` matches, a `STALE_TARGET_BOOT` rejection for a wrong
+boot. `announce_catalog()` sends the same body unsolicited (request reference
+zero) so a late-joining consumer needs no request. `publish(topic_id, fill)`
+finds the topic in the served catalogue, runs a `SampleWriter` against its
+schema — `fill` writes the values in schema order — and sends the `TELEMETRY`
+frame; the `serve_catalog` / `publish` scratch is the node's fourth buffer
+(`StaticNode`'s `ScratchBytes`, default 512).
 
 ### 16.5 What stays out
 
@@ -2731,11 +2752,10 @@ Everything §11 keeps above the wire, unchanged: the **session initiator**
 (`Node` is responder + producer), **routing policy** (`receive()` hands back a
 message it does not manage; relay-or-drop is the caller's one switch), the
 subscription aggregator, the priority scheduler, and **key derivation** (the
-body of your `seal` / `open`). Plus, in this first cut: the producer-side
-manifest serving and typed publish above, and **serial byte-stream framing** —
-a `Node` speaks packet transports (`receive()` wants one whole datagram), and a
-single encoded frame must fit the ESP-NOW ceiling, so native COBS and
-large-Serial frames are a later addition.
+body of your `seal` / `open`). Plus, in this first cut: **serial byte-stream
+framing** — a `Node` speaks packet transports (`receive()` wants one whole
+datagram), and a single encoded frame must fit the ESP-NOW ceiling, so native
+COBS and large-Serial frames are a later addition.
 
 ---
 
