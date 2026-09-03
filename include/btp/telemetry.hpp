@@ -39,6 +39,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace btp {
 
@@ -108,6 +109,101 @@ struct FieldSpec {
 
 // Narrows a manifest FieldRecord to what the sample codec uses.
 FieldSpec field_spec(const FieldRecord& record) noexcept;
+
+// ---------------------------------------------------------------------------
+// Schema-declaration helpers -- one readable line per field
+// ---------------------------------------------------------------------------
+//
+//   static const btp::FieldRecord kDriveStatus[] = {
+//       btp::f32("left_rpm",  "rpm"),
+//       btp::f32("right_rpm", "rpm"),
+//       btp::u16("battery_v", 0.001, "V"),           // stored as millivolts
+//       btp::nullable(btp::i16("temp_c", 0.1, "Cel")),
+//   };
+//
+// `field_id` and `order` are left 0: btp::Catalog::add_topic() assigns them
+// from the array position (order = index, field_id = index + 1). Set `field_id`
+// explicitly with field() when a schema evolves and an id must stay put across
+// a rename or reorder. Floats are sent raw (no scale); integers carry a scale
+// so a ranged value packs into a small type (engineering = raw * scale + offset).
+
+inline FieldRecord scalar(WireType type, const char* name, double scale = 1.0,
+                          const char* unit = "", double offset = 0.0) noexcept {
+    FieldRecord f = {};
+    f.type = static_cast<std::uint8_t>(type);
+    f.element_count = 1U;
+    f.scale = scale;
+    f.offset = offset;
+    f.name = ByteView{reinterpret_cast<const std::uint8_t*>(name),
+                      name != nullptr ? std::strlen(name) : 0U};
+    f.unit = ByteView{reinterpret_cast<const std::uint8_t*>(unit),
+                      unit != nullptr ? std::strlen(unit) : 0U};
+    return f;
+}
+
+// Same, with an explicit field_id (schema evolution).
+inline FieldRecord field(std::uint16_t field_id, WireType type,
+                         const char* name, double scale = 1.0,
+                         const char* unit = "", double offset = 0.0) noexcept {
+    FieldRecord f = scalar(type, name, scale, unit, offset);
+    f.field_id = field_id;
+    return f;
+}
+
+inline FieldRecord u8(const char* name, double scale = 1.0,
+                      const char* unit = "") noexcept {
+    return scalar(WireType::Uint8, name, scale, unit);
+}
+inline FieldRecord u16(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Uint16, name, scale, unit);
+}
+inline FieldRecord u32(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Uint32, name, scale, unit);
+}
+inline FieldRecord u64(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Uint64, name, scale, unit);
+}
+inline FieldRecord i8(const char* name, double scale = 1.0,
+                      const char* unit = "") noexcept {
+    return scalar(WireType::Int8, name, scale, unit);
+}
+inline FieldRecord i16(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Int16, name, scale, unit);
+}
+inline FieldRecord i32(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Int32, name, scale, unit);
+}
+inline FieldRecord i64(const char* name, double scale = 1.0,
+                       const char* unit = "") noexcept {
+    return scalar(WireType::Int64, name, scale, unit);
+}
+inline FieldRecord f32(const char* name, const char* unit = "") noexcept {
+    return scalar(WireType::Float32, name, 1.0, unit);
+}
+inline FieldRecord f64(const char* name, const char* unit = "") noexcept {
+    return scalar(WireType::Float64, name, 1.0, unit);
+}
+inline FieldRecord boolean(const char* name) noexcept {
+    return scalar(WireType::Bool, name);
+}
+inline FieldRecord enum8(const char* name) noexcept {
+    return scalar(WireType::Enum8, name);
+}
+inline FieldRecord enum16(const char* name) noexcept {
+    return scalar(WireType::Enum16, name);
+}
+
+// Mark a field nullable -- it may be absent from a sample (a presence bitmap
+// tracks it). Wraps any of the helpers above:  btp::nullable(btp::i16("t", 0.1))
+inline FieldRecord nullable(FieldRecord f) noexcept {
+    f.flags |= kFieldNullable;
+    return f;
+}
 
 // ---------------------------------------------------------------------------
 // Decoded value

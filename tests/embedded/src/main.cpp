@@ -263,16 +263,13 @@ void setup() {
     // catalogue a producer fills or a consumer learns from MANIFEST_DATA,
     // pools owned by btp::StaticCatalog, no allocation, no exceptions.
     static const btp::FieldRecord catalog_fields[] = {
-        {1U, 0U, static_cast<std::uint8_t>(btp::WireType::Float32), 0U, 1U, 0U,
-         1.0, 0.0, 0U, {nullptr, 0U}, {nullptr, 0U}, {nullptr, 0U}},
-        {2U, 1U, static_cast<std::uint8_t>(btp::WireType::Int16), 0U, 1U, 0U,
-         0.01, 0.0, 0U, {nullptr, 0U}, {nullptr, 0U}, {nullptr, 0U}},
+        btp::f32("speed", "m/s"),
+        btp::nullable(btp::i16("temp", 0.01, "Cel")),
     };
     static btp::StaticCatalog<2U, 8U, 128U> catalog;
     (void)catalog.valid();
     catalog.set_config_revision(3U);
-    (void)catalog.add_topic(0x0101U, 1U, btp::TelemetryEncoding::PackedLe, true,
-                            0U, "drive", catalog_fields, 2U);
+    (void)catalog.add_topic(0x0101U, 1U, "drive", catalog_fields);
     (void)catalog.topic(0x0101U);
     (void)catalog.topic_count();
 

@@ -100,6 +100,19 @@ public:
                            const FieldRecord* fields,
                            std::size_t field_count) noexcept;
 
+    // The common case: a static FieldRecord[] whose length is deduced, PackedLe,
+    // subscribable, no rate cap.
+    //   catalog.add_topic(0x0101, /*schema_version=*/3, "drive_status", kSchema);
+    template <std::size_t N>
+    MessageError add_topic(std::uint16_t topic_id, std::uint16_t schema_version,
+                           const char* name, const FieldRecord (&fields)[N],
+                           TelemetryEncoding encoding = TelemetryEncoding::PackedLe,
+                           bool subscribable = true,
+                           std::uint32_t max_rate_millihz = 0U) noexcept {
+        return add_topic(topic_id, schema_version, encoding, subscribable,
+                         max_rate_millihz, name, fields, N);
+    }
+
     // ----- consumer: learn from a MANIFEST_DATA payload ---------------------
     // Walks `payload` (a whole logical MANIFEST_DATA, post-reassembly) and
     // REPLACES the catalogue with the topics it describes. Also copies the

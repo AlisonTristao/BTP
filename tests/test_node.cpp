@@ -355,20 +355,11 @@ void test_stats() {
 
 // --- discovery: consumer learns a schema from MANIFEST_DATA -----------------
 
-btp::FieldRecord frecord(std::uint16_t id, std::uint16_t order,
-                         btp::WireType type, std::uint8_t flags, double scale,
-                         const char* name) {
-    btp::FieldRecord f = {};
-    f.field_id = id;
-    f.order = order;
-    f.type = static_cast<std::uint8_t>(type);
-    f.flags = flags;
-    f.element_count = 1U;
-    f.scale = scale;
-    f.name = btp::ByteView{reinterpret_cast<const std::uint8_t*>(name),
-                           std::strlen(name)};
-    return f;
-}
+const btp::FieldRecord kDriveFields[] = {
+    btp::f32("left_rpm"),
+    btp::u16("battery_v", 0.001),
+    btp::nullable(btp::i16("temp_c", 0.1)),
+};
 
 // Serialise a one-topic catalogue into a MANIFEST_DATA payload.
 std::size_t manifest_of(const btp::Catalog& cat, std::uint8_t* out,
@@ -415,15 +406,9 @@ void capture_sample(void* ctx, const btp::CatalogTopic& topic,
 }
 
 void test_catalog_discovery() {
-    static const btp::FieldRecord kDrive[] = {
-        frecord(1, 0, btp::WireType::Float32, 0U, 1.0, "left_rpm"),
-        frecord(2, 1, btp::WireType::Uint16, 0U, 0.001, "battery_v"),
-        frecord(3, 2, btp::WireType::Int16, btp::kFieldNullable, 0.1, "temp_c"),
-    };
     btp::StaticCatalog<> producer_cat;
     producer_cat.set_config_revision(9U);
-    CHECK(producer_cat.add_topic(0x0101U, 2U, btp::TelemetryEncoding::PackedLe,
-                                 true, 0U, "drive_status", kDrive, 3U) ==
+    CHECK(producer_cat.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
           btp::MessageError::Ok);
 
     std::uint8_t manifest[512];
@@ -491,11 +476,6 @@ void fill_drive(void* /*ctx*/, btp::SampleWriter& w) {
 }
 
 void test_catalog_serve_and_publish() {
-    static const btp::FieldRecord kDrive[] = {
-        frecord(1, 0, btp::WireType::Float32, 0U, 1.0, "left_rpm"),
-        frecord(2, 1, btp::WireType::Uint16, 0U, 0.001, "battery_v"),
-        frecord(3, 2, btp::WireType::Int16, btp::kFieldNullable, 0.1, "temp_c"),
-    };
     const std::uint8_t uuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
                                    9, 10, 11, 12, 13, 14, 15, 16};
 
@@ -504,8 +484,7 @@ void test_catalog_serve_and_publish() {
     TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
     btp::StaticCatalog<> served;
     served.set_config_revision(4U);
-    CHECK(served.add_topic(0x0101U, 2U, btp::TelemetryEncoding::PackedLe, true,
-                           0U, "drive_status", kDrive, 3U) ==
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
           btp::MessageError::Ok);
     producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
                            uuid, "example-robot");

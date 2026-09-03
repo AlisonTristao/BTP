@@ -2184,13 +2184,29 @@ half of [Telemetry payloads](telemetry.md): a `TELEMETRY` logical payload
 holds. `btp::messages` gave the schema; this reads and writes a sample.
 
 The schema is a `FieldSpec` array -- a lean subset of `FieldRecord` (the codec
-never touches `name` / `unit` / enum entries). A producer fills a static
-`FieldSpec[]`; a consumer converts each walked `FieldRecord` with
-`field_spec()` and keeps the array in its own cache. `order` must be
-contiguous from zero, in array order.
+never touches `name` / `unit` / enum entries). A consumer converts each walked
+`FieldRecord` with `field_spec()` and caches the array; a producer that also
+publishes a manifest keeps the schema as `FieldRecord[]` and gets the
+`FieldSpec[]` from `field_spec()` (or hands the `FieldRecord[]` to
+`btp::Catalog`, [§16.4](#164-the-schema-catalogue-btpcatalog)). `order` is the
+array position.
+
+The `btp::f32` / `btp::u16` / `btp::i16` / … helpers write a `FieldRecord`
+schema one readable line per field -- `field_id` and `order` default to the
+position:
 
 ```cpp
-// schema (from the manifest, or compiled in)
+static const btp::FieldRecord kDriveStatus[] = {
+    btp::f32("left_rpm", "rpm"),
+    btp::f32("right_rpm", "rpm"),
+    btp::u16("battery_v", 0.001, "V"),          // stored as millivolts
+    btp::nullable(btp::i16("temp_c", 0.1, "Cel")),
+};
+```
+
+The raw form -- a `FieldSpec[]` literal, for the sample codec with no manifest:
+
+```cpp
 btp::FieldSpec fields[] = {
     { 1, 0, uint8_t(btp::WireType::Float32), 0, 1, 0, 1.0,  0.0 },
     { 2, 1, uint8_t(btp::WireType::Int16),   0, 1, 0, 0.01, 0.0 },
@@ -2724,16 +2740,26 @@ the callback with a `SampleReader` positioned at the first field
 a catalogue the node answers from:
 
 ```cpp
+static const btp::FieldRecord kDriveStatus[] = {           // one line per field
+    btp::f32("left_rpm", "rpm"),
+    btp::u16("battery_v", 0.001, "V"),
+    btp::nullable(btp::i16("temp_c", 0.1, "Cel")),
+};
+
 btp::StaticCatalog<> catalog;
 catalog.set_config_revision(1);
-catalog.add_topic(0x0101, /*schema_version=*/3, btp::TelemetryEncoding::PackedLe,
-                  /*subscribable=*/true, /*max_rate_millihz=*/0, "drive_status",
-                  fields, field_count);            // fields is btp::FieldRecord[]
+catalog.add_topic(0x0101, /*schema_version=*/3, "drive_status", kDriveStatus);
 node.serve_catalog(&catalog, uint8_t(btp::Role::Producer), uuid, "robot");
 
 node.announce_catalog();                            // unsolicited MANIFEST_DATA
 node.publish(0x0101, &fill_drive_status, &ctx, now_us());   // a typed sample
 ```
+
+`add_topic()` deduces the array length; `encoding` defaults to `PackedLe`,
+`subscribable` to `true`, `max_rate_millihz` to `0` -- the eight-argument
+primitive is there for the rest. `field_id` and `order` come from the array
+position; `btp::field(id, type, name, ...)` sets an explicit `field_id` for a
+schema that must survive a rename.
 
 `receive()` answers a `MANIFEST_REQUEST` for this source (or a full-catalog
 request) by building a `MANIFEST_DATA` from the catalogue and sending it

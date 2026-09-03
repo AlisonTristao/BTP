@@ -41,27 +41,11 @@ btp::ByteView text(const char* s) {
                          std::strlen(s)};
 }
 
-FieldRecord field(std::uint16_t id, std::uint16_t order, WireType type,
-                  std::uint8_t flags, double scale, const char* name) {
-    FieldRecord f = {};
-    f.field_id = id;
-    f.order = order;
-    f.type = static_cast<std::uint8_t>(type);
-    f.flags = flags;
-    f.element_count = 1U;
-    f.scale = scale;
-    f.offset = 0.0;
-    f.name = text(name);
-    f.unit = text("");
-    f.description = text("");
-    return f;
-}
-
 const FieldRecord kDriveStatus[] = {
-    field(1, 0, WireType::Float32, 0U, 1.0, "left_rpm"),
-    field(2, 1, WireType::Float32, 0U, 1.0, "right_rpm"),
-    field(3, 2, WireType::Uint16, 0U, 0.001, "battery_v"),
-    field(4, 3, WireType::Int16, btp::kFieldNullable, 0.1, "temp_c"),
+    btp::f32("left_rpm"),
+    btp::f32("right_rpm"),
+    btp::u16("battery_v", 0.001),
+    btp::nullable(btp::i16("temp_c", 0.1)),
 };
 
 // Serialise `source` into a MANIFEST_DATA payload. Returns 0 on failure.
@@ -124,11 +108,38 @@ void test_add_and_query() {
     // duplicate topic_id
     CHECK(cat.add_topic(0x0101U, 1U, TelemetryEncoding::PackedLe, false, 0U, "x",
                         kDriveStatus, 4U) == MessageError::InvalidArgument);
-    // field order not contiguous
-    FieldRecord bad[] = {field(1, 0, WireType::Uint8, 0U, 1.0, "a"),
-                         field(2, 5, WireType::Uint8, 0U, 1.0, "b")};
+    // an explicit order that disagrees with the position
+    FieldRecord bad[] = {btp::u8("a"), btp::u8("b")};
+    bad[1].order = 5U;
     CHECK(cat.add_topic(0x0202U, 1U, TelemetryEncoding::PackedLe, false, 0U, "y",
                         bad, 2U) == MessageError::InvalidArgument);
+}
+
+void test_schema_helpers() {
+    // f32 / u16 / nullable produce FieldRecords with field_id/order 0 -- the
+    // Catalog assigns them from the array position.
+    const FieldRecord fields[] = {
+        btp::f32("speed", "m/s"),
+        btp::u16("volts", 0.001, "V"),
+        btp::nullable(btp::i16("temp", 0.1, "Cel")),
+        btp::field(99, WireType::Uint8, "mode"),  // explicit id survives
+    };
+    CHECK(fields[0].field_id == 0U && fields[0].order == 0U);
+    CHECK(fields[0].type == static_cast<std::uint8_t>(WireType::Float32));
+    CHECK(fields[1].scale == 0.001);
+    CHECK((fields[2].flags & btp::kFieldNullable) != 0U);
+    CHECK(fields[3].field_id == 99U);
+
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0300U, 1U, "mixed", fields) == MessageError::Ok);
+    const CatalogTopic* t = cat.topic(0x0300U);
+    CHECK(t != nullptr);
+    CHECK(t->field_count == 4U);
+    CHECK(t->fields[0].field_id == 1U);   // position + 1
+    CHECK(t->fields[1].field_id == 2U);
+    CHECK(t->fields[3].field_id == 99U);  // kept
+    CHECK(t->fields[3].order == 3U);      // position
+    CHECK(std::strcmp(cat.field_name(*t, 2), "temp") == 0);
 }
 
 void test_manifest_roundtrip() {
@@ -138,9 +149,9 @@ void test_manifest_roundtrip() {
                        "drive_status", kDriveStatus, 4U);
 
     static const FieldRecord kPose[] = {
-        field(1, 0, WireType::Float64, 0U, 1.0, "x_m"),
-        field(2, 1, WireType::Float64, 0U, 1.0, "y_m"),
-        field(3, 2, WireType::Float32, 0U, 1.0, "heading_rad"),
+        btp::f64("x_m"),
+        btp::f64("y_m"),
+        btp::f32("heading_rad"),
     };
     producer.add_topic(0x0102U, 1U, TelemetryEncoding::PackedLe, true, 50000U,
                        "pose", kPose, 3U);
@@ -237,6 +248,7 @@ void test_bad_manifest() {
 
 int main() {
     test_add_and_query();
+    test_schema_helpers();
     test_manifest_roundtrip();
     test_not_modified();
     test_capacity();

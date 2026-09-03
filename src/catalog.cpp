@@ -93,8 +93,11 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
         has_topic(topic_id)) {
         return MessageError::InvalidArgument;
     }
+    // field_id / order default to the array position (the schema helpers leave
+    // them 0). An explicit field_id is kept -- a schema that must survive a
+    // rename -- but an explicit order must still equal the position.
     for (std::size_t i = 0U; i < field_count; ++i) {
-        if (fields[i].field_id == 0U ||
+        if (fields[i].order != 0U &&
             fields[i].order != static_cast<std::uint16_t>(i)) {
             return MessageError::InvalidArgument;
         }
@@ -120,7 +123,12 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
     t.field_names = keep_names ? &name_ptr_pool_[name_ptr_used_] : nullptr;
 
     for (std::size_t i = 0U; i < field_count; ++i) {
-        field_pool_[field_pool_used_ + i] = field_spec(fields[i]);
+        FieldSpec spec = field_spec(fields[i]);
+        spec.order = static_cast<std::uint16_t>(i);
+        if (spec.field_id == 0U) {
+            spec.field_id = static_cast<std::uint16_t>(i + 1U);
+        }
+        field_pool_[field_pool_used_ + i] = spec;
         if (keep_names) {
             name_ptr_pool_[name_ptr_used_ + i] =
                 intern(fields[i].name.data, fields[i].name.size);

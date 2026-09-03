@@ -21,42 +21,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 
 namespace {
 
 const std::uint16_t kTopicId = 0x0101U;
 
-btp::ByteView text(const char* s) {
-    return btp::ByteView{reinterpret_cast<const std::uint8_t*>(s),
-                         std::strlen(s)};
-}
-
-// THE schema, defined once: a btp::FieldRecord per field. The catalogue holds
-// it; announce_catalog() serialises it into MANIFEST_DATA and publish() encodes
-// samples against it.
-btp::FieldRecord field(std::uint16_t id, std::uint16_t order, btp::WireType type,
-                       std::uint8_t flags, double scale, const char* name,
-                       const char* unit) {
-    btp::FieldRecord f = {};
-    f.field_id = id;
-    f.order = order;
-    f.type = static_cast<std::uint8_t>(type);
-    f.flags = flags;
-    f.element_count = 1U;
-    f.scale = scale;
-    f.name = text(name);
-    f.unit = text(unit);
-    return f;
-}
-
+// THE schema, written once -- the consumer learns it from the wire. Floats are
+// sent raw; integers carry a scale so a ranged value packs into a small type
+// (engineering value = raw * scale + offset).
 const btp::FieldRecord kSchema[] = {
-    field(1, 0, btp::WireType::Float32, 0,                   1.0,   "left_rpm",  "rpm"),
-    field(2, 1, btp::WireType::Float32, 0,                   1.0,   "right_rpm", "rpm"),
-    field(3, 2, btp::WireType::Uint16,  0,                   0.001, "battery_v", "V"),
-    field(4, 3, btp::WireType::Int16,   btp::kFieldNullable, 0.1,   "temp_c",    "Cel"),
+    btp::f32("left_rpm", "rpm"),
+    btp::f32("right_rpm", "rpm"),
+    btp::u16("battery_v", 0.001, "V"),   // 3.72 V stored as the raw uint16 3720
+    btp::nullable(btp::i16("temp_c", 0.1, "Cel")),
 };
-const std::size_t kFieldCount = sizeof(kSchema) / sizeof(kSchema[0]);
 
 // "Transmit" one frame: length-prefixed into frame.bin so the receiver can
 // split the frames. A packet transport delivers whole datagrams and needs no
@@ -99,10 +77,8 @@ int main() {
     // The catalogue: one topic, its schema, its config revision.
     btp::StaticCatalog<> catalog;
     catalog.set_config_revision(1U);
-    if (catalog.add_topic(kTopicId, /*schema_version=*/3U,
-                          btp::TelemetryEncoding::PackedLe, /*subscribable=*/true,
-                          /*max_rate_millihz=*/0U, "drive_status", kSchema,
-                          kFieldCount) != btp::MessageError::Ok) {
+    if (catalog.add_topic(kTopicId, /*schema_version=*/3U, "drive_status",
+                          kSchema) != btp::MessageError::Ok) {
         std::printf("catalog rejected the schema\n");
         return 1;
     }
