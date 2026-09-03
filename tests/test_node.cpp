@@ -1102,6 +1102,39 @@ void test_routine_with_datagram_decodes_and_still_runs_housekeeping() {
                            0U, &msg) == NodeRx::Complete);
 }
 
+// routine(datagram, size, now_ms) -- no *out -- is the four-argument
+// overload above with a throwaway ReceivedMessage: same NodeRx back, same
+// housekeeping, for a caller with nothing to read from *out (everything it
+// cares about already ran through a callback).
+void test_routine_without_out_param_behaves_the_same() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    CHECK(consumer.begin());
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    // No datagram, no *out -- still publishes the due topic.
+    prod_tx.clear();
+    CHECK(producer.routine(nullptr, 0U, 0U) == NodeRx::NoDatagram);
+    CHECK(prod_tx.count() == 1U);
+
+    // A real datagram, no *out -- still decodes it (Complete, same reason
+    // as the four-argument test above) and still ran the housekeeping.
+    CHECK(consumer.routine(prod_tx.frames[0].data(), prod_tx.frames[0].size(),
+                           0U) == NodeRx::Complete);
+}
+
 // StaticNode<>'s begin(source_name, hello, ...) overload folds
 // catalog().set_config_revision() + serve_catalog() + enable_session() +
 // begin(true) into one call -- what example/sender.cpp's old
@@ -1472,6 +1505,7 @@ int main() {
     test_static_node_learn_catalog_with_sample_registers_on_sample();
     test_routine_publishes_and_ticks();
     test_routine_with_datagram_decodes_and_still_runs_housekeeping();
+    test_routine_without_out_param_behaves_the_same();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

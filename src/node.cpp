@@ -852,6 +852,12 @@ NodeRx Node::routine(const std::uint8_t* datagram, std::size_t size,
     return rx;
 }
 
+NodeRx Node::routine(const std::uint8_t* datagram, std::size_t size,
+                     std::uint64_t now_ms) noexcept {
+    ReceivedMessage discard{};
+    return routine(datagram, size, now_ms, &discard);
+}
+
 void Node::routine(std::uint64_t now_ms) noexcept {
     publish_subscribed_topics(now_ms);
     tick(now_ms);

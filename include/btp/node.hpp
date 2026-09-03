@@ -647,6 +647,18 @@ public:
     NodeRx routine(const std::uint8_t* datagram, std::size_t size,
                    std::uint64_t now_ms, ReceivedMessage* out) noexcept;
 
+    // Same, for the common case a Complete message's *out details go
+    // nowhere -- every OTHER NodeRx outcome already ran its own callback
+    // (on_sample / on_publish / on_terminal / ...) before returning, so a
+    // caller with one attached for everything it cares about has nothing
+    // left to read from *out. Routines through the four-argument overload
+    // above with a throwaway ReceivedMessage -- kept, not replaced, for a
+    // caller that DOES want Complete's payload (an unmanaged message type,
+    // e.g. one this library adds support for later but an older caller
+    // does not yet handle through a callback).
+    NodeRx routine(const std::uint8_t* datagram, std::size_t size,
+                   std::uint64_t now_ms) noexcept;
+
     // The housekeeping alone, no datagram involved -- for a caller whose
     // receive() runs elsewhere (its own task/thread/ISR) and only wants
     // publish_subscribed_topics() + tick() from this call.
