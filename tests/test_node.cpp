@@ -1219,6 +1219,82 @@ void test_command_times_out_without_a_reply() {
 }
 
 // ===========================================================================
+// btp::Node -- terminal
+// ===========================================================================
+
+struct TerminalCapture {
+    int calls;
+    std::uint16_t last_object_id;
+    std::uint8_t first_byte;
+};
+
+void capture_terminal(void* ctx, const btp::Header& header, btp::ByteView payload) {
+    TerminalCapture* c = static_cast<TerminalCapture*>(ctx);
+    ++c->calls;
+    c->last_object_id = header.object_id;
+    c->first_byte = payload.size != 0U ? payload.data[0] : 0U;
+}
+
+// Without on_terminal(), a TERMINAL frame falls through to Complete, same as
+// any type the node does not manage; with one attached, receive() calls it
+// and reports NodeRx::TerminalDelivered instead.
+void test_on_terminal_delivers_and_falls_back_to_complete() {
+    Sink src_tx;
+    TestNode source(base_config(kSenderId, kSenderBoot, &src_tx));
+    CHECK(source.begin());
+    const std::uint8_t bytes[] = {'h', 'i'};
+    CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
+                      sizeof(bytes), 0ULL));
+
+    Sink dst_tx;
+    TestNode plain(base_config(kPeerId, kPeerBoot, &dst_tx));
+    CHECK(plain.begin());
+    ReceivedMessage msg{};
+    CHECK(deliver(plain, src_tx, 0U, &msg) == NodeRx::Complete);
+    CHECK(msg.header.object_id == btp::object_id::kTerminalIn);
+
+    TerminalCapture capture = {};
+    plain.on_terminal(&capture_terminal, &capture);
+    src_tx.clear();
+    CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
+                      sizeof(bytes), 0ULL));
+    CHECK(deliver(plain, src_tx, 0U, &msg) == NodeRx::TerminalDelivered);
+    CHECK(capture.calls == 1);
+    CHECK(capture.last_object_id == btp::object_id::kTerminalIn);
+    CHECK(capture.first_byte == 'h');
+}
+
+// StaticNode<> bundles the command responder AND initiator too -- the
+// responder side still needs enable_commands(handler, ctx), the DedupCache
+// itself is already there; the initiator side needs no call at all, same
+// treatment as subscriptions (test_static_node_bundles_subscription_client
+// above).
+void test_static_node_bundles_commands() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    ActionCalls calls = {};
+    producer.enable_commands(&echo_action, &calls);  // no DedupCache to pass
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    // No consumer.enable_command_client(...) here -- StaticNode<> already
+    // has one of its own.
+    CHECK(consumer.begin());
+
+    const std::uint8_t params[3] = {1, 2, 3};
+    const std::uint32_t local_id =
+        consumer.command(kSenderId, kSenderBoot, 42U, 1U, params, sizeof(params));
+    CHECK(local_id != 0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CommandHandled);
+    CHECK(consumer.command_outcome().event == CommandEvent::Completed);
+}
+
+// ===========================================================================
 // btp::Node -- STATUS
 // ===========================================================================
 
@@ -1327,6 +1403,8 @@ int main() {
 
     test_command_round_trip_and_dedup_replay();
     test_command_times_out_without_a_reply();
+    test_on_terminal_delivers_and_falls_back_to_complete();
+    test_static_node_bundles_commands();
 
     test_status_disabled_by_default();
     test_status_sends_after_the_period_and_counts_frames_tx();

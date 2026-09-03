@@ -38,6 +38,8 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       on_command_ctx_(nullptr),
       command_client_(nullptr),
       last_command_outcome_(),
+      on_terminal_(nullptr),
+      on_terminal_ctx_(nullptr),
       frames_tx_(0U),
       status_period_ms_(0U),
       status_last_ms_(0U),
@@ -301,6 +303,12 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
             last_command_outcome_ = command_client_->on_result(result);
         }
         return NodeRx::CommandHandled;
+    }
+
+    // ----- terminal -----
+    if (on_terminal_ != nullptr && out->header.type == MessageType::Terminal) {
+        on_terminal_(on_terminal_ctx_, out->header, out->payload);
+        return NodeRx::TerminalDelivered;
     }
 
     return NodeRx::Complete;
@@ -980,6 +988,7 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::CommandHandled: return "command handled";
         case NodeRx::CatalogUpdated: return "catalog updated";
         case NodeRx::SampleDelivered: return "sample delivered";
+        case NodeRx::TerminalDelivered: return "terminal delivered";
         case NodeRx::RequestServed: return "request served";
         case NodeRx::Ignored: return "ignored";
         case NodeRx::DroppedFrame: return "dropped frame";

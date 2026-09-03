@@ -102,6 +102,13 @@ using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
 // field, in schema order still, but checked against the name at each step.
 using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 
+// Called by receive() for a TERMINAL frame -- see on_terminal() below.
+// `header.object_id` is kTerminalIn or kTerminalOut (object_id namespace);
+// `payload` is the opaque bytes as-is, no struct (docs/session-and-
+// terminal.md section 7 -- that is TERMINAL's whole point). Do not keep
+// `payload` past the callback -- same lifetime as ReceivedMessage::payload.
+using NodeTerminalFn = void (*)(void* ctx, const Header& header, ByteView payload);
+
 // One entry in the registry publish_subscribed_topics() walks: which topic,
 // and the NodeNamedFillFn that fills a sample of it. Registered with
 // on_publish(); plain data otherwise, no invariant of its own to protect --
@@ -191,6 +198,9 @@ enum class NodeRx : std::uint8_t {
                      // command_outcome().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
     SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
+    TerminalDelivered,  // a TERMINAL_IN / TERMINAL_OUT frame -- the node called
+                        // on_terminal(). Without one attached, this falls through
+                        // to Complete instead, same as any other unmanaged type.
     RequestServed,   // a MANIFEST_REQUEST -- the node built and sent MANIFEST_DATA.
     Ignored,         // a frame the node would manage but cannot yet: a session not
                      // Active, or a sample for a topic the catalog has not learned.
@@ -469,6 +479,19 @@ public:
         return last_command_outcome_;
     }
 
+    // ---- terminal (opt-in) --------------------------------------------------
+    // TERMINAL has no other Node support -- no enable_*() storage, no serve/
+    // learn split. `callback` runs for EITHER direction (kTerminalIn AND
+    // kTerminalOut both reach it -- check header.object_id if this node only
+    // expects one) and receive() reports NodeRx::TerminalDelivered instead of
+    // Complete. nullptr detaches -- back to Complete, same as before this
+    // existed. Sending stays plain send(MessageType::Terminal, kTerminalIn /
+    // kTerminalOut, ...); there is no terminal-specific send sugar either.
+    void on_terminal(NodeTerminalFn callback, void* ctx) noexcept {
+        on_terminal_ = callback;
+        on_terminal_ctx_ = ctx;
+    }
+
     // ---- STATUS (opt-in, docs/commands.md section 5) -----------------------
     // Periodically builds and sends a v1 STATUS from counters the node
     // already tracks: receiver().stats(), frames_tx() (below), and --
@@ -677,6 +700,9 @@ private:
     CommandClient* command_client_;  // nullptr until enable_command_client()
     CommandOutcome last_command_outcome_;
 
+    NodeTerminalFn on_terminal_;    // nullptr until on_terminal()
+    void* on_terminal_ctx_;
+
     std::uint64_t frames_tx_;
     std::uint32_t status_period_ms_;  // 0 == disabled
     std::uint64_t status_last_ms_;
@@ -725,6 +751,27 @@ struct NodeStorage {
     }
 };
 
+// Same "wire the byte pointers in my own constructor" reasoning as
+// NodeStorage above, its own small type so it finishes constructing --
+// storage[] pointing at bytes[], DedupCache-ready -- before the NEXT member
+// in StaticNode's declaration order (commands_cache_) starts building.
+// DedupCache::DedupCache reads storage[i].data / .capacity EAGERLY, once,
+// and latches valid() from that snapshot -- a plain command_storage_[i] a
+// StaticNode constructor BODY fills in later is too late; by then
+// commands_cache_ already copied a null.
+template <std::size_t MaxCommands, std::size_t CommandBytes>
+struct CommandStorage {
+    std::uint8_t bytes[MaxCommands][CommandBytes];
+    DedupStorage storage[MaxCommands];
+
+    CommandStorage() noexcept {
+        for (std::size_t i = 0; i < MaxCommands; ++i) {
+            storage[i].data = bytes[i];
+            storage[i].capacity = CommandBytes;
+        }
+    }
+};
+
 }  // namespace detail
 
 // Defaults: 4 concurrent reassemblies, 600 octets each (a fragmented
@@ -735,14 +782,23 @@ struct NodeStorage {
 // btp::StaticCatalog's own defaults. A Serial deployment bumps SlotBytes; a
 // large manifest bumps ScratchBytes; a schema with many topics or fields
 // bumps the Catalog* template arguments.
-// MaxSubscriptions last, after every other capacity, so an existing
-// StaticNode<...> spelled out to CatalogStringBytes (or shorter) still
-// compiles unchanged -- it only fixes the ONE new trailing default.
+// MaxSubscriptions, MaxCommands and CommandBytes last, after every other
+// capacity, so an existing StaticNode<...> spelled out to CatalogStringBytes
+// (or shorter) still compiles unchanged -- they only fix the new trailing
+// defaults. MaxCommands sizes BOTH the responder's DedupCache (slots AND its
+// requester table, one dimension standing in for two -- construct your own
+// btp::DedupCache and call enable_commands(cache, handler, ctx) [via the
+// Node:: overload, reachable below] to size them independently) and the
+// initiator's CommandClient; CommandBytes is the per-slot byte capacity the
+// responder's cache needs for the largest COMMAND_REQUEST + COMMAND_RESULT a
+// handler here will ever see (the initiator's ClientCommand is fixed-size
+// metadata, no byte storage of its own).
 template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
           std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512,
           std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
           std::size_t CatalogStringBytes = 1024,
-          std::size_t MaxSubscriptions = 8>
+          std::size_t MaxSubscriptions = 8, std::size_t MaxCommands = 4,
+          std::size_t CommandBytes = 128>
 class StaticNode
     : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
       public Node {
@@ -777,6 +833,27 @@ class StaticNode
     ClientSubscription subscription_client_slots_[MaxSubscriptions];
     SubscriptionClient client_subscriptions_;
 
+    // Backs enable_commands() -- the RESPONDER's dedup memory (docs/
+    // commands.md section 2). command_storage_ is detail::CommandStorage
+    // (above), not a plain array -- DedupCache's constructor reads its
+    // storage[i].data / .capacity EAGERLY and latches valid() from that one
+    // snapshot, so the byte pointers must already be wired before
+    // commands_cache_ is built, not after (see detail::CommandStorage's own
+    // comment). command_requesters_ tracks one row per distinct peer that
+    // has sent a command, sized the same as MaxCommands as a reasonable
+    // embedded default -- construct your own btp::DedupCache to size them
+    // apart.
+    DedupSlot command_slots_[MaxCommands];
+    detail::CommandStorage<MaxCommands, CommandBytes> command_storage_;
+    DedupRequester command_requesters_[MaxCommands];
+    DedupCache commands_cache_;
+
+    // Backs enable_command_client() -- the INITIATOR's memory of outstanding
+    // COMMAND_REQUESTs, the other side of the link from commands_cache_
+    // above, same MaxCommands capacity.
+    ClientCommand client_command_slots_[MaxCommands];
+    CommandClient client_commands_;
+
 public:
     explicit StaticNode(
         const NodeConfig& cfg,
@@ -792,13 +869,24 @@ public:
           subscription_slots_(),
           subscriptions_(subscription_slots_, MaxSubscriptions),
           subscription_client_slots_(),
-          client_subscriptions_(subscription_client_slots_, MaxSubscriptions) {
+          client_subscriptions_(subscription_client_slots_, MaxSubscriptions),
+          command_slots_(),
+          command_storage_(),  // wires its own storage[] -- see its comment
+          command_requesters_(),
+          commands_cache_(command_slots_, command_storage_.storage, MaxCommands,
+                         command_requesters_, MaxCommands),
+          client_command_slots_(),
+          client_commands_(client_command_slots_, MaxCommands) {
         // Ready for on_publish() / a peer's SUBSCRIBE / this node's own
-        // subscribe() with no separate setup call -- StaticNode<> owns all
-        // of its storage, same as catalog_.
+        // subscribe() or command() with no separate setup call --
+        // StaticNode<> owns all of its storage, same as catalog_.
+        // enable_commands() (the RESPONDER side) is the one exception: it
+        // also needs a handler, so it stays an explicit call -- see
+        // enable_commands(handler, ctx) sugar below.
         enable_publish_registry(publish_registrations_, CatalogTopics);
         enable_subscriptions(&subscriptions_);
         enable_subscription_client(&client_subscriptions_);
+        enable_command_client(&client_commands_);
     }
 
     // This node's own catalogue -- no separate btp::StaticCatalog to declare
@@ -813,6 +901,16 @@ public:
     using Node::serve_catalog;
     using Node::learn_catalog;
     using Node::begin;
+    using Node::enable_commands;
+
+    // Sugar for enable_commands(&cache, handler, ctx) -- StaticNode<>
+    // already owns the DedupCache and its storage (commands_cache_ above),
+    // so this is just the handler. `ctx` defaults to nullptr for a handler
+    // that closes over nothing (a free function acting on globals / the
+    // node itself, same shape sender.cpp's handle_command() uses).
+    void enable_commands(NodeActionFn handler, void* ctx = nullptr) noexcept {
+        Node::enable_commands(&commands_cache_, handler, ctx);
+    }
 
     // Convenience for a StaticNode<> producer that serves its own catalogue
     // and answers a session with `local_hello` -- what a caller otherwise
