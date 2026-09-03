@@ -1,8 +1,9 @@
 // example/by_hand_receiver.cpp
 //
 // The consumer half of a BTP exchange, step by step at the wire level: turn the
-// wire octets back into the telemetry reading. receiver.cpp does the same with
-// btp::Node. Run ./build/by_hand_sender first (it writes frame.bin), then this.
+// wire octets back into the telemetry reading. Run ./build/by_hand_sender first
+// (it writes frame.bin), then this. receiver.cpp uses btp::Node and learns the
+// schema from a MANIFEST_DATA instead of compiling it in like this file does.
 //
 // ===========================================================================
 // What we expect to receive, as JSON -- the same reading sender.cpp built

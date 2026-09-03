@@ -1,10 +1,10 @@
 // example/by_hand_sender.cpp
 //
 // The producer half of a BTP exchange, step by step at the wire level: turn one
-// telemetry reading into the exact octets that go out. sender.cpp does the same
-// thing in a third of the code with btp::Node; this file is the walkthrough of
-// what the node fills in for you (identity, sequence, header, fragment count,
-// frame encoding).
+// telemetry reading into the exact octets that go out. This is the walkthrough
+// of what btp::Node fills in for you -- identity, sequence, header, fragment
+// count, frame encoding. sender.cpp uses the node, and also shows the real
+// schema-discovery flow (a MANIFEST_DATA the consumer learns from).
 //
 //   cd example && cmake -B build && cmake --build build
 //   ./build/by_hand_sender      writes frame.bin
