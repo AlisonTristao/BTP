@@ -165,6 +165,32 @@ void test_begin() {
     CHECK(!nosend.send(MessageType::Telemetry, 0x0101U, body, sizeof(body), 0U));
 }
 
+// Built with a placeholder config (no identity, no send -- as if TxScheduler
+// were not configured yet), reconfigure()'d with the real one only once it
+// is known, THEN begin() -- the two-phase boot pattern reconfigure() exists
+// for. begin() before reconfigure() would fail here (source_id 0); after it,
+// begin()/source_id()/send() all reflect the NEW config, not the placeholder.
+void test_reconfigure_before_begin() {
+    Sink placeholder_sink;
+    NodeConfig placeholder{};
+    placeholder.transport = TransportProfile::EspNow;
+    placeholder.send = &Sink::send;
+    placeholder.send_ctx = &placeholder_sink;
+    TestNode node(placeholder);
+    CHECK(!node.begin());  // source_id/boot_id still 0
+
+    Sink real_sink;
+    node.reconfigure(base_config(kSenderId, kSenderBoot, &real_sink));
+    CHECK(node.begin());
+    CHECK(node.source_id() == kSenderId);
+    CHECK(node.boot_id() == kSenderBoot);
+
+    const std::uint8_t body[4] = {9, 8, 7, 6};
+    CHECK(node.send(MessageType::Telemetry, 0x0101U, body, sizeof(body), 0U));
+    CHECK(placeholder_sink.count() == 0U);  // never sent through the old cfg
+    CHECK(real_sink.count() == 1U);
+}
+
 void test_cleartext_roundtrip() {
     Sink tx;
     TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
@@ -989,6 +1015,7 @@ void test_subscribe_renews_before_the_lease_runs_out() {
 
 int main() {
     test_begin();
+    test_reconfigure_before_begin();
     test_cleartext_roundtrip();
     test_fragmented_roundtrip();
     test_sealed_roundtrip();
