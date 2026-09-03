@@ -18,6 +18,15 @@
 //   node.subscribe(peer, topic, rate, lease_ms) -> SUBSCRIBE; routine()
 //                                                renews it on its own before
 //                                                the lease runs out
+//   node.command(peer, action_id, ...)          -> COMMAND_REQUEST; the
+//                                                correlated result comes
+//                                                back as NodeRx::CommandHandled
+//                                                (command_outcome())
+//   node.on_terminal(&handle_terminal_out)      -> calls it directly for
+//                                                TERMINAL_OUT (NodeRx::
+//                                                TerminalDelivered); a
+//                                                node.send(kTerminalIn, ...)
+//                                                above is what prompted it
 //
 // sender.cpp is the other end. The link here is faked -- send_frame() just
 // drops the bytes and link_poll() always delivers nothing, so receive()
@@ -68,6 +77,22 @@ namespace {
         }
     }
 
+    // After a NodeRx::CommandHandled, node.command_outcome() is the
+    // correlated COMMAND_RESULT for a command() this node holds -- or a
+    // TimedOut if none arrived within btp::kCommandTimeoutMs.
+    void handle_command_outcome(const btp::CommandOutcome& outcome) {
+        if (outcome.event == btp::CommandEvent::Completed) {
+            // outcome.status / error_code / message / result -- whatever the
+            // action decided; Success is not implied, check status.
+        }  // else TimedOut -- nothing arrived in time
+    }
+
+    // node.on_terminal() below is what gets this called for a TERMINAL_OUT
+    // frame at all -- see sender.cpp's handle_terminal_in() for the other
+    // direction. A real shell would render `payload` to the console instead.
+    void handle_terminal_out(void* /*ctx*/, const btp::Header& /*header*/,
+                             btp::ByteView /*payload*/) {}
+
     // The node hands every finished frame here. Fake: a real node transmits it.
     // Needed now that this node also connect()s / subscribe()s out.
     bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
@@ -104,17 +129,40 @@ int main() {
         /*rate_millihz=*/   10000U,
         /*lease_ms=*/       60000U);
 
+    // command() works whether or not connected() yet -- same "a real caller
+    // would more likely wait for InitiatorHandled first" note as subscribe()
+    // above; here only because the fake link never delivers that event anyway.
+    const std::uint32_t command_id = node.command(
+        /*peer_source_id=*/ 0x00CAFE01U,   // must match sender.cpp's cfg.source_id
+        /*peer_boot_id=*/   0x0000B001U,   // must match sender.cpp's cfg.boot_id
+        /*action_id=*/      0x0001U,       // "stop" -- see sender.cpp's handle_command()
+        /*action_version=*/ 1U,
+        /*parameters=*/     nullptr, 0U);
+
     // in your code, you need to call the clock, and get the time
     std::uint64_t now_ms = 0U;
+
+    node.on_terminal(&handle_terminal_out, nullptr);
+
+    // Simulate a user typing something into this node's shell -- see
+    // sender.cpp's handle_terminal_in() for what answers it (TERMINAL_OUT,
+    // which on_terminal() above hands straight to handle_terminal_out()).
+    const std::uint8_t keystrokes[] = "status\n";
+    node.send(btp::MessageType::Terminal, btp::object_id::kTerminalIn,
+             keystrokes, sizeof(keystrokes) - 1, now_ms * 1000ULL);
 
     std::uint8_t datagram[256];
     for (;;) {
         const std::size_t n = link_poll(datagram, sizeof datagram);
 
         // datagram (if any) -> receive(); either way, connection watchdog +
-        // subscription renewal
+        // subscription renewal. COMMAND_RESULT / TERMINAL_OUT are both
+        // handled inside routine() itself now -- handle_command_outcome() /
+        // handle_terminal_out() above already ran for whichever arrived.
         btp::ReceivedMessage msg = {};
-        node.routine(datagram, n, now_ms, &msg);
+        if (node.routine(datagram, n, now_ms, &msg) == btp::NodeRx::CommandHandled) {
+            handle_command_outcome(node.command_outcome());
+        }
 
         // remember to update the clock in your code, and get the time
         now_ms += 1U;

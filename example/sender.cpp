@@ -16,6 +16,13 @@
 //   node.topic(..., fill) + routine()          -> TELEMETRY, only when a
 //                                                subscriber is actually
 //                                                waiting for it
+//   node.enable_commands(&handle_command)      -> answers COMMAND_REQUEST;
+//                                                StaticNode<> already owns
+//                                                the dedup cache
+//   node.on_terminal(&handle_terminal_in)      -> calls it directly for
+//                                                TERMINAL_IN (NodeRx::
+//                                                TerminalDelivered), which
+//                                                answers with TERMINAL_OUT
 //
 // receiver.cpp is the other end: it connect()s in, subscribes to the topic,
 // and learns the schema from the wire, never from a shared header. The link
@@ -64,6 +71,46 @@ namespace {
         w.put_null("temp_c");           // sensor offline
     }
 
+    // node.enable_commands() calls this for a Fresh COMMAND_REQUEST (docs/
+    // commands.md section 2) -- SYNCHRONOUSLY, no "pending, complete later"
+    // path, so a slow action belongs on a task of its own that answers once
+    // it's done. `outcome` arrives pre-set to Success / no message / no
+    // result -- good news needs no field touched at all.
+    void handle_command(void* /*ctx*/, std::uint16_t action_id,
+                        std::uint16_t /*action_version*/,
+                        btp::ByteView /*parameters*/,
+                        btp::NodeActionOutcome* outcome) {
+        switch (action_id) {
+            case 0x0001U:  // e.g. "stop" -- no parameters
+                // ... actually stop the robot ...
+                break;     // outcome is already Success
+            default:
+                outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Rejected);
+                outcome->error_code = static_cast<std::uint16_t>(btp::ResultError::NotFound);
+                break;
+        }
+    }
+
+    // Bundled as handle_terminal_in()'s ctx below -- NodeTerminalFn's
+    // signature has no room to smuggle in "who do I send the reply through"
+    // or "what time is it" otherwise.
+    struct TerminalCtx {
+        btp::Node* node;
+        std::uint64_t* now_ms;
+    };
+
+    // TERMINAL has no other btp::Node support -- its payload is opaque
+    // bytes, no struct, on purpose (docs/session-and-terminal.md section
+    // 7). node.on_terminal() below is what gets this called for a
+    // TERMINAL_IN frame at all; here it just echoes the bytes back as
+    // TERMINAL_OUT -- a real shell would feed `payload` to a line editor.
+    void handle_terminal_in(void* ctx, const btp::Header& /*header*/,
+                            btp::ByteView payload) {
+        TerminalCtx* t = static_cast<TerminalCtx*>(ctx);
+        t->node->send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
+                      payload.data, payload.size, *t->now_ms * 1000ULL);
+    }
+
     // The node hands every finished frame here. Fake: a real node transmits it.
     bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
         return true;
@@ -106,6 +153,8 @@ int main() {
         .i16("temp_c",    0.1,   "Cel", /*is_nullable=*/true)
         .end();
 
+    node.enable_commands(&handle_command);  // StaticNode<> already owns the dedup cache
+
     if (!node.begin("example-robot", make_hello(btp::Role::Producer))) {
         return 1;
     }
@@ -113,12 +162,17 @@ int main() {
     // in your code, you need to call the clock, and get the time
     std::uint64_t now_ms = 0U;
 
+    TerminalCtx terminal_ctx{&node, &now_ms};
+    node.on_terminal(&handle_terminal_in, &terminal_ctx);
+
     std::uint8_t datagram[256];
     for (;;) {
         const std::size_t n = link_poll(datagram, sizeof datagram);
 
         // datagram (if any) -> receive(); either way, publish due topics +
-        // session watchdog
+        // session watchdog. COMMAND_REQUEST / TERMINAL_IN are both handled
+        // inside routine() itself now -- handle_command() / handle_terminal_in()
+        // above already ran, nothing left to check here.
         btp::ReceivedMessage msg = {};
         node.routine(datagram, n, now_ms, &msg);
 
