@@ -517,6 +517,19 @@ public:
     bool publish_named(std::uint16_t topic_id, NodeNamedFillFn fill, void* ctx,
                        std::uint64_t timestamp_us) noexcept;
 
+    // publish() / publish_named(), sealed with `seal` for THIS sample instead
+    // of cfg.seal -- the publish-side mirror of send_with() (a producer whose
+    // TELEMETRY key differs from the one cfg.seal carries for automatic
+    // replies, the dual-key hub case NodeReplySealFn covers on the reply
+    // side). A null `seal` forces cleartext regardless of cfg.seal, same rule
+    // send_with() already follows.
+    bool publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
+                      std::uint64_t timestamp_us, EndpointSealFn seal,
+                      void* seal_ctx) noexcept;
+    bool publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
+                            void* ctx, std::uint64_t timestamp_us,
+                            EndpointSealFn seal, void* seal_ctx) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }

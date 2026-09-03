@@ -2879,6 +2879,15 @@ schema — `fill` writes the values in schema order — and sends the `TELEMETRY
 frame; the `serve_catalog` / `publish` scratch is the node's fourth buffer
 (`StaticNode`'s `ScratchBytes`, default 512).
 
+`publish()` / `publish_named()` always seal with `cfg.seal` — no override, the
+one gap `send()` (which has `send_with()`) did not share until 2.20.0:
+`publish_with(topic_id, fill, ctx, ts, seal, seal_ctx)` /
+`publish_named_with(...)` are the same pipeline with a seal for THIS sample,
+for a producer whose TELEMETRY key differs from whatever `cfg.seal` is set to
+(a hub sealing its own automatic replies with one key and a topic with
+another). A null override forces cleartext regardless of `cfg.seal`, the same
+rule `send_with()` already follows.
+
 ### 16.6 Subscriptions (`btp::SubscriptionTable` / `btp::SubscriptionClient`)
 
 `SUBSCRIBE` / `SUBSCRIBE_RESULT` / `UNSUBSCRIBE` ([Commands and discovery

@@ -740,6 +740,13 @@ bool Node::announce_catalog() noexcept {
 
 bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                    std::uint64_t timestamp_us) noexcept {
+    return publish_with(topic_id, fill, ctx, timestamp_us, cfg_.seal,
+                        cfg_.seal_ctx);
+}
+
+bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
+                        std::uint64_t timestamp_us, EndpointSealFn seal,
+                        void* seal_ctx) noexcept {
     if (serve_catalog_ == nullptr || fill == nullptr ||
         scratch_buffer_ == nullptr) {
         return false;
@@ -754,12 +761,19 @@ bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
     std::size_t written = 0U;
     if (writer.finish(&written) != MessageError::Ok) return false;
 
-    return send(MessageType::Telemetry, topic_id, scratch_buffer_, written,
-                timestamp_us);
+    return send_with(MessageType::Telemetry, topic_id, scratch_buffer_, written,
+                     timestamp_us, seal, seal_ctx);
 }
 
 bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
                          void* ctx, std::uint64_t timestamp_us) noexcept {
+    return publish_named_with(topic_id, fill, ctx, timestamp_us, cfg_.seal,
+                              cfg_.seal_ctx);
+}
+
+bool Node::publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
+                              void* ctx, std::uint64_t timestamp_us,
+                              EndpointSealFn seal, void* seal_ctx) noexcept {
     if (serve_catalog_ == nullptr || fill == nullptr ||
         scratch_buffer_ == nullptr) {
         return false;
@@ -773,8 +787,8 @@ bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
     std::size_t written = 0U;
     if (writer.finish(&written) != MessageError::Ok) return false;
 
-    return send(MessageType::Telemetry, topic_id, scratch_buffer_, written,
-                timestamp_us);
+    return send_with(MessageType::Telemetry, topic_id, scratch_buffer_, written,
+                     timestamp_us, seal, seal_ctx);
 }
 
 // ---------------------------------------------------------------------------
