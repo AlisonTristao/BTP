@@ -563,4 +563,175 @@ SessionOutcome Session::on_frame(const DecodedFrame& frame, std::uint64_t now_ms
     return SessionOutcome{SessionEvent::FrameAccepted, 0U};
 }
 
+// ---------------------------------------------------------------------------
+
+const char* initiator_state_string(InitiatorState state) noexcept {
+    switch (state) {
+        case InitiatorState::Idle: return "Idle";
+        case InitiatorState::AwaitingResult: return "AwaitingResult";
+        case InitiatorState::Active: return "Active";
+    }
+    return "Unknown";
+}
+
+const char* initiator_event_string(InitiatorEvent event) noexcept {
+    switch (event) {
+        case InitiatorEvent::None: return "None";
+        case InitiatorEvent::Connected: return "Connected";
+        case InitiatorEvent::Rejected: return "Rejected";
+        case InitiatorEvent::FrameAccepted: return "FrameAccepted";
+        case InitiatorEvent::TimedOut: return "TimedOut";
+        case InitiatorEvent::Disconnected: return "Disconnected";
+    }
+    return "Unknown";
+}
+
+SessionInitiator::SessionInitiator() noexcept
+    : state_(InitiatorState::Idle),
+      effective_(),
+      hello_deadline_span_(0U),
+      deadline_ms_(0U),
+      own_source_id_(0U),
+      own_boot_id_(0U),
+      own_sequence_(0U),
+      peer_source_id_(0U),
+      peer_boot_id_(0U) {}
+
+InitiatorOutcome SessionInitiator::check_expiry(std::uint64_t now_ms) noexcept {
+    if (state_ == InitiatorState::AwaitingResult) {
+        if (hello_deadline_span_ != 0U && now_ms >= deadline_ms_) {
+            state_ = InitiatorState::Idle;
+            return InitiatorOutcome{InitiatorEvent::TimedOut};
+        }
+    } else if (state_ == InitiatorState::Active) {
+        // session_timeout_ms comes straight from the peer's HELLO_RESULT and
+        // is spec-required non-zero; the guard is defensive.
+        if (effective_.session_timeout_ms != 0U && now_ms >= deadline_ms_) {
+            state_ = InitiatorState::Idle;
+            return InitiatorOutcome{InitiatorEvent::TimedOut};
+        }
+    }
+    return InitiatorOutcome{InitiatorEvent::None};
+}
+
+bool SessionInitiator::connect(const Hello& local, std::uint32_t own_source_id,
+                               std::uint32_t own_boot_id,
+                               std::uint32_t own_sequence, std::uint64_t now_ms,
+                               std::uint64_t deadline_ms, std::uint8_t* out,
+                               std::size_t out_capacity,
+                               std::size_t* out_size) noexcept {
+    if (state_ != InitiatorState::Idle || out_size == nullptr) {
+        return false;
+    }
+    std::size_t written = 0U;
+    if (encode_hello(local, out, out_capacity, &written) != MessageError::Ok) {
+        return false;
+    }
+    own_source_id_ = own_source_id;
+    own_boot_id_ = own_boot_id;
+    own_sequence_ = own_sequence;
+    hello_deadline_span_ = deadline_ms;
+    deadline_ms_ = now_ms + deadline_ms;
+    peer_source_id_ = 0U;
+    peer_boot_id_ = 0U;
+    effective_ = EffectiveLimits{};
+    state_ = InitiatorState::AwaitingResult;
+    *out_size = written;
+    return true;
+}
+
+InitiatorOutcome SessionInitiator::on_frame(const DecodedFrame& frame,
+                                            std::uint64_t now_ms) noexcept {
+    const InitiatorOutcome expiry = check_expiry(now_ms);
+    if (expiry.event == InitiatorEvent::TimedOut) {
+        return expiry;
+    }
+
+    if (state_ == InitiatorState::Idle) {
+        return InitiatorOutcome{InitiatorEvent::None};
+    }
+
+    if (state_ == InitiatorState::AwaitingResult) {
+        const bool is_hello_result =
+            frame.header.type == MessageType::Control &&
+            frame.header.object_id == object_id::kHelloResult;
+        if (!is_hello_result) {
+            // docs section 1: "no application message before a successful
+            // HELLO_RESULT". Anything else is ignored and does NOT renew the
+            // deadline.
+            return InitiatorOutcome{InitiatorEvent::None};
+        }
+
+        HelloResult result{};
+        const bool decoded_ok =
+            decode_hello_result(frame.payload.data, frame.payload.size,
+                                &result) == MessageError::Ok;
+        const bool correlates =
+            decoded_ok &&
+            result.request.request_source_id == own_source_id_ &&
+            result.request.request_boot_id == own_boot_id_ &&
+            result.request.reply_to_sequence == own_sequence_;
+        if (!correlates) {
+            // Malformed, or an answer to a different (stale) HELLO -- ignore
+            // and keep waiting rather than tear down a fresh attempt.
+            return InitiatorOutcome{InitiatorEvent::None};
+        }
+
+        if (result.status != static_cast<std::uint8_t>(ResultStatus::Success)) {
+            state_ = InitiatorState::Idle;
+            return InitiatorOutcome{InitiatorEvent::Rejected};
+        }
+
+        effective_.selected_version = result.selected_version;
+        effective_.max_logical_payload = result.max_logical_payload;
+        effective_.max_inflight_reassemblies = result.max_inflight_reassemblies;
+        effective_.max_subscriptions = result.max_subscriptions;
+        effective_.max_dedup_entries = result.max_dedup_entries;
+        effective_.session_timeout_ms = result.session_timeout_ms;
+        peer_source_id_ = frame.header.source_id;
+        peer_boot_id_ = frame.header.boot_id;
+        state_ = InitiatorState::Active;
+        deadline_ms_ = now_ms + effective_.session_timeout_ms;
+        return InitiatorOutcome{InitiatorEvent::Connected};
+    }
+
+    // state_ == Active: every valid frame renews the watchdog, whatever its
+    // object turns out to be (docs section 5: "a valid BTP frame").
+    deadline_ms_ = now_ms + effective_.session_timeout_ms;
+    return InitiatorOutcome{InitiatorEvent::FrameAccepted};
+}
+
+InitiatorOutcome SessionInitiator::poll(std::uint64_t now_ms) noexcept {
+    return check_expiry(now_ms);
+}
+
+bool SessionInitiator::disconnect(std::uint64_t now_ms, std::uint8_t reason,
+                                  std::uint32_t drain_timeout_ms,
+                                  std::uint8_t* out, std::size_t out_capacity,
+                                  std::size_t* out_size) noexcept {
+    (void)now_ms;
+    if (state_ == InitiatorState::Idle || out_size == nullptr) {
+        return false;
+    }
+    SessionClose close{};
+    close.reason = reason;
+    close.drain_timeout_ms = drain_timeout_ms;
+    std::size_t written = 0U;
+    if (encode_session_close(close, out, out_capacity, &written) !=
+        MessageError::Ok) {
+        return false;
+    }
+    state_ = InitiatorState::Idle;
+    *out_size = written;
+    return true;
+}
+
+InitiatorOutcome SessionInitiator::reset() noexcept {
+    if (state_ == InitiatorState::Idle) {
+        return InitiatorOutcome{InitiatorEvent::None};
+    }
+    state_ = InitiatorState::Idle;
+    return InitiatorOutcome{InitiatorEvent::Disconnected};
+}
+
 }  // namespace btp

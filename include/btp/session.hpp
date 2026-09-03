@@ -311,10 +311,12 @@ private:
 // calling arm() on link-up instead of after a console ENTER line.
 //
 // OUT of scope, on purpose:
-//   * the initiator side -- sending ENTER / HELLO, the retry budget, awaiting
-//     HELLO_RESULT (a desktop tool's job; a future btp::SessionInitiator);
-//   * the plain-ASCII "BTP/1 ENTER|READY|CONSOLE" console text on serial
+//   * sending ENTER, the retry budget around it, and the plain-ASCII
+//     "BTP/1 ENTER|READY|CONSOLE" console text on serial
 //     (docs/session-and-terminal.md sections 3-4) -- link framing, above this;
+//   * everything past HELLO_RESULT for the initiator side (MANIFEST_REQUEST,
+//     SUBSCRIBE, COMMAND_REQUEST) -- btp::SessionInitiator, below, is only the
+//     handshake; the caller sends those once connected() is true;
 //   * routing an accepted frame by object_id, the priority scheduler, and the
 //     STATUS counters -- all the integration's.
 
@@ -484,6 +486,174 @@ private:
     std::uint32_t peer_source_id_;
     std::uint32_t peer_boot_id_;
     bool valid_;
+};
+
+// ===========================================================================
+// The session initiator (docs/session-and-terminal.md chapters 1-2, 5, 9)
+// ===========================================================================
+//
+// The other end of a session: the peer that connects, mirroring btp::Session.
+// Sends HELLO, awaits HELLO_RESULT within a deadline, and -- once Active --
+// runs the same inactivity watchdog Session does (any valid frame from the
+// peer renews it; docs/session-and-terminal.md section 5: "a valid BTP
+// frame"). A second attempt at this piece: an earlier btp::SessionInitiator
+// (library 2.11.0) was tried and reverted because it mixed the serial-console
+// ENTER retry -- a one-link gambit, not spec -- into the handshake. This one
+// stays deliberately narrow:
+//
+//   * no ENTER / READY text -- link framing, above this (docs/session-and-
+//     terminal.md sections 3-4 stay a valid transport profile; this class
+//     just never speaks it);
+//   * no retry budget for a HELLO that gets no answer -- one attempt, one
+//     deadline; a caller that wants retries calls connect() again after
+//     TimedOut / Rejected;
+//   * no MANIFEST_REQUEST / SUBSCRIBE / COMMAND_REQUEST follow-up -- the
+//     caller sends those once connected() is true, same as any other message;
+//   * an incoming SESSION_CLOSE from the peer is not specially recognised --
+//     it comes back as an ordinary FrameAccepted for the caller to notice by
+//     object_id and call reset().
+//
+// Same guarantees as btp::Session: no clock of its own (every call that cares
+// about time takes a now_ms the caller supplies), not internally
+// synchronised, no I/O -- connect() / disconnect() hand back the PAYLOAD
+// bytes to send; the caller (btp::Node) frames and transmits them, exactly
+// like Session::on_frame hands back a HELLO_RESULT / SESSION_CLOSE_RESULT
+// payload rather than sending it itself.
+//
+//   btp::Hello local{...};
+//   btp::SessionInitiator initiator;
+//   std::uint8_t hello[btp::kSessionMaxHelloSize];
+//   std::size_t n = 0;
+//   if (initiator.connect(local, my_source_id, my_boot_id, my_sequence,
+//                         now_ms(), /*deadline_ms=*/2000, hello, sizeof(hello),
+//                         &n))
+//       send(hello, n);
+//
+//   // per decoded frame:
+//   btp::InitiatorOutcome o = initiator.on_frame(frame, now_ms());
+//   switch (o.event) {
+//       case btp::InitiatorEvent::Connected:     /* effective_limits() set */ break;
+//       case btp::InitiatorEvent::Rejected:
+//       case btp::InitiatorEvent::TimedOut:      /* retry: connect() again */ break;
+//       case btp::InitiatorEvent::FrameAccepted: route(frame);                break;
+//       default: break;
+//   }
+//
+//   // from the main loop / a timer:
+//   initiator.poll(now_ms());   // TimedOut when the deadline / watchdog expires
+//
+// on_frame() and poll() are not internally synchronised -- the same one-
+// context rule as btp::Session / btp::Reassembler.
+
+enum class InitiatorState : std::uint8_t {
+    Idle,            // no outstanding HELLO. on_frame() ignores every frame.
+    AwaitingResult,  // connect() sent a HELLO; the deadline runs.
+    Active,          // HELLO_RESULT SUCCESS arrived; the inactivity watchdog runs.
+};
+
+const char* initiator_state_string(InitiatorState state) noexcept;
+
+enum class InitiatorEvent : std::uint8_t {
+    None,           // nothing to act on: Idle, or a frame that is not the
+                    // awaited HELLO_RESULT (which does NOT renew the
+                    // deadline), or one whose RequestRef does not match the
+                    // outstanding HELLO (stale noise -- kept waiting).
+    Connected,      // HELLO_RESULT SUCCESS, correlated; state is now Active,
+                    // effective_limits() / peer_source_id() / peer_boot_id()
+                    // are set.
+    Rejected,       // HELLO_RESULT UNSUPPORTED, correlated; state is back to
+                    // Idle.
+    FrameAccepted,  // Active: a valid frame renewed the watchdog; the caller
+                    // routes it by object_id, same as btp::Session. No reply.
+    TimedOut,       // the connect() deadline, or the negotiated
+                    // session_timeout_ms, expired; state is back to Idle.
+                    // Reported once.
+    Disconnected,   // disconnect() or reset() tore down a live session
+                    // (AwaitingResult or Active); state is Idle. Reported once.
+};
+
+const char* initiator_event_string(InitiatorEvent event) noexcept;
+
+struct InitiatorOutcome {
+    InitiatorEvent event;
+};
+
+// HELLO is the larger of the two payloads this class ever encodes (40 fixed
+// octets plus up to 8 announced versions -- docs/session-and-terminal.md
+// section 1). SESSION_CLOSE fits easily (5 octets). Size connect() /
+// disconnect()'s out buffer for the maximum.
+static const std::size_t kSessionMaxHelloSize = 48U;
+
+class SessionInitiator {
+public:
+    SessionInitiator() noexcept;
+
+    InitiatorState state() const noexcept { return state_; }
+    bool connected() const noexcept { return state_ == InitiatorState::Active; }
+
+    // Meaningful once Connected has fired at least once.
+    const EffectiveLimits& effective_limits() const noexcept { return effective_; }
+    std::uint32_t peer_source_id() const noexcept { return peer_source_id_; }
+    std::uint32_t peer_boot_id() const noexcept { return peer_boot_id_; }
+
+    // Idle -> AwaitingResult. Encodes `local` as a HELLO into `out`; the
+    // caller sends it framed with `own_source_id` / `own_boot_id` /
+    // `own_sequence` -- whatever identity and sequence the endpoint puts on
+    // that frame, since that is the triple HELLO_RESULT's RequestRef must
+    // echo back for on_frame() to accept it. `deadline_ms` is how long to
+    // wait for HELLO_RESULT (docs/session-and-terminal.md section 5.1: 2000
+    // for a serial console; a transport with no such bound passes a large
+    // value; 0 disables the deadline entirely, mirroring btp::Session's
+    // hello_deadline_ms). A no-op (returns false, writes nothing) outside
+    // Idle -- call disconnect() or wait for TimedOut / Rejected first, or on
+    // a malformed `local` or an `out` too small (encode_hello()'s errors).
+    bool connect(const Hello& local, std::uint32_t own_source_id,
+                std::uint32_t own_boot_id, std::uint32_t own_sequence,
+                std::uint64_t now_ms, std::uint64_t deadline_ms,
+                std::uint8_t* out, std::size_t out_capacity,
+                std::size_t* out_size) noexcept;
+
+    // Feed every frame btp::decode() / btp::Receiver accepted, same contract
+    // as btp::Session::on_frame. Expiry is checked first. In AwaitingResult,
+    // only a HELLO_RESULT that decodes and whose RequestRef matches the
+    // outstanding connect() progresses the state; anything else is None and
+    // does NOT renew the deadline (docs section 1: "no application message
+    // before a successful HELLO_RESULT"). In Active, every valid frame
+    // renews the watchdog before it is classified as FrameAccepted.
+    InitiatorOutcome on_frame(const DecodedFrame& frame,
+                              std::uint64_t now_ms) noexcept;
+
+    // Call from the main loop or a timer. Returns TimedOut exactly once when
+    // the connect() deadline (AwaitingResult) or the negotiated
+    // session_timeout_ms (Active) has passed at now_ms; None otherwise.
+    InitiatorOutcome poll(std::uint64_t now_ms) noexcept;
+
+    // Encodes a SESSION_CLOSE into `out` and tears the session down locally
+    // right away -- it does not wait for SESSION_CLOSE_RESULT, keeping this
+    // symmetric with the deliberately narrow HELLO -> HELLO_RESULT scope
+    // above. A no-op (returns false) in Idle.
+    bool disconnect(std::uint64_t now_ms, std::uint8_t reason,
+                    std::uint32_t drain_timeout_ms, std::uint8_t* out,
+                    std::size_t out_capacity, std::size_t* out_size) noexcept;
+
+    // The underlying transport is gone, or a deliberate teardown with no
+    // SESSION_CLOSE sent. Returns Disconnected once if a session was live
+    // (AwaitingResult or Active), None otherwise. Doubles as test isolation.
+    InitiatorOutcome reset() noexcept;
+
+private:
+    InitiatorOutcome check_expiry(std::uint64_t now_ms) noexcept;
+
+    InitiatorState state_;
+    EffectiveLimits effective_;
+    std::uint64_t hello_deadline_span_;  // the connect() argument, kept for
+                                         // the "0 disables" check on re-arm
+    std::uint64_t deadline_ms_;
+    std::uint32_t own_source_id_;
+    std::uint32_t own_boot_id_;
+    std::uint32_t own_sequence_;
+    std::uint32_t peer_source_id_;
+    std::uint32_t peer_boot_id_;
 };
 
 }  // namespace btp

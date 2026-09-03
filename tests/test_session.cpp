@@ -782,6 +782,224 @@ void test_session_state_and_event_strings() {
                       "HelloAccepted") == 0);
 }
 
+// ===========================================================================
+// btp::SessionInitiator -- the other end of the handshake
+// ===========================================================================
+
+using btp::InitiatorEvent;
+using btp::InitiatorOutcome;
+using btp::InitiatorState;
+using btp::SessionInitiator;
+
+const std::uint32_t kOwnSource = 0x00CAFE01U;
+const std::uint32_t kOwnBoot = 0x0000B001U;
+const std::uint32_t kOwnSequence = 42U;
+
+FakeFrame hello_result_frame(const HelloResult& result, std::uint32_t source_id,
+                             std::uint32_t boot_id, std::uint32_t sequence) {
+    std::uint8_t buffer[btp::kSessionMaxReplySize];
+    std::size_t written = 0U;
+    CHECK(btp::encode_hello_result(result, buffer, sizeof(buffer), &written) ==
+          btp::MessageError::Ok);
+    return control_frame(btp::object_id::kHelloResult, buffer, written,
+                         source_id, boot_id, sequence);
+}
+
+// A SUCCESS HELLO_RESULT that correlates with (kOwnSource, kOwnBoot,
+// kOwnSequence) -- the identity connect() below always uses.
+HelloResult make_success_result(std::uint32_t max_payload = 4096U,
+                                std::uint32_t timeout_ms = 20000U) {
+    HelloResult r = {};
+    r.request.request_source_id = kOwnSource;
+    r.request.request_boot_id = kOwnBoot;
+    r.request.reply_to_sequence = kOwnSequence;
+    r.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    r.selected_version = 1U;
+    r.max_logical_payload = max_payload;
+    r.max_inflight_reassemblies = 4U;
+    r.max_subscriptions = 8U;
+    r.max_dedup_entries = 32U;
+    r.session_timeout_ms = timeout_ms;
+    for (std::size_t i = 0U; i < 16U; ++i) {
+        r.peer_uuid[i] = static_cast<std::uint8_t>(0xB0U + i);
+    }
+    r.config_revision = 3U;
+    return r;
+}
+
+bool do_connect(SessionInitiator* initiator, std::uint64_t now_ms,
+                std::uint64_t deadline_ms = 2000U) {
+    std::uint8_t hello[btp::kSessionMaxHelloSize];
+    std::size_t written = 0U;
+    return initiator->connect(make_local(), kOwnSource, kOwnBoot, kOwnSequence,
+                              now_ms, deadline_ms, hello, sizeof(hello),
+                              &written);
+}
+
+void test_initiator_starts_idle() {
+    SessionInitiator initiator;
+    CHECK(initiator.state() == InitiatorState::Idle);
+    CHECK(!initiator.connected());
+}
+
+void test_initiator_connect_encodes_a_real_hello() {
+    SessionInitiator initiator;
+    std::uint8_t hello[btp::kSessionMaxHelloSize];
+    std::size_t written = 0U;
+    CHECK(initiator.connect(make_local(4096U, 12000U), kOwnSource, kOwnBoot,
+                            kOwnSequence, 0U, 2000U, hello, sizeof(hello),
+                            &written));
+    CHECK(initiator.state() == InitiatorState::AwaitingResult);
+
+    Hello decoded = {};
+    CHECK(btp::decode_hello(hello, written, &decoded) == btp::MessageError::Ok);
+    CHECK(decoded.max_logical_payload == 4096U);
+    CHECK(decoded.session_timeout_ms == 12000U);
+}
+
+void test_initiator_connect_is_a_no_op_outside_idle() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+    CHECK(!do_connect(&initiator, 1U));  // still AwaitingResult
+    CHECK(initiator.state() == InitiatorState::AwaitingResult);
+}
+
+void test_initiator_hello_result_success_connects() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+
+    const FakeFrame result = hello_result_frame(
+        make_success_result(4096U, 20000U), 0x1111U, 0x2222U, 9U);
+    const InitiatorOutcome o = initiator.on_frame(result.frame, 5U);
+    CHECK(o.event == InitiatorEvent::Connected);
+    CHECK(initiator.connected());
+    CHECK(initiator.effective_limits().max_logical_payload == 4096U);
+    CHECK(initiator.effective_limits().session_timeout_ms == 20000U);
+    CHECK(initiator.peer_source_id() == 0x1111U);
+    CHECK(initiator.peer_boot_id() == 0x2222U);
+}
+
+void test_initiator_hello_result_unsupported_rejects() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+
+    HelloResult reject = {};
+    reject.request.request_source_id = kOwnSource;
+    reject.request.request_boot_id = kOwnBoot;
+    reject.request.reply_to_sequence = kOwnSequence;
+    reject.status = static_cast<std::uint8_t>(btp::ResultStatus::Unsupported);
+    reject.error_code =
+        static_cast<std::uint16_t>(btp::ResultError::UnsupportedVersion);
+    for (std::size_t i = 0U; i < 16U; ++i) reject.peer_uuid[i] = 0U;
+
+    const FakeFrame result = hello_result_frame(reject, 0x1111U, 0x2222U, 9U);
+    const InitiatorOutcome o = initiator.on_frame(result.frame, 5U);
+    CHECK(o.event == InitiatorEvent::Rejected);
+    CHECK(initiator.state() == InitiatorState::Idle);
+    CHECK(!initiator.connected());
+}
+
+void test_initiator_ignores_uncorrelated_hello_result() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+
+    // Right shape, wrong sequence -- an answer to some earlier attempt.
+    HelloResult stale = make_success_result();
+    stale.request.reply_to_sequence = kOwnSequence + 1U;
+    const FakeFrame result = hello_result_frame(stale, 0x1111U, 0x2222U, 9U);
+    const InitiatorOutcome o = initiator.on_frame(result.frame, 5U);
+    CHECK(o.event == InitiatorEvent::None);
+    CHECK(initiator.state() == InitiatorState::AwaitingResult);
+}
+
+void test_initiator_non_result_does_not_renew_deadline() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U, /*deadline_ms=*/2000U));
+
+    const std::uint8_t no_payload[1] = {0U};
+    const FakeFrame stray = control_frame(0x0099U, no_payload, 0U, 5U, 6U, 1U);
+    const InitiatorOutcome o = initiator.on_frame(stray.frame, 1000U);
+    CHECK(o.event == InitiatorEvent::None);
+    // Still times out at the ORIGINAL deadline -- the stray frame did not
+    // extend it (docs section 1: "no application message before HELLO_RESULT").
+    CHECK(initiator.poll(2000U).event == InitiatorEvent::TimedOut);
+    CHECK(initiator.state() == InitiatorState::Idle);
+}
+
+void test_initiator_awaiting_result_times_out_via_poll() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U, /*deadline_ms=*/2000U));
+    CHECK(initiator.poll(1999U).event == InitiatorEvent::None);
+    CHECK(initiator.poll(2000U).event == InitiatorEvent::TimedOut);
+    CHECK(initiator.state() == InitiatorState::Idle);
+}
+
+void test_initiator_zero_deadline_never_times_out_awaiting() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U, /*deadline_ms=*/0U));
+    CHECK(initiator.poll(1000000U).event == InitiatorEvent::None);
+    CHECK(initiator.state() == InitiatorState::AwaitingResult);
+}
+
+void test_initiator_active_frames_renew_the_watchdog() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+    const FakeFrame result = hello_result_frame(
+        make_success_result(4096U, 5000U), 0x1111U, 0x2222U, 9U);
+    CHECK(initiator.on_frame(result.frame, 0U).event ==
+          InitiatorEvent::Connected);
+
+    // A telemetry frame at t=4000 renews past the original 5000 deadline.
+    const std::uint8_t no_payload[1] = {0U};
+    const FakeFrame telemetry = control_frame(0x0101U, no_payload, 0U, 0x1111U,
+                                              0x2222U, 10U);
+    CHECK(initiator.on_frame(telemetry.frame, 4000U).event ==
+          InitiatorEvent::FrameAccepted);
+    CHECK(initiator.poll(8999U).event == InitiatorEvent::None);
+    CHECK(initiator.poll(9000U).event == InitiatorEvent::TimedOut);
+    CHECK(initiator.state() == InitiatorState::Idle);
+}
+
+void test_initiator_disconnect_returns_to_idle() {
+    SessionInitiator initiator;
+    CHECK(do_connect(&initiator, 0U));
+    CHECK(initiator.on_frame(hello_result_frame(make_success_result(), 0x1111U,
+                                                0x2222U, 9U)
+                                 .frame,
+                             0U)
+             .event == InitiatorEvent::Connected);
+
+    std::uint8_t buffer[btp::kSessionMaxHelloSize];
+    std::size_t written = 0U;
+    CHECK(initiator.disconnect(1U, static_cast<std::uint8_t>(1U), 500U, buffer,
+                               sizeof(buffer), &written));
+    CHECK(initiator.state() == InitiatorState::Idle);
+
+    btp::SessionClose close = {};
+    CHECK(btp::decode_session_close(buffer, written, &close) ==
+          btp::MessageError::Ok);
+    CHECK(close.drain_timeout_ms == 500U);
+
+    CHECK(!initiator.disconnect(2U, 1U, 500U, buffer, sizeof(buffer),
+                                &written));  // already Idle
+}
+
+void test_initiator_reset_reports_disconnected_once() {
+    SessionInitiator initiator;
+    CHECK(initiator.reset().event == InitiatorEvent::None);  // idle already
+    CHECK(do_connect(&initiator, 0U));
+    CHECK(initiator.reset().event == InitiatorEvent::Disconnected);
+    CHECK(initiator.state() == InitiatorState::Idle);
+    CHECK(initiator.reset().event == InitiatorEvent::None);  // reported once
+}
+
+void test_initiator_state_and_event_strings() {
+    CHECK(std::strcmp(btp::initiator_state_string(InitiatorState::Active),
+                      "Active") == 0);
+    CHECK(std::strcmp(btp::initiator_event_string(InitiatorEvent::Connected),
+                      "Connected") == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -817,6 +1035,20 @@ int main() {
     test_session_round_trips_a_real_encoded_hello();
     test_session_set_local_updates_the_advertisement();
     test_session_state_and_event_strings();
+
+    test_initiator_starts_idle();
+    test_initiator_connect_encodes_a_real_hello();
+    test_initiator_connect_is_a_no_op_outside_idle();
+    test_initiator_hello_result_success_connects();
+    test_initiator_hello_result_unsupported_rejects();
+    test_initiator_ignores_uncorrelated_hello_result();
+    test_initiator_non_result_does_not_renew_deadline();
+    test_initiator_awaiting_result_times_out_via_poll();
+    test_initiator_zero_deadline_never_times_out_awaiting();
+    test_initiator_active_frames_renew_the_watchdog();
+    test_initiator_disconnect_returns_to_idle();
+    test_initiator_reset_reports_disconnected_once();
+    test_initiator_state_and_event_strings();
 
     if (failures != 0) {
         std::cerr << failures << " check(s) failed\n";
