@@ -28,6 +28,8 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       last_session_event_(SessionEvent::None),
       session_path_dropped_crc_(0U),
       session_path_dropped_decode_(0U),
+      initiator_(),
+      last_initiator_event_(InitiatorEvent::None),
       learn_catalog_(nullptr),
       on_sample_(nullptr),
       on_sample_ctx_(nullptr),
@@ -90,18 +92,21 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
 NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
                      std::uint64_t now_ms, ReceivedMessage* out) noexcept {
     last_session_event_ = SessionEvent::None;
+    last_initiator_event_ = InitiatorEvent::None;
     if (out == nullptr || datagram == nullptr || size == 0U) {
         return NodeRx::DroppedFrame;
     }
 
-    if (!session_on_) {
+    const bool initiator_live = initiator_.state() != InitiatorState::Idle;
+    if (!session_on_ && !initiator_live) {
         return finish(receiver_.submit(datagram, size, now_ms, rx_buffer_,
                                        rx_capacity_, out),
                       out);
     }
 
-    // A session needs the DecodedFrame btp::Receiver keeps to itself, so the
-    // decode happens here; its failures are counted apart (stats()).
+    // A session (either direction) needs the DecodedFrame btp::Receiver keeps
+    // to itself, so the decode happens here; its failures are counted apart
+    // (stats()).
     DecodedFrame decoded{};
     const Error error = btp::decode(datagram, size, cfg_.transport, &decoded);
     if (error != Error::Ok) {
@@ -111,6 +116,29 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
             ++session_path_dropped_decode_;
         }
         return NodeRx::DroppedFrame;
+    }
+
+    if (initiator_live) {
+        const InitiatorOutcome io = initiator_.on_frame(decoded, now_ms);
+        last_initiator_event_ = io.event;
+        switch (io.event) {
+            case InitiatorEvent::FrameAccepted:
+                break;  // a live-connection application frame -- route it below
+            case InitiatorEvent::None:
+                break;  // not the awaited HELLO_RESULT -- fall through (a
+                        // responder session on the same node, or normal routing)
+            case InitiatorEvent::Connected:
+            case InitiatorEvent::Rejected:
+            case InitiatorEvent::TimedOut:
+            case InitiatorEvent::Disconnected:
+                return NodeRx::InitiatorHandled;
+        }
+    }
+
+    if (!session_on_) {
+        return finish(
+            receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out),
+            out);
     }
 
     std::uint8_t reply[kSessionMaxReplySize];
@@ -367,6 +395,93 @@ bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                 timestamp_us);
 }
 
+bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
+                         void* ctx, std::uint64_t timestamp_us) noexcept {
+    if (serve_catalog_ == nullptr || fill == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return false;
+    }
+    const CatalogTopic* topic = serve_catalog_->topic(topic_id);
+    if (topic == nullptr) return false;
+
+    NamedSampleWriter writer(scratch_buffer_, scratch_capacity_, *topic);
+    if (writer.begin(topic->schema_version) != MessageError::Ok) return false;
+    fill(ctx, writer);
+    std::size_t written = 0U;
+    if (writer.finish(&written) != MessageError::Ok) return false;
+
+    return send(MessageType::Telemetry, topic_id, scratch_buffer_, written,
+                timestamp_us);
+}
+
+// ---------------------------------------------------------------------------
+// Session initiator
+// ---------------------------------------------------------------------------
+
+bool Node::connect(const Hello& local, std::uint64_t deadline_ms) noexcept {
+    return connect(local, resolve_now(0U), deadline_ms);
+}
+
+bool Node::connect(const Hello& local, std::uint64_t now_ms,
+                   std::uint64_t deadline_ms) noexcept {
+    if (cfg_.send == nullptr) return false;
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return false;
+
+    std::uint8_t hello[kSessionMaxHelloSize];
+    std::size_t written = 0U;
+    if (!initiator_.connect(local, cfg_.source_id, cfg_.boot_id, sequence,
+                            now_ms, deadline_ms, hello, sizeof(hello),
+                            &written)) {
+        return false;
+    }
+
+    // HELLO is cleartext -- the handshake bootstraps the session before any
+    // key, same as HELLO_RESULT (see receive() above).
+    const LogicalMessage message{MessageType::Control, object_id::kHello,
+                                 now_ms * 1000ULL, {hello, written}};
+    if (!endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
+                                         cfg_.send, cfg_.send_ctx,
+                                         seal_scratch_, seal_scratch_cap_,
+                                         nullptr, nullptr)) {
+        initiator_.reset();  // the HELLO never left -- undo the AwaitingResult
+        return false;
+    }
+    return true;
+}
+
+bool Node::connected() const noexcept { return initiator_.connected(); }
+
+const EffectiveLimits& Node::effective_limits() const noexcept {
+    return initiator_.effective_limits();
+}
+
+std::uint32_t Node::connected_peer_source_id() const noexcept {
+    return initiator_.peer_source_id();
+}
+
+std::uint32_t Node::connected_peer_boot_id() const noexcept {
+    return initiator_.peer_boot_id();
+}
+
+bool Node::disconnect(std::uint8_t reason,
+                      std::uint32_t drain_timeout_ms) noexcept {
+    return disconnect(resolve_now(0U), reason, drain_timeout_ms);
+}
+
+bool Node::disconnect(std::uint64_t now_ms, std::uint8_t reason,
+                      std::uint32_t drain_timeout_ms) noexcept {
+    if (cfg_.send == nullptr) return false;
+    std::uint8_t buffer[kSessionMaxHelloSize];
+    std::size_t written = 0U;
+    if (!initiator_.disconnect(now_ms, reason, drain_timeout_ms, buffer,
+                               sizeof(buffer), &written)) {
+        return false;
+    }
+    return send(MessageType::Control, object_id::kSessionClose, buffer,
+               written, now_ms * 1000ULL);
+}
+
 // ---------------------------------------------------------------------------
 // Session responder
 // ---------------------------------------------------------------------------
@@ -387,6 +502,7 @@ SessionEvent Node::tick() noexcept { return tick(resolve_now(0U)); }
 
 SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
     receiver_.expire(now_ms);
+    last_initiator_event_ = initiator_.poll(now_ms).event;
     if (!session_on_) return SessionEvent::None;
     const SessionOutcome outcome = session_.poll(now_ms);
     last_session_event_ = outcome.event;
@@ -406,6 +522,7 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::Complete: return "complete";
         case NodeRx::Pending: return "pending";
         case NodeRx::SessionHandled: return "session handled";
+        case NodeRx::InitiatorHandled: return "initiator handled";
         case NodeRx::CatalogUpdated: return "catalog updated";
         case NodeRx::SampleDelivered: return "sample delivered";
         case NodeRx::RequestServed: return "request served";

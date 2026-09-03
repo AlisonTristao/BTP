@@ -2639,9 +2639,13 @@ The **key never enters BTP**. `seal` is a `btp::EndpointSealFn` and `open` a
 Storage stays caller-owned, exactly as `btp::Receiver` and `btp::Endpoint`
 expect: the reassembly slots and their byte regions, a buffer `receive()`
 copies a completed message into, a seal scratch for the fragmented-encrypted
-path, and a buffer `open` writes plaintext into. **`btp::StaticNode<Slots,
-SlotBytes, SealBytes>`** owns all of it as members (defaults `4, 600, 2048` —
-the bally_OS / bally_dongle reassembly shape) for the common embedded case.
+path, a buffer `open` writes plaintext into, and a scratch buffer
+`serve_catalog()` / `publish()` build into. **`btp::StaticNode<Slots,
+SlotBytes, SealBytes, ScratchBytes, CatalogTopics, CatalogFields,
+CatalogStringBytes>`** owns all of it as members (defaults `4, 600, 2048, 512,
+8, 64, 1024` — the bally_OS / bally_dongle reassembly shape, plus
+`btp::StaticCatalog`'s own defaults for the node's *own* catalogue —
+[§16.4](#164-the-schema-catalogue-btpcatalog)) for the common embedded case.
 
 **One context** calls `send` / `receive` / `tick`, as `btp::Receiver` and
 `btp::Session` require. A timer may *pace* `tick()` — but by raising a flag the
@@ -2688,11 +2692,52 @@ from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
 | `Complete` | `*out` is a whole logical message (plaintext if `open` ran) — route it |
 | `Pending` | a fragment stored or a duplicate absorbed — nothing yet |
 | `SessionHandled` | a `HELLO` / `SESSION_CLOSE` / session timeout — the node already replied; see `session_event()` |
+| `InitiatorHandled` | `connect()`'s `HELLO_RESULT` arrived, or the connection watchdog timed out; see `initiator_event()` ([§16.3](#163-the-session-initiator-connect)) |
 | `Ignored` | a frame arrived with a session enabled but not yet `Active` |
 | `DroppedFrame` | `btp::decode` / reassembly rejected it — the breakdown is in `stats()` |
 
 `tick()` sweeps reassembly timeouts and polls the session watchdog, returning
 the `SessionEvent` (`TimedOut` once when a dead session is noticed).
+
+### 16.3 The session initiator (`connect()`)
+
+`enable_session()` above is the RESPONDER half — a peer that accepts a
+connection. `connect()` is the other end: a node that reaches OUT to one,
+wrapping `btp::SessionInitiator` (`btp/session.hpp`, target `btp::session`) the
+same way `enable_session()` wraps `btp::Session`. No separate opt-in call is
+needed — `connect()` itself is the opt-in, `Idle` until then — and a node may
+run both at once (a hub bridging two links: responder toward one peer,
+initiator toward another).
+
+```cpp
+node.connect(my_hello, /*deadline_ms=*/2000);
+for (;;) {
+    const btp::NodeRx rx = node.receive(datagram, n, &msg);
+    if (rx == btp::NodeRx::InitiatorHandled &&
+        node.initiator_event() == btp::InitiatorEvent::Connected) {
+        // node.effective_limits() / node.connected_peer_source_id() now set
+    }
+    node.tick();   // TimedOut if HELLO_RESULT, or the peer, goes quiet
+}
+```
+
+`connect()` sends a `HELLO` (needs `cfg.send`) and waits up to `deadline_ms`
+for `HELLO_RESULT`. `receive()` feeds every decoded frame to the initiator the
+same way it does the responder session: while awaiting a result, only a
+correlated `HELLO_RESULT` progresses the state (`NodeRx::InitiatorHandled`,
+`initiator_event()` one of `Connected` / `Rejected` / `TimedOut`) — anything
+else is ignored and does not renew the deadline; once `Active`, any valid
+frame renews the connection watchdog and is a normal `NodeRx::Complete` /
+discovery outcome for the caller to route, exactly like a `FrameAccepted`
+frame on the responder side. `disconnect()` sends `SESSION_CLOSE` and tears the
+connection down locally without waiting for `SESSION_CLOSE_RESULT`.
+
+Deliberately narrow, the same way `btp::Session` is on the other end: no
+`ENTER` / `READY` console text (link framing, above this), no retry budget for
+a `HELLO` that gets no answer (call `connect()` again after `TimedOut` /
+`Rejected`), and nothing past the handshake — `request_manifest()`,
+`subscribe()`-to-be and a command's correlation are the caller's, once
+`connected()` is true.
 
 ### 16.4 The schema catalogue (`btp::Catalog`)
 
@@ -2761,6 +2806,38 @@ primitive is there for the rest. `field_id` and `order` come from the array
 position; `btp::field(id, type, name, ...)` sets an explicit `field_id` for a
 schema that must survive a rename.
 
+The chained alternative to naming that `FieldRecord[]` is `Catalog::topic()`,
+which returns a `TopicBuilder` -- the same one-line-per-field helpers, called
+in sequence instead of listed, committed with one `end()`:
+
+```cpp
+catalog.topic(0x0101, /*schema_version=*/3, "drive_status")
+    .f32("left_rpm", "rpm")
+    .u16("battery_v", 0.001, "V")
+    .i16("temp_c", 0.1, "Cel", /*is_nullable=*/true)
+    .end();
+```
+
+And `fill_drive_status` above is positional -- `put_f64()` per field, in
+schema order, with nothing stopping two calls from landing swapped and
+sending the wrong value on the wire, silently. `btp::NamedSampleWriter`
+(built from a `CatalogTopic`, which already carries the field names) turns
+that into a loud `InvalidArgument` instead: `put("battery_v", 3.72)` must name
+the schema's *next* field, or it fails right there. `node.publish_named(topic,
+fill, ctx, ts)` is `publish()`'s counterpart taking a `NodeNamedFillFn` (a
+`NamedSampleWriter&` instead of a `SampleWriter&`).
+
+**`StaticNode`** additionally owns its own `btp::StaticCatalog` (the
+`CatalogTopics` / `CatalogFields` / `CatalogStringBytes` template arguments
+above) -- `node.catalog()` reaches it directly, `node.topic(...)` forwards to
+`catalog().topic(...)`, and `node.serve_catalog(role, uuid, name)` /
+`node.learn_catalog()` with no `Catalog*` argument point at it, so the common
+one-topic case needs no separate `btp::StaticCatalog` declared and threaded
+through by pointer in the caller. `Node::serve_catalog(&external, ...)` /
+`Node::learn_catalog(&external)` stay reachable (`StaticNode` keeps both
+overload sets, via `using`) for a caller managing several catalogues -- a hub
+learning one schema set per peer, say -- or sharing one across nodes.
+
 `receive()` answers a `MANIFEST_REQUEST` for this source (or a full-catalog
 request) by building a `MANIFEST_DATA` from the catalogue and sending it
 (`NodeRx::RequestServed`) — a `NOT_MODIFIED` reply when the request's
@@ -2774,14 +2851,16 @@ frame; the `serve_catalog` / `publish` scratch is the node's fourth buffer
 
 ### 16.5 What stays out
 
-Everything §11 keeps above the wire, unchanged: the **session initiator**
-(`Node` is responder + producer), **routing policy** (`receive()` hands back a
-message it does not manage; relay-or-drop is the caller's one switch), the
-subscription aggregator, the priority scheduler, and **key derivation** (the
-body of your `seal` / `open`). Plus, in this first cut: **serial byte-stream
-framing** — a `Node` speaks packet transports (`receive()` wants one whole
-datagram), and a single encoded frame must fit the ESP-NOW ceiling, so native
-COBS and large-Serial frames are a later addition.
+Everything §11 keeps above the wire, unchanged: **routing policy** (`receive()`
+hands back a message it does not manage; relay-or-drop is the caller's one
+switch), the subscription aggregator, the priority scheduler, and **key
+derivation** (the body of your `seal` / `open`). §16.3's `connect()` is only
+the `HELLO` → `HELLO_RESULT` handshake -- `MANIFEST_REQUEST`, a subscription,
+a command's correlation are still the caller's, once `connected()` is true.
+Plus, in this first cut: **serial byte-stream framing** — a `Node` speaks
+packet transports (`receive()` wants one whole datagram), and a single
+encoded frame must fit the ESP-NOW ceiling, so native COBS and large-Serial
+frames are a later addition.
 
 ---
 

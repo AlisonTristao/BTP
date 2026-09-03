@@ -32,6 +32,7 @@ int failures = 0;
     } while (false)
 
 using btp::Hello;
+using btp::MessageError;
 using btp::MessageType;
 using btp::NodeConfig;
 using btp::NodeRx;
@@ -564,6 +565,186 @@ void test_request_manifest() {
     CHECK(req.known_config_revision == 0U);
 }
 
+// ===========================================================================
+// btp::Node -- the session initiator (connect())
+// ===========================================================================
+
+using btp::InitiatorEvent;
+
+void test_connect_handshake_and_effective_limits() {
+    Sink init_tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    CHECK(initiator.begin());
+    CHECK(!initiator.connected());
+
+    CHECK(initiator.connect(make_hello(Role::Consumer), 0U,
+                            /*deadline_ms=*/2000U));
+    CHECK(init_tx.count() == 1U);
+
+    Sink peer_tx;
+    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    peer.enable_session(make_hello(Role::Producer), 0U);
+    CHECK(peer.begin());
+    peer.arm_session(0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(peer, init_tx, 1U, &msg) == NodeRx::SessionHandled);
+    CHECK(peer.session()->active());
+    CHECK(peer_tx.count() == 1U);  // the peer's HELLO_RESULT
+
+    CHECK(deliver(initiator, peer_tx, 2U, &msg) == NodeRx::InitiatorHandled);
+    CHECK(initiator.initiator_event() == InitiatorEvent::Connected);
+    CHECK(initiator.connected());
+    CHECK(initiator.connected_peer_source_id() == kPeerId);
+    CHECK(initiator.connected_peer_boot_id() == kPeerBoot);
+    CHECK(initiator.effective_limits().session_timeout_ms == 30000U);
+
+    // An application frame from the peer now routes normally AND renews the
+    // initiator's own watchdog.
+    Sink app_tx;
+    TestNode app(base_config(kPeerId, kPeerBoot, &app_tx));
+    app.begin();
+    const std::vector<std::uint8_t> payload = make_payload(12, 0x07);
+    app.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
+            9ULL);
+    CHECK(deliver(initiator, app_tx, 500U, &msg) == NodeRx::Complete);
+    CHECK(initiator.initiator_event() == InitiatorEvent::FrameAccepted);
+    CHECK(initiator.connected());
+}
+
+void test_connect_times_out_without_a_reply() {
+    Sink tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    initiator.begin();
+    CHECK(initiator.connect(make_hello(Role::Consumer), 0U,
+                            /*deadline_ms=*/2000U));
+
+    CHECK(initiator.tick(1999U) == SessionEvent::None);  // unrelated return type
+    CHECK(initiator.initiator_event() == InitiatorEvent::None);
+    CHECK(initiator.tick(2000U) == SessionEvent::None);
+    CHECK(initiator.initiator_event() == InitiatorEvent::TimedOut);
+    CHECK(!initiator.connected());
+}
+
+void test_connect_requires_send() {
+    Sink tx;
+    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &tx);
+    cfg.send = nullptr;
+    TestNode initiator(cfg);
+    initiator.begin();
+    CHECK(!initiator.connect(make_hello(Role::Consumer), 0U, 2000U));
+}
+
+void test_disconnect_sends_session_close() {
+    Sink init_tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    initiator.begin();
+    CHECK(initiator.connect(make_hello(Role::Consumer), 0U, 2000U));
+
+    Sink peer_tx;
+    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    peer.enable_session(make_hello(Role::Producer), 0U);
+    peer.begin();
+    peer.arm_session(0U);
+    ReceivedMessage msg{};
+    deliver(peer, init_tx, 0U, &msg);
+    CHECK(deliver(initiator, peer_tx, 0U, &msg) == NodeRx::InitiatorHandled);
+    CHECK(initiator.connected());
+
+    init_tx.clear();
+    CHECK(initiator.disconnect(1U, static_cast<std::uint8_t>(1U), 100U));
+    CHECK(!initiator.connected());
+    CHECK(init_tx.count() == 1U);
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(init_tx.frames[0].data(), init_tx.frames[0].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.object_id == btp::object_id::kSessionClose);
+}
+
+// ===========================================================================
+// btp::StaticNode -- its own catalogue (no separate btp::StaticCatalog)
+// ===========================================================================
+
+void test_static_node_owns_its_catalog() {
+    Sink tx;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+
+    // TopicBuilder, straight off the node -- no local StaticCatalog to declare.
+    CHECK(node.topic(0x0101U, 2U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001)
+             .end() == MessageError::Ok);
+    CHECK(node.catalog().topic_count() == 1U);
+
+    node.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(node.begin());
+    CHECK(node.announce_catalog());
+    CHECK(tx.count() >= 1U);
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.object_id == btp::object_id::kManifestData);
+
+    // The consumer side of the same sugar: learn_catalog() with no argument.
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    consumer.learn_catalog();
+    consumer.begin();
+    ReceivedMessage msg{};
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(consumer.catalog().topic(0x0101U) != nullptr);
+}
+
+// ===========================================================================
+// btp::Node::publish_named -- SampleWriter, checked by field name
+// ===========================================================================
+
+void fill_drive_by_name(void* /*ctx*/, btp::NamedSampleWriter& w) {
+    CHECK(w.put("left_rpm", 1450.0) == MessageError::Ok);
+    CHECK(w.put("right_rpm", -1448.5) == MessageError::Ok);
+    CHECK(w.put_null("battery_v") == MessageError::Ok);
+}
+
+void test_publish_named_round_trips() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 2U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog();
+    producer.begin();
+
+    CHECK(producer.publish_named(0x0101U, &fill_drive_by_name, nullptr, 3ULL));
+    CHECK(prod_tx.count() == 1U);
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    consumer.learn_catalog();
+    SampleCapture capture = {};
+    consumer.on_sample(&capture_sample, &capture);
+    consumer.begin();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+
+    prod_tx.clear();
+    CHECK(producer.publish_named(0x0101U, &fill_drive_by_name, nullptr, 4ULL));
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SampleDelivered);
+    CHECK(capture.calls == 1);
+    CHECK(capture.values[0] == 1450.0);
+    CHECK(capture.values[1] == -1448.5);
+    CHECK(capture.values[2] == -999.0);  // null
+
+    // Publishing with the wrong topic id fails, same as publish().
+    CHECK(!producer.publish_named(0x0999U, &fill_drive_by_name, nullptr, 1ULL));
+}
+
 }  // namespace
 
 int main() {
@@ -577,6 +758,14 @@ int main() {
     test_catalog_discovery();
     test_catalog_serve_and_publish();
     test_request_manifest();
+
+    test_connect_handshake_and_effective_limits();
+    test_connect_times_out_without_a_reply();
+    test_connect_requires_send();
+    test_disconnect_sends_session_close();
+
+    test_static_node_owns_its_catalog();
+    test_publish_named_round_trips();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

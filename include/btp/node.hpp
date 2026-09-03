@@ -32,8 +32,10 @@
 //                      hands back the sealed bytes for you to open.
 //
 // OUT of scope, on purpose (docs/library.md chapter 11 still applies):
-//   * the SESSION INITIATOR -- sending ENTER / HELLO, the retry budget,
-//     awaiting HELLO_RESULT. btp::Node is responder + producer.
+//   * everything past HELLO_RESULT on the initiator side -- MANIFEST_REQUEST
+//     still needs an explicit request_manifest() call once connected(), a
+//     subscription table, a command's retry/correlation. connect() (below)
+//     is only the handshake (btp::SessionInitiator, library 2.14.0).
 //   * ROUTING POLICY -- receive() hands back a whole logical message and its
 //     header; whether an unrecognised one is relayed (a hub) or dropped (an
 //     endpoint) is the one switch on top, the caller's.
@@ -94,6 +96,11 @@ using NodeSampleFn = void (*)(void* ctx, const CatalogTopic& topic,
 // / put_bool / put_null / put_array_* per field. Do not call begin() / finish().
 using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
 
+// Called by publish_named() the same way, with a NamedSampleWriter (catalog.hpp)
+// instead: put("field_name", value) rather than one positional put_f64() per
+// field, in schema order still, but checked against the name at each step.
+using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -136,6 +143,8 @@ enum class NodeRx : std::uint8_t {
     Pending,         // a fragment was stored or a duplicate absorbed -- nothing yet.
     SessionHandled,  // a HELLO / SESSION_CLOSE / session timeout -- the node already
                      // replied (if a reply was due) through `send`. See session_event().
+    InitiatorHandled,  // connect()'s HELLO_RESULT arrived (accepted or rejected),
+                       // or the connection watchdog timed out. See initiator_event().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
     SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
     RequestServed,   // a MANIFEST_REQUEST -- the node built and sent MANIFEST_DATA.
@@ -276,6 +285,47 @@ public:
     // The session event the most recent receive() / tick() produced.
     SessionEvent session_event() const noexcept { return last_session_event_; }
 
+    // ---- session initiator (opt-in via connect()) -------------------------
+    // The OTHER end of a session from enable_session() above: this node
+    // connects OUT to a peer instead of accepting a connection. No enable_*
+    // call needed -- connect() itself is the opt-in (Idle until then), and
+    // both may be live on the same node at once (a hub bridging two links).
+    // btp::SessionInitiator (session.hpp) is the state machine; this is its
+    // wiring into the same send / receive / tick pipeline as the responder.
+    //
+    //   node.connect(my_hello, robot_addr_deadline_ms);
+    //   for (;;) {
+    //       if (node.receive(datagram, n, &msg) == btp::NodeRx::InitiatorHandled &&
+    //           node.initiator_event() == btp::InitiatorEvent::Connected) {
+    //           // node.effective_limits() / node.connected_peer_source_id() set
+    //       }
+    //       node.tick();   // TimedOut if HELLO_RESULT (or the peer) goes quiet
+    //   }
+
+    // Idle -> AwaitingResult. Sends `local` as a HELLO (needs cfg.send) and
+    // waits up to `deadline_ms` for HELLO_RESULT (docs/session-and-terminal.md
+    // section 5.1: 2000 for a serial console; 0 disables the bound). A no-op
+    // (returns false) outside Idle, on a malformed `local`, or on a send
+    // failure -- call disconnect() or wait for InitiatorHandled first.
+    bool connect(const Hello& local, std::uint64_t deadline_ms) noexcept;
+    bool connect(const Hello& local, std::uint64_t now_ms,
+                std::uint64_t deadline_ms) noexcept;
+
+    bool connected() const noexcept;
+    const EffectiveLimits& effective_limits() const noexcept;
+    std::uint32_t connected_peer_source_id() const noexcept;
+    std::uint32_t connected_peer_boot_id() const noexcept;
+
+    // Sends SESSION_CLOSE and tears the connection down locally right away
+    // (does not wait for SESSION_CLOSE_RESULT). A no-op outside AwaitingResult
+    // / Active.
+    bool disconnect(std::uint8_t reason, std::uint32_t drain_timeout_ms) noexcept;
+    bool disconnect(std::uint64_t now_ms, std::uint8_t reason,
+                    std::uint32_t drain_timeout_ms) noexcept;
+
+    // The initiator event the most recent receive() / tick() produced.
+    InitiatorEvent initiator_event() const noexcept { return last_initiator_event_; }
+
     // ---- discovery: consumer side (opt-in) --------------------------------
     // Attach a catalogue for the node to keep current from MANIFEST_DATA. Once
     // set, receive() ingests every MANIFEST_DATA frame into it (returning
@@ -324,6 +374,11 @@ public:
     bool publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                  std::uint64_t timestamp_us) noexcept;
 
+    // Same, checked by field NAME instead of position -- see
+    // catalog.hpp's NamedSampleWriter for what this buys over publish().
+    bool publish_named(std::uint16_t topic_id, NodeNamedFillFn fill, void* ctx,
+                       std::uint64_t timestamp_us) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -333,6 +388,9 @@ public:
     const Session* session() const noexcept {
         return session_on_ ? &session_ : nullptr;
     }
+    // Always present (Idle until connect()), unlike session() above.
+    SessionInitiator& initiator() noexcept { return initiator_; }
+    const SessionInitiator& initiator() const noexcept { return initiator_; }
 
     struct Stats {
         Receiver::Stats rx;
@@ -369,6 +427,9 @@ private:
     SessionEvent last_session_event_;
     std::uint32_t session_path_dropped_crc_;
     std::uint32_t session_path_dropped_decode_;
+
+    SessionInitiator initiator_;  // Idle until connect()
+    InitiatorEvent last_initiator_event_;
 
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;
@@ -414,15 +475,22 @@ struct NodeStorage {
 // Defaults: 4 concurrent reassemblies, 600 octets each (a fragmented
 // COMMAND_REQUEST plus headroom), 2048 octets of seal scratch (the largest
 // UTF-8 status document this family sends), 512 octets of manifest / sample
-// scratch (serve_catalog / publish). A Serial deployment bumps SlotBytes; a
-// large manifest bumps ScratchBytes.
+// scratch (serve_catalog / publish), and -- for the node's OWN catalogue,
+// below -- 8 topics / 64 field specs / 1 KiB of name text, matching
+// btp::StaticCatalog's own defaults. A Serial deployment bumps SlotBytes; a
+// large manifest bumps ScratchBytes; a schema with many topics or fields
+// bumps the Catalog* template arguments.
 template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
-          std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512>
+          std::size_t SealBytes = 2048, std::size_t ScratchBytes = 512,
+          std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
+          std::size_t CatalogStringBytes = 1024>
 class StaticNode
     : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
       public Node {
     using Storage =
         detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>;
+
+    StaticCatalog<CatalogTopics, CatalogFields, CatalogStringBytes> catalog_;
 
 public:
     explicit StaticNode(
@@ -433,7 +501,38 @@ public:
           Node(cfg, Storage::slots, Storage::storage, Slots,
                reassembly_timeout_ms, Storage::rx_buffer, SlotBytes,
                Storage::seal_scratch, SealBytes, Storage::open_buffer, SlotBytes,
-               Storage::scratch_buffer, ScratchBytes) {}
+               Storage::scratch_buffer, ScratchBytes),
+          catalog_() {}
+
+    // This node's own catalogue -- no separate btp::StaticCatalog to declare
+    // in the caller or thread through by pointer. The serve_catalog() /
+    // learn_catalog() overloads below (no Catalog* argument) point at it;
+    // Node::serve_catalog(&external, ...) / Node::learn_catalog(&external)
+    // stay reachable (via the `using` below) for a caller managing several
+    // catalogues (a hub) or sharing one across nodes.
+    Catalog& catalog() noexcept { return catalog_; }
+    const Catalog& catalog() const noexcept { return catalog_; }
+
+    using Node::serve_catalog;
+    using Node::learn_catalog;
+
+    void serve_catalog(std::uint8_t role = 0U,
+                       const std::uint8_t* source_uuid = nullptr,
+                       const char* source_name = nullptr) noexcept {
+        Node::serve_catalog(&catalog_, role, source_uuid, source_name);
+    }
+    void learn_catalog() noexcept { Node::learn_catalog(&catalog_); }
+
+    // Sugar for catalog().topic(...) -- declare a topic in this node's own
+    // catalogue without reaching for catalog() first.
+    TopicBuilder topic(std::uint16_t topic_id, std::uint16_t schema_version,
+                       const char* name,
+                       TelemetryEncoding encoding = TelemetryEncoding::PackedLe,
+                       bool subscribable = true,
+                       std::uint32_t max_rate_millihz = 0U) noexcept {
+        return catalog_.topic(topic_id, schema_version, name, encoding,
+                              subscribable, max_rate_millihz);
+    }
 };
 
 }  // namespace btp
