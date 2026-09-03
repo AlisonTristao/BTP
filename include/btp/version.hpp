@@ -32,7 +32,7 @@ namespace btp {
 
 // The release / library version. Public since 2.2.0.
 static const std::uint8_t kLibraryVersionMajor = 2U;
-static const std::uint8_t kLibraryVersionMinor = 15U;
+static const std::uint8_t kLibraryVersionMinor = 16U;
 static const std::uint8_t kLibraryVersionPatch = 0U;
 
 // The wire-version byte at header offset 4 (docs/frame.md section 2). It is a

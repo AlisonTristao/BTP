@@ -159,16 +159,23 @@ It links `btp::messages` (for `MessageError`, `btp::negotiate` and the shared
 enums) and, like it, needs no mbedtls and is always built. Same guarantees as
 the rest of the library.
 
-It has two members. `btp::DedupCache` is the bounded, caller-owned
-command-deduplication cache of [Commands and discovery
-§2.5–2.6](commands.md#25-command-deduplication): an executor feeds it each
-`COMMAND_REQUEST` identity and it says whether to execute, replay a stored
-`COMMAND_RESULT`, or reject a conflict — and it holds **no clock** (boot-scoped,
-no time-based expiry). `btp::Session` is the responder state machine of
-[Session and terminal §3–5](session-and-terminal.md#3-entering-protocol-mode-on-serial):
-`HELLO` negotiation, `SESSION_CLOSE`, and the inactivity watchdog — it takes a
-`now_ms` reading on every timed call, the same way `btp::Reassembler` does, but
-reads no clock itself. [The session layer](#13-the-session-layer) covers both.
+It has four members, two pairs of responder / initiator. `btp::DedupCache` is
+the bounded, caller-owned command-deduplication cache of [Commands and
+discovery §2.5–2.6](commands.md#25-command-deduplication): an executor feeds
+it each `COMMAND_REQUEST` identity and it says whether to execute, replay a
+stored `COMMAND_RESULT`, or reject a conflict — and it holds **no clock**
+(boot-scoped, no time-based expiry). `btp::CommandClient` is its initiator
+counterpart: send `COMMAND_REQUEST`, correlate the eventual `COMMAND_RESULT`,
+time out with no retry budget if none comes.
+`btp::Session` is the responder state machine of [Session and terminal
+§3–5](session-and-terminal.md#3-entering-protocol-mode-on-serial): `HELLO`
+negotiation, `SESSION_CLOSE`, and the inactivity watchdog. `btp::SessionInitiator`
+is the other end: send `HELLO`, await a correlated `HELLO_RESULT`, run the
+same watchdog once `Active`. All four take a `now_ms` reading on every timed
+call, the same way `btp::Reassembler` does, but read no clock themselves.
+[§16.3](#163-the-session-initiator-connect) and
+[§16.7](#167-commands-btpdedupcache-btpcommandclient) cover how `btp::Node`
+wires them in.
 
 ### `btp::endpoint`
 
@@ -2714,6 +2721,8 @@ from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
 | `InitiatorHandled` | `connect()`'s `HELLO_RESULT` arrived, or the connection watchdog timed out; see `initiator_event()` ([§16.3](#163-the-session-initiator-connect)) |
 | `SubscriptionServed` | a `SUBSCRIBE` / `UNSUBSCRIBE` against `subscriptions()` — the node already replied ([§16.6](#166-subscriptions-btpsubscriptiontable-btpsubscriptionclient)) |
 | `SubscriptionHandled` | a `SUBSCRIBE_RESULT` for a `subscribe()` / renewal this node holds; see `subscription_event()` |
+| `CommandServed` | a `COMMAND_REQUEST` against `commands()` -- the node already ran / replayed / rejected it and replied ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
+| `CommandHandled` | a `COMMAND_RESULT` for a `command()` this node holds; see `command_outcome()` |
 | `Ignored` | a frame arrived with a session enabled but not yet `Active` |
 | `DroppedFrame` | `btp::decode` / reassembly rejected it — the breakdown is in `stats()` |
 
@@ -2928,7 +2937,71 @@ retry budget beyond that cadence -- the same "no retry budget" stance as
 sends `UNSUBSCRIBE` and drops the local state right away, without waiting for
 `UNSUBSCRIBE_RESULT`.
 
-### 16.7 What stays out
+### 16.7 Commands (`btp::DedupCache` / `btp::CommandClient`)
+
+`COMMAND_REQUEST` / `COMMAND_RESULT` ([Commands and discovery
+§2](commands.md#2-commands)) get the same responder / initiator split as
+everything else in this chapter, both living in `btp::session`: the
+RESPONDER side reuses `btp::DedupCache` ([§13](#13-the-session-layer)) --
+already the executor's memory of "did I run this identity before" -- and the
+INITIATOR side is `btp::CommandClient`, new alongside it.
+
+```cpp
+// responder:
+btp::DedupSlot slots[8]; std::uint8_t bytes[8][256]; btp::DedupStorage storage[8];
+btp::DedupRequester requesters[4];
+btp::DedupCache commands(slots, storage, 8, requesters, 4);
+node.enable_commands(&commands, &arm_motors, &robot);
+
+void arm_motors(void* ctx, std::uint16_t action_id, std::uint16_t version,
+               btp::ByteView parameters, btp::NodeActionOutcome* outcome) {
+    // ... do it, synchronously ...
+    outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+}
+```
+
+`receive()` classifies a `COMMAND_REQUEST` against the cache
+(`NodeRx::CommandServed` either way): Fresh runs the handler once, builds and
+sends `COMMAND_RESULT` from the `NodeActionOutcome` it filled, and records it;
+`DuplicateComplete` replays the stored result verbatim, no second run;
+`DuplicateInFlight` drops silently (the peer retries); `Conflict` /
+`Evicted` / `CapacityExhausted` get an automatic `REJECTED` / `BUSY` reply.
+There is no "pending, complete me later" path in this first cut -- a slow
+action belongs on a task of its own that answers once done.
+
+```cpp
+// initiator:
+btp::ClientCommand slots[4];
+btp::CommandClient commands(slots, 4);
+node.enable_command_client(&commands);
+
+const std::uint32_t id = node.command(robot_source_id, robot_boot_id, kArmMotors,
+                                      /*version=*/1, params, params_size);
+// ... node.receive() feeds COMMAND_RESULT to it (NodeRx::CommandHandled,
+//     node.command_outcome() -- status / error_code / message / result,
+//     valid the same "until the next receive()" way ReceivedMessage::payload
+//     is), tick() times it out after kCommandTimeoutMs with no retry --
+//     the same stance connect() / subscribe() take ...
+```
+
+### 16.8 STATUS (`node.enable_status()`)
+
+`node.enable_status(period_ms)` builds and sends a v1 `STATUS`
+([Commands and discovery §5](commands.md#5-status)) from counters the node
+already keeps -- `receiver().stats()`, `frames_tx()`, and, once attached,
+`commands()`'s replay count -- on a cadence `tick()` drives, the same "cadence
+bounds how late it's noticed" rule as the session watchdog. `period_ms == 0`
+(the default) disables it. Spontaneous like the wire format itself: no
+result, no correlation.
+
+Best-effort, not exact -- documented in full on `enable_status()`: `frames_rx`
+/ `reassembly_completed` both read the reassembled-logical-message counter
+(the closest thing to "a frame" this layer keeps), `frames_tx` only counts
+`send()` / `send_with()` (not the bootstrap `HELLO` / `SUBSCRIBE` /
+`COMMAND_REQUEST` traffic), `telemetry_dropped` is not tracked separately yet
+(reads 0), and v2's per-topic `TopicStatusRecord` list is not built (v1 only).
+
+### 16.9 What stays out
 
 Everything §11 keeps above the wire, unchanged: **routing policy** (`receive()`
 hands back a message it does not manage; relay-or-drop is the caller's one
@@ -2936,12 +3009,13 @@ switch), the **hub subscription aggregator** (one subscription upstream per N
 downstream subscribers of the same source + topic -- §16.6 is the per-node
 piece; a hub layers its aggregation on top via `Node::subscriptions()`), the
 priority scheduler, and **key derivation** (the body of your `seal` / `open`).
-§16.3's `connect()` is only the `HELLO` → `HELLO_RESULT` handshake --
-`MANIFEST_REQUEST` and a command's correlation are still the caller's, once
-`connected()` is true. Plus, in this first cut: **serial byte-stream framing**
-— a `Node` speaks packet transports (`receive()` wants one whole datagram),
-and a single encoded frame must fit the ESP-NOW ceiling, so native COBS and
-large-Serial frames are a later addition.
+§16.3's `connect()` is only the `HELLO` → `HELLO_RESULT` handshake -- a
+subscription and a command are still the caller's to make, once `connected()`
+is true. Plus, in this first cut: **serial byte-stream framing** — a `Node`
+speaks packet transports (`receive()` wants one whole datagram), and a single
+encoded frame must fit the ESP-NOW ceiling, so native COBS and large-Serial
+frames are a later addition; and **STATUS v2** (§16.8) -- no per-topic record
+list yet.
 
 ---
 

@@ -808,6 +808,145 @@ void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     CHECK(!consumer.unsubscribe(local_id));
 }
 
+// ===========================================================================
+// btp::Node -- commands (btp::DedupCache / btp::CommandClient)
+// ===========================================================================
+
+using btp::ClientCommand;
+using btp::CommandClient;
+using btp::CommandEvent;
+using btp::DedupCache;
+using btp::DedupRequester;
+using btp::DedupSlot;
+using btp::DedupStorage;
+using btp::NodeActionOutcome;
+
+struct ActionCalls {
+    int calls;
+    std::uint16_t last_action_id;
+};
+
+void echo_action(void* ctx, std::uint16_t action_id, std::uint16_t /*action_version*/,
+                 btp::ByteView parameters, NodeActionOutcome* outcome) {
+    ActionCalls* c = static_cast<ActionCalls*>(ctx);
+    ++c->calls;
+    c->last_action_id = action_id;
+    outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    outcome->result_data = parameters.data;  // echo the parameters back
+    outcome->result_size = parameters.size;
+}
+
+void test_command_round_trip_and_dedup_replay() {
+    Sink resp_tx;
+    TestNode responder(base_config(kSenderId, kSenderBoot, &resp_tx));
+    DedupSlot dedup_slots[4];
+    std::uint8_t dedup_bytes[4][64];
+    DedupStorage dedup_storage[4];
+    for (std::size_t i = 0; i < 4; ++i) dedup_storage[i] = {dedup_bytes[i], 64};
+    DedupRequester dedup_requesters[2];
+    DedupCache dedup(dedup_slots, dedup_storage, 4, dedup_requesters, 2);
+    ActionCalls calls = {};
+    responder.enable_commands(&dedup, &echo_action, &calls);
+    CHECK(responder.begin());
+
+    Sink init_tx;
+    TestNode initiator(base_config(kPeerId, kPeerBoot, &init_tx));
+    ClientCommand cmd_slots[2];
+    CommandClient client(cmd_slots, 2);
+    initiator.enable_command_client(&client);
+    CHECK(initiator.begin());
+
+    const std::uint8_t params[3] = {1, 2, 3};
+    const std::uint32_t local_id =
+        initiator.command(kSenderId, kSenderBoot, 42U, 1U, params, sizeof(params));
+    CHECK(local_id != 0U);
+    CHECK(init_tx.count() == 1U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(responder, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
+    CHECK(calls.last_action_id == 42U);
+    CHECK(resp_tx.count() == 1U);
+
+    CHECK(deliver(initiator, resp_tx, 0U, &msg) == NodeRx::CommandHandled);
+    CHECK(initiator.command_outcome().event == CommandEvent::Completed);
+    CHECK(initiator.command_outcome().local_id == local_id);
+    CHECK(initiator.command_outcome().status ==
+          static_cast<std::uint8_t>(btp::ResultStatus::Success));
+    CHECK(initiator.command_outcome().result.size == sizeof(params));
+
+    // A RETRANSMISSION of the exact same request frame (same source / boot /
+    // sequence) replays the stored result -- the action does NOT run again.
+    resp_tx.clear();
+    CHECK(deliver(responder, init_tx, 100U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);  // still 1
+    CHECK(resp_tx.count() == 1U);
+}
+
+void test_command_times_out_without_a_reply() {
+    Sink tx;
+    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    ClientCommand slots[2];
+    CommandClient client(slots, 2);
+    initiator.enable_command_client(&client);
+    initiator.begin();
+
+    const std::uint8_t params[1] = {0};
+    CHECK(initiator.command(kPeerId, kPeerBoot, 1U, 1U, params, sizeof(params)) != 0U);
+
+    initiator.tick(btp::kCommandTimeoutMs - 1U);
+    CHECK(initiator.command_outcome().event == CommandEvent::None);
+    initiator.tick(btp::kCommandTimeoutMs);
+    CHECK(initiator.command_outcome().event == CommandEvent::TimedOut);
+}
+
+// ===========================================================================
+// btp::Node -- STATUS
+// ===========================================================================
+
+void test_status_disabled_by_default() {
+    Sink tx;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    node.begin();
+    CHECK(!node.status_enabled());
+    node.tick(1000000U);
+    CHECK(tx.count() == 0U);
+}
+
+void test_status_sends_after_the_period_and_counts_frames_tx() {
+    Sink tx;
+    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    node.begin();
+    node.enable_status(500U);
+    CHECK(node.status_enabled());
+    CHECK(node.frames_tx() == 0U);
+
+    const std::vector<std::uint8_t> payload = make_payload(8, 0x01);
+    CHECK(node.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
+                    1ULL));
+    CHECK(node.frames_tx() == 1U);
+
+    node.tick(499U);
+    CHECK(tx.count() == 1U);  // just the telemetry frame -- not due yet
+    node.tick(500U);
+    CHECK(tx.count() == 2U);  // STATUS went out
+    CHECK(node.frames_tx() == 2U);  // and counted itself, after being built
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx.frames[1].data(), tx.frames[1].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.type == MessageType::Control);
+    CHECK(frame.header.object_id == btp::object_id::kStatus);
+
+    btp::StatusV1 status = {};
+    std::size_t topics_written = 0U;
+    CHECK(btp::decode_status(frame.payload.data, frame.payload.size, &status, nullptr,
+                             0U, &topics_written) == btp::MessageError::Ok);
+    CHECK(status.status_version == 1U);
+    // Read BEFORE this STATUS's own send incremented the counter.
+    CHECK(status.frames_tx == 1U);
+}
+
 void test_subscribe_renews_before_the_lease_runs_out() {
     Sink prod_tx;
     TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
@@ -867,6 +1006,12 @@ int main() {
 
     test_static_node_owns_its_catalog();
     test_publish_named_round_trips();
+
+    test_command_round_trip_and_dedup_replay();
+    test_command_times_out_without_a_reply();
+
+    test_status_disabled_by_default();
+    test_status_sends_after_the_period_and_counts_frames_tx();
 
     test_subscribe_grant_publish_cadence_and_unsubscribe();
     test_subscribe_renews_before_the_lease_runs_out();

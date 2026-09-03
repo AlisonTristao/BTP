@@ -102,6 +102,30 @@ using NodeFillFn = void (*)(void* ctx, SampleWriter& writer);
 // field, in schema order still, but checked against the name at each step.
 using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 
+// Filled by NodeActionFn (below) to describe how a COMMAND_REQUEST's action
+// finished. Zero-initialise before your own fields matter -- status defaults
+// to 0 (ResultStatus::Success) and error_code to 0 (ResultError::None), so a
+// handler that only has good news to report can leave them alone.
+struct NodeActionOutcome {
+    std::uint8_t status;              // ResultStatus
+    std::uint16_t error_code;         // ResultError
+    const char* message;              // NUL-terminated UTF-8, optional (nullptr -> none)
+    const std::uint8_t* result_data;  // optional action-defined result bytes
+    std::size_t result_size;
+};
+
+// Called once for a Fresh COMMAND_REQUEST (btp::DedupCache has not seen this
+// requester + sequence before). Runs the action SYNCHRONOUSLY -- there is no
+// "pending, complete me later" path in this first cut, so a slow action
+// belongs on a task of its own, with the handler answering once it is done.
+// Fill `outcome` (pre-set to Success, no message, no result) and return; the
+// node builds COMMAND_RESULT from it, sends it, and records it so a
+// retransmission of this exact request replays the same bytes instead of
+// running the action a second time.
+using NodeActionFn = void (*)(void* ctx, std::uint16_t action_id,
+                              std::uint16_t action_version, ByteView parameters,
+                              NodeActionOutcome* outcome);
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -150,6 +174,10 @@ enum class NodeRx : std::uint8_t {
                          // subscriptions() table -- the node already replied.
     SubscriptionHandled,  // a SUBSCRIBE_RESULT for a subscribe()/renew() this
                           // node holds. See subscription_event().
+    CommandServed,   // a COMMAND_REQUEST against commands() -- the node already
+                     // ran the action (or replayed / rejected it) and replied.
+    CommandHandled,  // a COMMAND_RESULT for a command() this node holds. See
+                     // command_outcome().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
     SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
     RequestServed,   // a MANIFEST_REQUEST -- the node built and sent MANIFEST_DATA.
@@ -368,6 +396,74 @@ public:
         return last_subscription_event_;
     }
 
+    // ---- commands (opt-in, docs/commands.md section 2) ---------------------
+    // btp::DedupCache (session.hpp) is the RESPONDER's memory -- execute an
+    // action once, remember the result, replay a retransmission instead of
+    // running it again. btp::CommandClient (session.hpp) is the INITIATOR's:
+    // send, correlate the eventual COMMAND_RESULT, time out with no retry
+    // budget if none comes. Storage stays the caller's, same reasoning as
+    // subscriptions -- the caller sizes the cache for the largest request /
+    // result it will ever see.
+
+    // RESPONDER: `cache` deduplicates; `handler` runs a Fresh request
+    // synchronously (NodeActionFn above). nullptr for either detaches.
+    void enable_commands(DedupCache* cache, NodeActionFn handler, void* ctx) noexcept {
+        commands_ = cache;
+        on_command_ = handler;
+        on_command_ctx_ = ctx;
+    }
+    DedupCache* commands() noexcept { return commands_; }
+    const DedupCache* commands() const noexcept { return commands_; }
+
+    // INITIATOR: hold outstanding commands on a peer. nullptr detaches.
+    void enable_command_client(CommandClient* client) noexcept {
+        command_client_ = client;
+    }
+    CommandClient* command_client() noexcept { return command_client_; }
+
+    // Sends COMMAND_REQUEST to (peer_source_id, peer_boot_id). Returns a
+    // local id (!= 0) that names the outcome across command_outcome() /
+    // NodeRx::CommandHandled, or 0 (no command client attached, no cfg.send,
+    // no free slot, or a request encode_command_request() rejects).
+    std::uint32_t command(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                          std::uint16_t action_id, std::uint16_t action_version,
+                          const std::uint8_t* parameters,
+                          std::size_t parameters_size) noexcept;
+
+    // The command event the most recent receive() / tick() produced, and its
+    // full detail on Completed (status / error_code / message / result --
+    // message / result view the same buffer ReceivedMessage::payload does,
+    // valid only until the next receive()).
+    const CommandOutcome& command_outcome() const noexcept {
+        return last_command_outcome_;
+    }
+
+    // ---- STATUS (opt-in, docs/commands.md section 5) -----------------------
+    // Periodically builds and sends a v1 STATUS from counters the node
+    // already tracks: receiver().stats(), frames_tx() (below), and --
+    // once attached -- commands()'s replay count. Spontaneous, like the wire
+    // format itself -- no result, no correlation. Best-effort, not exact:
+    // frames_rx / reassembly_completed both read receiver().stats().completed
+    // (a REASSEMBLED LOGICAL message, the closest counter this layer keeps to
+    // "a frame"), and frames_tx only counts sends through send() / send_with()
+    // -- the bootstrap traffic (HELLO, SUBSCRIBE, COMMAND_REQUEST and their
+    // early-path replies) is not in it. telemetry_dropped is not tracked
+    // separately yet and reads 0. v2 (per-topic TopicStatusRecord) is not
+    // built yet -- only v1.
+    //
+    // period_ms == 0 disables it (the default, and what enable_status(0)
+    // returns to). tick() sends one whenever at least period_ms has passed
+    // since the last -- call tick() more often than period_ms for a timely
+    // report, the same "cadence bounds how late it's noticed" rule as the
+    // session watchdog. The first report goes out one period after
+    // enable_status(), not immediately.
+    void enable_status(std::uint32_t period_ms) noexcept;
+    bool status_enabled() const noexcept { return status_period_ms_ != 0U; }
+
+    // Logical messages sent through send() / send_with() since construction
+    // (see the STATUS note above for what this does not count).
+    std::uint64_t frames_tx() const noexcept { return frames_tx_; }
+
     // ---- discovery: consumer side (opt-in) --------------------------------
     // Attach a catalogue for the node to keep current from MANIFEST_DATA. Once
     // set, receive() ingests every MANIFEST_DATA frame into it (returning
@@ -456,6 +552,15 @@ private:
                          std::uint64_t now_ms) noexcept;
     void serve_unsubscribe(const Header& request, ByteView payload) noexcept;
     void drain_subscription_renewals(std::uint64_t now_ms) noexcept;
+    void serve_command(const Header& request, ByteView payload) noexcept;
+    void emit_command_result(const Header& request, std::uint16_t action_id,
+                             std::uint16_t action_version,
+                             const NodeActionOutcome& outcome,
+                             std::size_t slot) noexcept;
+    void emit_command_reject(const Header& request, std::uint16_t action_id,
+                             std::uint16_t action_version, ResultStatus status,
+                             ResultError error) noexcept;
+    void emit_status(std::uint64_t now_ms) noexcept;
 
     NodeConfig cfg_;
     std::uint8_t* rx_buffer_;
@@ -481,6 +586,17 @@ private:
     SubscriptionTable* subscriptions_;        // nullptr until enable_subscriptions()
     SubscriptionClient* subscription_client_;  // nullptr until enable_subscription_client()
     SubscriptionEvent last_subscription_event_;
+
+    DedupCache* commands_;         // nullptr until enable_commands()
+    NodeActionFn on_command_;
+    void* on_command_ctx_;
+    CommandClient* command_client_;  // nullptr until enable_command_client()
+    CommandOutcome last_command_outcome_;
+
+    std::uint64_t frames_tx_;
+    std::uint32_t status_period_ms_;  // 0 == disabled
+    std::uint64_t status_last_ms_;
+    std::uint64_t status_started_ms_;
 
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;

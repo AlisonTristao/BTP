@@ -33,6 +33,15 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       subscriptions_(nullptr),
       subscription_client_(nullptr),
       last_subscription_event_(SubscriptionEvent::None),
+      commands_(nullptr),
+      on_command_(nullptr),
+      on_command_ctx_(nullptr),
+      command_client_(nullptr),
+      last_command_outcome_(),
+      frames_tx_(0U),
+      status_period_ms_(0U),
+      status_last_ms_(0U),
+      status_started_ms_(0U),
       learn_catalog_(nullptr),
       on_sample_(nullptr),
       on_sample_ctx_(nullptr),
@@ -71,9 +80,11 @@ bool Node::send_with(MessageType type, std::uint16_t object_id,
     if (cfg_.send == nullptr) return false;
     const LogicalMessage message{type, object_id, timestamp_us,
                                  {payload, size}};
-    return endpoint_.send_logical(message, cfg_.transport, cfg_.send,
-                                  cfg_.send_ctx, seal_scratch_,
-                                  seal_scratch_cap_, seal, seal_ctx);
+    const bool ok = endpoint_.send_logical(message, cfg_.transport, cfg_.send,
+                                          cfg_.send_ctx, seal_scratch_,
+                                          seal_scratch_cap_, seal, seal_ctx);
+    if (ok) ++frames_tx_;
+    return ok;
 }
 
 bool Node::send(MessageType type, std::uint16_t object_id,
@@ -261,6 +272,23 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
         return NodeRx::SubscriptionHandled;
     }
 
+    // ----- commands -----
+    if (commands_ != nullptr && on_command_ != nullptr &&
+        out->header.type == MessageType::Command &&
+        out->header.object_id == object_id::kCommandRequest) {
+        serve_command(out->header, out->payload);
+        return NodeRx::CommandServed;
+    }
+    if (command_client_ != nullptr && out->header.type == MessageType::Command &&
+        out->header.object_id == object_id::kCommandResult) {
+        CommandResult result = {};
+        if (decode_command_result(out->payload.data, out->payload.size, &result) ==
+            MessageError::Ok) {
+            last_command_outcome_ = command_client_->on_result(result);
+        }
+        return NodeRx::CommandHandled;
+    }
+
     return NodeRx::Complete;
 }
 
@@ -388,6 +416,188 @@ void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
                                        cfg_.send_ctx, seal_scratch_,
                                        seal_scratch_cap_, cfg_.seal, cfg_.seal_ctx);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+void Node::serve_command(const Header& request, ByteView payload) noexcept {
+    if (commands_ == nullptr || on_command_ == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return;
+    }
+    CommandRequest req = {};
+    if (decode_command_request(payload.data, payload.size, &req) != MessageError::Ok) {
+        return;
+    }
+    // COMMAND_REQUEST has no broadcast form (target_source_id/boot_id are
+    // spec-required non-zero) -- a mismatch means this is not for this node.
+    if (req.target_source_id != cfg_.source_id ||
+        req.target_boot_id != cfg_.boot_id) {
+        return;
+    }
+
+    const DedupKey key{request.source_id, request.boot_id, request.sequence};
+    std::size_t slot = 0U;
+    ByteView stored{};
+    const DedupVerdict verdict =
+        commands_->classify(key, payload.data, payload.size, &slot, &stored);
+
+    switch (verdict) {
+        case DedupVerdict::Fresh: {
+            NodeActionOutcome outcome = {};
+            outcome.status = static_cast<std::uint8_t>(ResultStatus::Success);
+            on_command_(on_command_ctx_, req.action_id, req.action_version,
+                       req.parameters, &outcome);
+            emit_command_result(request, req.action_id, req.action_version, outcome,
+                                slot);
+            break;
+        }
+        case DedupVerdict::DuplicateComplete:
+            // A retransmission of an identity already executed: replay the
+            // exact stored result, do not run the action again.
+            send(MessageType::Command, object_id::kCommandResult, stored.data,
+                stored.size, resolve_now(0U) * 1000ULL);
+            break;
+        case DedupVerdict::DuplicateInFlight:
+            break;  // still executing -- drop, the peer will retry
+        case DedupVerdict::Conflict:
+            emit_command_reject(request, req.action_id, req.action_version,
+                                ResultStatus::Rejected, ResultError::RequestConflict);
+            break;
+        case DedupVerdict::Evicted:
+        case DedupVerdict::CapacityExhausted:
+            emit_command_reject(request, req.action_id, req.action_version,
+                                ResultStatus::Busy, ResultError::CapacityExhausted);
+            break;
+        case DedupVerdict::InvalidArgument:
+            break;  // a null pointer or an oversized request -- drop
+    }
+}
+
+void Node::emit_command_result(const Header& request, std::uint16_t action_id,
+                               std::uint16_t action_version,
+                               const NodeActionOutcome& outcome,
+                               std::size_t slot) noexcept {
+    CommandResult result = {};
+    result.request.request_source_id = request.source_id;
+    result.request.request_boot_id = request.boot_id;
+    result.request.reply_to_sequence = request.sequence;
+    result.action_id = action_id;
+    result.action_version = action_version;
+    result.status = outcome.status;
+    result.error_code = outcome.error_code;
+    if (outcome.message != nullptr) {
+        result.message =
+            ByteView{reinterpret_cast<const std::uint8_t*>(outcome.message),
+                    std::strlen(outcome.message)};
+    }
+    result.result = ByteView{outcome.result_data, outcome.result_size};
+
+    std::size_t written = 0U;
+    if (encode_command_result(result, scratch_buffer_, scratch_capacity_, &written) !=
+        MessageError::Ok) {
+        return;
+    }
+    // Remember the result BEFORE sending -- the action ran exactly once
+    // whether or not this send succeeds; a later retransmission of the same
+    // identity must still find it and replay rather than running again.
+    commands_->record_result(slot, scratch_buffer_, written);
+    send(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
+        resolve_now(0U) * 1000ULL);
+}
+
+void Node::emit_command_reject(const Header& request, std::uint16_t action_id,
+                               std::uint16_t action_version, ResultStatus status,
+                               ResultError error) noexcept {
+    CommandResult result = {};
+    result.request.request_source_id = request.source_id;
+    result.request.request_boot_id = request.boot_id;
+    result.request.reply_to_sequence = request.sequence;
+    result.action_id = action_id;
+    result.action_version = action_version;
+    result.status = static_cast<std::uint8_t>(status);
+    result.error_code = static_cast<std::uint16_t>(error);
+
+    std::size_t written = 0U;
+    if (encode_command_result(result, scratch_buffer_, scratch_capacity_, &written) !=
+        MessageError::Ok) {
+        return;
+    }
+    send(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
+        resolve_now(0U) * 1000ULL);
+}
+
+std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                            std::uint16_t action_id, std::uint16_t action_version,
+                            const std::uint8_t* parameters,
+                            std::size_t parameters_size) noexcept {
+    if (command_client_ == nullptr || cfg_.send == nullptr ||
+        scratch_buffer_ == nullptr) {
+        return 0U;
+    }
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return 0U;
+
+    const std::uint64_t now_ms = resolve_now(0U);
+    std::size_t written = 0U;
+    const std::uint32_t local_id = command_client_->command(
+        peer_source_id, peer_boot_id, action_id, action_version, parameters,
+        parameters_size, cfg_.source_id, cfg_.boot_id, sequence, now_ms,
+        scratch_buffer_, scratch_capacity_, &written);
+    if (local_id == 0U) return 0U;
+
+    const LogicalMessage message{MessageType::Command, object_id::kCommandRequest,
+                                 now_ms * 1000ULL, {scratch_buffer_, written}};
+    // A send failure here is rare and not fatal: the slot stays Pending and
+    // simply times out via expire(), the same fail-safe as any lost frame.
+    endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
+                                   cfg_.send_ctx, seal_scratch_, seal_scratch_cap_,
+                                   cfg_.seal, cfg_.seal_ctx);
+    return local_id;
+}
+
+// ---------------------------------------------------------------------------
+// STATUS
+// ---------------------------------------------------------------------------
+
+void Node::enable_status(std::uint32_t period_ms) noexcept {
+    status_period_ms_ = period_ms;
+    status_started_ms_ = resolve_now(0U);
+    status_last_ms_ = status_started_ms_;
+}
+
+void Node::emit_status(std::uint64_t now_ms) noexcept {
+    if (scratch_buffer_ == nullptr) return;
+
+    const Receiver::Stats rx = receiver_.stats();
+    StatusV1 status = {};
+    status.uptime_us = now_ms >= status_started_ms_
+                           ? (now_ms - status_started_ms_) * 1000ULL
+                           : 0ULL;
+    status.frames_rx = rx.completed;
+    status.frames_tx = frames_tx_;
+    status.crc_errors = static_cast<std::uint64_t>(rx.dropped_crc) +
+                        session_path_dropped_crc_;
+    status.decode_errors = static_cast<std::uint64_t>(rx.dropped_decode) +
+                           session_path_dropped_decode_;
+    status.reassembly_completed = rx.completed;
+    status.reassembly_timeouts = rx.reassembly_timeouts;
+    status.reassembly_rejected = rx.dropped_reassembly;
+    status.frames_dropped =
+        status.crc_errors + status.decode_errors + status.reassembly_rejected;
+    status.command_duplicates =
+        commands_ != nullptr ? commands_->stats().replayed : 0U;
+    status.telemetry_dropped = 0U;  // not tracked separately yet
+
+    std::size_t written = 0U;
+    if (encode_status_v1(status, scratch_buffer_, scratch_capacity_, &written) !=
+        MessageError::Ok) {
+        return;
+    }
+    send(MessageType::Control, object_id::kStatus, scratch_buffer_, written,
+        now_ms * 1000ULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +871,17 @@ SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
         subscription_client_->expire(now_ms);
         drain_subscription_renewals(now_ms);
     }
+    if (command_client_ != nullptr) {
+        for (;;) {
+            const CommandOutcome outcome = command_client_->expire(now_ms);
+            if (outcome.event == CommandEvent::None) break;
+            last_command_outcome_ = outcome;  // the last one wins if several timed out
+        }
+    }
+    if (status_period_ms_ != 0U && now_ms - status_last_ms_ >= status_period_ms_) {
+        emit_status(now_ms);
+        status_last_ms_ = now_ms;
+    }
     if (!session_on_) return SessionEvent::None;
     const SessionOutcome outcome = session_.poll(now_ms);
     last_session_event_ = outcome.event;
@@ -683,6 +904,8 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::InitiatorHandled: return "initiator handled";
         case NodeRx::SubscriptionServed: return "subscription served";
         case NodeRx::SubscriptionHandled: return "subscription handled";
+        case NodeRx::CommandServed: return "command served";
+        case NodeRx::CommandHandled: return "command handled";
         case NodeRx::CatalogUpdated: return "catalog updated";
         case NodeRx::SampleDelivered: return "sample delivered";
         case NodeRx::RequestServed: return "request served";
