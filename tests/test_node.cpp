@@ -745,6 +745,107 @@ void test_publish_named_round_trips() {
     CHECK(!producer.publish_named(0x0999U, &fill_drive_by_name, nullptr, 1ULL));
 }
 
+// ===========================================================================
+// btp::Node -- subscriptions (btp::SubscriptionTable / btp::SubscriptionClient)
+// ===========================================================================
+
+using btp::ClientSubscription;
+using btp::SubscriptionClient;
+using btp::SubscriptionEvent;
+using btp::SubscriptionRecord;
+using btp::SubscriptionTable;
+
+void test_subscribe_grant_publish_cadence_and_unsubscribe() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    btp::StaticCatalog<> served;
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    ClientSubscription client_slots[4];
+    SubscriptionClient client(client_slots, 4);
+    consumer.enable_subscription_client(&client);
+    CHECK(consumer.begin());
+
+    // Consumer subscribes at 10000 mHz (100 ms period), a 1000 ms lease.
+    const std::uint32_t local_id =
+        consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    CHECK(local_id != 0U);
+    CHECK(cons_tx.count() == 1U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(prod_tx.count() == 1U);  // SUBSCRIBE_RESULT
+    CHECK(table.due(0x0101U, 0U));  // due right away, before any publish
+
+    CHECK(consumer.subscription_event() == SubscriptionEvent::None);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SubscriptionHandled);
+    CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);
+
+    // Producer publishes once due(), then the cadence follows the granted rate.
+    CHECK(producer.publish(0x0101U, &fill_drive, nullptr, 5ULL));
+    table.note_published(0x0101U, 0U);
+    CHECK(!table.due(0x0101U, 99U));
+    CHECK(table.due(0x0101U, 100U));
+
+    // Unsubscribe: the consumer sends UNSUBSCRIBE, the producer drops it.
+    prod_tx.clear();
+    cons_tx.clear();
+    CHECK(consumer.unsubscribe(local_id));
+    CHECK(cons_tx.count() == 1U);
+    CHECK(deliver(producer, cons_tx, 200U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(!table.due(0x0101U, 300U));
+
+    // The id is spent -- unsubscribing it again fails.
+    CHECK(!consumer.unsubscribe(local_id));
+}
+
+void test_subscribe_renews_before_the_lease_runs_out() {
+    Sink prod_tx;
+    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    btp::StaticCatalog<> served;
+    served.add_topic(0x0101U, 2U, "drive_status", kDriveFields);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    producer.begin();
+
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    ClientSubscription client_slots[4];
+    SubscriptionClient client(client_slots, 4);
+    consumer.enable_subscription_client(&client);
+    consumer.begin();
+
+    // A 1000 ms lease -- the renewal margin is 20%, so due at t=800.
+    CHECK(consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U) != 0U);
+    ReceivedMessage msg{};
+    deliver(producer, cons_tx, 0U, &msg);
+    deliver(consumer, prod_tx, 0U, &msg);
+    CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);
+
+    cons_tx.clear();
+    consumer.tick(799U);
+    CHECK(cons_tx.count() == 0U);  // not due yet
+    consumer.tick(800U);
+    CHECK(cons_tx.count() == 1U);  // tick() renewed on its own -- a fresh SUBSCRIBE
+
+    prod_tx.clear();
+    CHECK(deliver(producer, cons_tx, 800U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(deliver(consumer, prod_tx, 800U, &msg) == NodeRx::SubscriptionHandled);
+    CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);  // still alive
+}
+
 }  // namespace
 
 int main() {
@@ -766,6 +867,9 @@ int main() {
 
     test_static_node_owns_its_catalog();
     test_publish_named_round_trips();
+
+    test_subscribe_grant_publish_cadence_and_unsubscribe();
+    test_subscribe_renews_before_the_lease_runs_out();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

@@ -30,6 +30,9 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       session_path_dropped_decode_(0U),
       initiator_(),
       last_initiator_event_(InitiatorEvent::None),
+      subscriptions_(nullptr),
+      subscription_client_(nullptr),
+      last_subscription_event_(SubscriptionEvent::None),
       learn_catalog_(nullptr),
       on_sample_(nullptr),
       on_sample_ctx_(nullptr),
@@ -101,7 +104,7 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
     if (!session_on_ && !initiator_live) {
         return finish(receiver_.submit(datagram, size, now_ms, rx_buffer_,
                                        rx_capacity_, out),
-                      out);
+                      out, now_ms);
     }
 
     // A session (either direction) needs the DecodedFrame btp::Receiver keeps
@@ -138,7 +141,7 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
     if (!session_on_) {
         return finish(
             receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out),
-            out);
+            out, now_ms);
     }
 
     std::uint8_t reply[kSessionMaxReplySize];
@@ -176,10 +179,12 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
     }
 
     return finish(
-        receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out), out);
+        receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out), out,
+        now_ms);
 }
 
-NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept {
+NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
+                    std::uint64_t now_ms) noexcept {
     switch (outcome) {
         case ReceiveOutcome::Complete:
             break;
@@ -234,7 +239,155 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept {
         return NodeRx::SampleDelivered;
     }
 
+    // ----- subscriptions the node manages itself -----
+    if (subscriptions_ != nullptr && out->header.type == MessageType::Control &&
+        out->header.object_id == object_id::kSubscribe) {
+        serve_subscribe(out->header, out->payload, now_ms);
+        return NodeRx::SubscriptionServed;
+    }
+    if (subscriptions_ != nullptr && out->header.type == MessageType::Control &&
+        out->header.object_id == object_id::kUnsubscribe) {
+        serve_unsubscribe(out->header, out->payload);
+        return NodeRx::SubscriptionServed;
+    }
+    if (subscription_client_ != nullptr && out->header.type == MessageType::Control &&
+        out->header.object_id == object_id::kSubscribeResult) {
+        SubscribeResult result = {};
+        if (decode_subscribe_result(out->payload.data, out->payload.size, &result) ==
+            MessageError::Ok) {
+            last_subscription_event_ =
+                subscription_client_->on_result(result, now_ms).event;
+        }
+        return NodeRx::SubscriptionHandled;
+    }
+
     return NodeRx::Complete;
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions
+// ---------------------------------------------------------------------------
+
+void Node::serve_subscribe(const Header& request, ByteView payload,
+                           std::uint64_t now_ms) noexcept {
+    if (subscriptions_ == nullptr || serve_catalog_ == nullptr) return;
+    Subscribe req = {};
+    if (decode_subscribe(payload.data, payload.size, &req) != MessageError::Ok) {
+        return;
+    }
+    // SUBSCRIBE has no broadcast form (target_source_id/boot_id are spec-
+    // required non-zero) -- a mismatch means this frame is not addressed to
+    // this node at all.
+    if (req.target_source_id != cfg_.source_id ||
+        req.target_boot_id != cfg_.boot_id) {
+        return;
+    }
+
+    SubscribeResult result = {};
+    subscriptions_->handle_subscribe(*serve_catalog_, request, req, now_ms, &result);
+
+    std::uint8_t buffer[40];
+    std::size_t written = 0U;
+    if (encode_subscribe_result(result, buffer, sizeof(buffer), &written) !=
+        MessageError::Ok) {
+        return;
+    }
+    send(MessageType::Control, object_id::kSubscribeResult, buffer, written,
+        resolve_now(0U) * 1000ULL);
+}
+
+void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
+    if (subscriptions_ == nullptr) return;
+    Unsubscribe req = {};
+    if (decode_unsubscribe(payload.data, payload.size, &req) != MessageError::Ok) {
+        return;
+    }
+    if (req.target_source_id != cfg_.source_id ||
+        req.target_boot_id != cfg_.boot_id) {
+        return;
+    }
+
+    ControlResult result = {};
+    subscriptions_->handle_unsubscribe(request, req, &result);
+
+    std::uint8_t buffer[24];
+    std::size_t written = 0U;
+    if (encode_unsubscribe_result(result, buffer, sizeof(buffer), &written) !=
+        MessageError::Ok) {
+        return;
+    }
+    send(MessageType::Control, object_id::kUnsubscribeResult, buffer, written,
+        resolve_now(0U) * 1000ULL);
+}
+
+std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                              std::uint16_t topic_id, std::uint32_t rate_millihz,
+                              std::uint32_t lease_ms) noexcept {
+    if (subscription_client_ == nullptr || cfg_.send == nullptr) return 0U;
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return 0U;
+
+    const std::uint64_t now_ms = resolve_now(0U);
+    std::uint8_t buffer[24];
+    std::size_t written = 0U;
+    const std::uint32_t local_id = subscription_client_->subscribe(
+        peer_source_id, peer_boot_id, topic_id, rate_millihz, lease_ms,
+        cfg_.source_id, cfg_.boot_id, sequence, now_ms, buffer, sizeof(buffer),
+        &written);
+    if (local_id == 0U) return 0U;
+
+    const LogicalMessage message{MessageType::Control, object_id::kSubscribe,
+                                 now_ms * 1000ULL, {buffer, written}};
+    // A send failure here is rare (the frame fit at subscribe() time) and not
+    // fatal: the slot stays Pending and simply times out via expire(), the
+    // same fail-safe as any other lost frame.
+    endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
+                                   cfg_.send_ctx, seal_scratch_, seal_scratch_cap_,
+                                   cfg_.seal, cfg_.seal_ctx);
+    return local_id;
+}
+
+bool Node::unsubscribe(std::uint32_t local_id) noexcept {
+    if (subscription_client_ == nullptr || cfg_.send == nullptr) return false;
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return false;
+
+    std::uint8_t buffer[16];
+    std::size_t written = 0U;
+    if (!subscription_client_->unsubscribe(local_id, cfg_.source_id, cfg_.boot_id,
+                                           sequence, buffer, sizeof(buffer),
+                                           &written)) {
+        return false;
+    }
+    const LogicalMessage message{MessageType::Control, object_id::kUnsubscribe,
+                                 resolve_now(0U) * 1000ULL, {buffer, written}};
+    return endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
+                                          cfg_.send, cfg_.send_ctx, seal_scratch_,
+                                          seal_scratch_cap_, cfg_.seal,
+                                          cfg_.seal_ctx);
+}
+
+void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
+    if (subscription_client_ == nullptr || cfg_.send == nullptr) return;
+    for (;;) {
+        const std::uint32_t local_id = subscription_client_->next_renewal_due(now_ms);
+        if (local_id == 0U) break;
+
+        std::uint32_t sequence = 0U;
+        if (!endpoint_.reserve_sequence(&sequence)) break;
+        std::uint8_t buffer[24];
+        std::size_t written = 0U;
+        if (!subscription_client_->renew(local_id, cfg_.source_id, cfg_.boot_id,
+                                         sequence, now_ms, buffer, sizeof(buffer),
+                                         &written)) {
+            break;  // should not happen -- next_renewal_due() just found it Active
+        }
+        const LogicalMessage message{MessageType::Control, object_id::kSubscribe,
+                                     now_ms * 1000ULL, {buffer, written}};
+        endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
+                                       cfg_.send_ctx, seal_scratch_,
+                                       seal_scratch_cap_, cfg_.seal, cfg_.seal_ctx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +656,11 @@ SessionEvent Node::tick() noexcept { return tick(resolve_now(0U)); }
 SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
     receiver_.expire(now_ms);
     last_initiator_event_ = initiator_.poll(now_ms).event;
+    if (subscriptions_ != nullptr) subscriptions_->expire(now_ms);
+    if (subscription_client_ != nullptr) {
+        subscription_client_->expire(now_ms);
+        drain_subscription_renewals(now_ms);
+    }
     if (!session_on_) return SessionEvent::None;
     const SessionOutcome outcome = session_.poll(now_ms);
     last_session_event_ = outcome.event;
@@ -523,6 +681,8 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::Pending: return "pending";
         case NodeRx::SessionHandled: return "session handled";
         case NodeRx::InitiatorHandled: return "initiator handled";
+        case NodeRx::SubscriptionServed: return "subscription served";
+        case NodeRx::SubscriptionHandled: return "subscription handled";
         case NodeRx::CatalogUpdated: return "catalog updated";
         case NodeRx::SampleDelivered: return "sample delivered";
         case NodeRx::RequestServed: return "request served";

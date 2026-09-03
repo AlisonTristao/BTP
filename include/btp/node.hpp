@@ -53,6 +53,7 @@
 #include "btp/fragmentation.hpp"  // ReassemblySlot, ReassemblyStorage
 #include "btp/receiver.hpp"   // Receiver, ReceivedMessage, ReceiveOutcome
 #include "btp/session.hpp"    // Session, Hello, SessionEvent, kSessionMaxReplySize
+#include "btp/subscription.hpp"  // SubscriptionTable, SubscriptionClient
 #include "btp/telemetry.hpp"  // SampleReader
 
 #include <cstddef>
@@ -145,6 +146,10 @@ enum class NodeRx : std::uint8_t {
                      // replied (if a reply was due) through `send`. See session_event().
     InitiatorHandled,  // connect()'s HELLO_RESULT arrived (accepted or rejected),
                        // or the connection watchdog timed out. See initiator_event().
+    SubscriptionServed,  // a SUBSCRIBE / UNSUBSCRIBE against this node's own
+                         // subscriptions() table -- the node already replied.
+    SubscriptionHandled,  // a SUBSCRIBE_RESULT for a subscribe()/renew() this
+                          // node holds. See subscription_event().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
     SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
     RequestServed,   // a MANIFEST_REQUEST -- the node built and sent MANIFEST_DATA.
@@ -326,6 +331,43 @@ public:
     // The initiator event the most recent receive() / tick() produced.
     InitiatorEvent initiator_event() const noexcept { return last_initiator_event_; }
 
+    // ---- subscriptions (opt-in, docs/commands.md section 4) ---------------
+    // btp::SubscriptionTable / btp::SubscriptionClient (subscription.hpp) are
+    // the two halves, state above the wire same as the session layer; the
+    // storage stays the caller's (attach it, don't build it into the node --
+    // a hub aggregating subscriptions across peers needs its own shape here).
+
+    // RESPONDER: grant subscriptions on THIS node's served catalogue (needs
+    // serve_catalog() too -- the table validates against it). nullptr detaches.
+    void enable_subscriptions(SubscriptionTable* table) noexcept {
+        subscriptions_ = table;
+    }
+    SubscriptionTable* subscriptions() noexcept { return subscriptions_; }
+    const SubscriptionTable* subscriptions() const noexcept { return subscriptions_; }
+
+    // INITIATOR: hold subscriptions on a peer. nullptr detaches.
+    void enable_subscription_client(SubscriptionClient* client) noexcept {
+        subscription_client_ = client;
+    }
+    SubscriptionClient* subscription_client() noexcept { return subscription_client_; }
+
+    // Sends SUBSCRIBE to (peer_source_id, peer_boot_id) for one topic; tick()
+    // renews it on its own before the granted lease runs out. Returns a
+    // local id (!= 0) that names it across renewals -- pass to unsubscribe()
+    // -- or 0 (no subscription client attached, no cfg.send, no free slot).
+    std::uint32_t subscribe(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                            std::uint16_t topic_id, std::uint32_t rate_millihz,
+                            std::uint32_t lease_ms) noexcept;
+
+    // Sends UNSUBSCRIBE for a subscribe()-returned id and drops it locally
+    // right away (does not wait for UNSUBSCRIBE_RESULT).
+    bool unsubscribe(std::uint32_t local_id) noexcept;
+
+    // The subscription event the most recent receive() / tick() produced.
+    SubscriptionEvent subscription_event() const noexcept {
+        return last_subscription_event_;
+    }
+
     // ---- discovery: consumer side (opt-in) --------------------------------
     // Attach a catalogue for the node to keep current from MANIFEST_DATA. Once
     // set, receive() ingests every MANIFEST_DATA frame into it (returning
@@ -404,11 +446,16 @@ public:
 
 private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
-    NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept;
+    NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out,
+                 std::uint64_t now_ms) noexcept;
     void serve_manifest(const Header& request, ByteView payload) noexcept;
     void emit_manifest(const RequestRef& reply_to, std::uint8_t status,
                        std::uint8_t flags, std::uint16_t error_code,
                        bool with_topics) noexcept;
+    void serve_subscribe(const Header& request, ByteView payload,
+                         std::uint64_t now_ms) noexcept;
+    void serve_unsubscribe(const Header& request, ByteView payload) noexcept;
+    void drain_subscription_renewals(std::uint64_t now_ms) noexcept;
 
     NodeConfig cfg_;
     std::uint8_t* rx_buffer_;
@@ -430,6 +477,10 @@ private:
 
     SessionInitiator initiator_;  // Idle until connect()
     InitiatorEvent last_initiator_event_;
+
+    SubscriptionTable* subscriptions_;        // nullptr until enable_subscriptions()
+    SubscriptionClient* subscription_client_;  // nullptr until enable_subscription_client()
+    SubscriptionEvent last_subscription_event_;
 
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;

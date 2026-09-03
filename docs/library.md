@@ -247,6 +247,25 @@ above the wire, with the storage still the caller's (fixed-capacity on a
 microcontroller). `btp::Node` attaches one and keeps it current.
 [§16.4](#164-the-schema-catalogue-btpcatalog) covers it.
 
+### `btp::subscription`
+
+`btp::subscription` contains:
+
+```text
+subscription.cpp
+```
+
+It links `btp::catalog` (topic validation, `max_rate_millihz`) and, like it,
+needs no mbedtls and is always built. Same guarantees as the rest of the
+library.
+
+It is `btp::SubscriptionTable` / `btp::SubscriptionClient`: `SUBSCRIBE` /
+`SUBSCRIBE_RESULT` / `UNSUBSCRIBE` ([Commands and discovery
+§4](commands.md#4-subscriptions)) as state above the wire, the responder /
+initiator split mirroring the session layer. `btp::Node` attaches them
+opt-in, storage still the caller's. [§16.6](#166-subscriptions-btpsubscriptiontable-btpsubscriptionclient)
+covers it.
+
 ### `btp::aead`
 
 `btp::aead` contains the optional authenticated-encryption implementation.
@@ -2693,6 +2712,8 @@ from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
 | `Pending` | a fragment stored or a duplicate absorbed — nothing yet |
 | `SessionHandled` | a `HELLO` / `SESSION_CLOSE` / session timeout — the node already replied; see `session_event()` |
 | `InitiatorHandled` | `connect()`'s `HELLO_RESULT` arrived, or the connection watchdog timed out; see `initiator_event()` ([§16.3](#163-the-session-initiator-connect)) |
+| `SubscriptionServed` | a `SUBSCRIBE` / `UNSUBSCRIBE` against `subscriptions()` — the node already replied ([§16.6](#166-subscriptions-btpsubscriptiontable-btpsubscriptionclient)) |
+| `SubscriptionHandled` | a `SUBSCRIBE_RESULT` for a `subscribe()` / renewal this node holds; see `subscription_event()` |
 | `Ignored` | a frame arrived with a session enabled but not yet `Active` |
 | `DroppedFrame` | `btp::decode` / reassembly rejected it — the breakdown is in `stats()` |
 
@@ -2849,18 +2870,78 @@ schema — `fill` writes the values in schema order — and sends the `TELEMETRY
 frame; the `serve_catalog` / `publish` scratch is the node's fourth buffer
 (`StaticNode`'s `ScratchBytes`, default 512).
 
-### 16.5 What stays out
+### 16.6 Subscriptions (`btp::SubscriptionTable` / `btp::SubscriptionClient`)
+
+`SUBSCRIBE` / `SUBSCRIBE_RESULT` / `UNSUBSCRIBE` ([Commands and discovery
+§4](commands.md#4-subscriptions)) get the same responder / initiator split as
+the session layer, in `btp/subscription.hpp` (target `btp::subscription`):
+`btp::SubscriptionTable` grants subscriptions on a producer's own topics,
+`btp::SubscriptionClient` holds and renews the ones a consumer wants from a
+peer. Both are state above the wire (§11), with the storage the caller's --
+attached to the node, not owned by it, since a hub aggregating subscriptions
+across several source peers needs its own shape here.
+
+```cpp
+// producer:
+btp::SubscriptionRecord slots[8];
+btp::SubscriptionTable table(slots, 8);
+node.enable_subscriptions(&table);          // needs serve_catalog() too
+
+// per tick():
+table.expire(now_ms);
+if (table.due(0x0101, now_ms) && node.publish(0x0101, &fill, nullptr, ts_us)) {
+    table.note_published(0x0101, now_ms);
+}
+```
+
+`receive()` answers a `SUBSCRIBE` against the served catalogue --
+`NodeRx::SubscriptionServed` -- checking the topic is subscribable and
+clamping `effective_rate_millihz` to its `max_rate_millihz` (0 = uncapped); a
+second `SUBSCRIBE` from the same requester for the same topic is a RENEWAL
+(commands.md §4.3) and reuses the `subscription_id`. `table.due(topic_id,
+now_ms)` is true once any of that topic's *local* subscribers is due by its
+own granted rate -- the fastest one sets the cadence, and one `publish()`
+satisfies every subscriber of that topic at once; `note_published()` resets
+it. `UNSUBSCRIBE` answers the same way; removing an absent subscription is
+still success (commands.md §4.4).
+
+```cpp
+// consumer:
+btp::ClientSubscription slots[4];
+btp::SubscriptionClient client(slots, 4);
+node.enable_subscription_client(&client);
+
+const std::uint32_t id = node.subscribe(robot_source_id, robot_boot_id,
+                                        0x0101, 10000 /*mHz*/, 60000 /*ms*/);
+// ... node.receive() feeds SUBSCRIBE_RESULT to it (NodeRx::SubscriptionHandled,
+//     subscription_event() one of Granted / Rejected), tick() renews the
+//     grant at 80% of its lease on its own (another SUBSCRIBE, commands.md
+//     §4.3) ...
+node.unsubscribe(id);
+```
+
+`node.subscribe()` sends `SUBSCRIBE` and returns a local id stable across
+renewals (0 on failure); `tick()` renews an `Active` subscription before its
+lease runs out and expires one whose `SUBSCRIBE_RESULT` never arrived, with no
+retry budget beyond that cadence -- the same "no retry budget" stance as
+`connect()` ([§16.3](#163-the-session-initiator-connect)). `node.unsubscribe()`
+sends `UNSUBSCRIBE` and drops the local state right away, without waiting for
+`UNSUBSCRIBE_RESULT`.
+
+### 16.7 What stays out
 
 Everything §11 keeps above the wire, unchanged: **routing policy** (`receive()`
 hands back a message it does not manage; relay-or-drop is the caller's one
-switch), the subscription aggregator, the priority scheduler, and **key
-derivation** (the body of your `seal` / `open`). §16.3's `connect()` is only
-the `HELLO` → `HELLO_RESULT` handshake -- `MANIFEST_REQUEST`, a subscription,
-a command's correlation are still the caller's, once `connected()` is true.
-Plus, in this first cut: **serial byte-stream framing** — a `Node` speaks
-packet transports (`receive()` wants one whole datagram), and a single
-encoded frame must fit the ESP-NOW ceiling, so native COBS and large-Serial
-frames are a later addition.
+switch), the **hub subscription aggregator** (one subscription upstream per N
+downstream subscribers of the same source + topic -- §16.6 is the per-node
+piece; a hub layers its aggregation on top via `Node::subscriptions()`), the
+priority scheduler, and **key derivation** (the body of your `seal` / `open`).
+§16.3's `connect()` is only the `HELLO` → `HELLO_RESULT` handshake --
+`MANIFEST_REQUEST` and a command's correlation are still the caller's, once
+`connected()` is true. Plus, in this first cut: **serial byte-stream framing**
+— a `Node` speaks packet transports (`receive()` wants one whole datagram),
+and a single encoded frame must fit the ESP-NOW ceiling, so native COBS and
+large-Serial frames are a later addition.
 
 ---
 
