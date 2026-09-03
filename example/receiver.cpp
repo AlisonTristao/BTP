@@ -27,6 +27,11 @@
 //                                                TerminalDelivered); a
 //                                                node.send(kTerminalIn, ...)
 //                                                below is what prompted it
+//   cfg.seal / cfg.open = AES-128-GCM (btp/aead.hpp), kDemoAeadKey below --
+//                                                every one of the above,
+//                                                sealed / opened the same
+//                                                way -- SAME key as
+//                                                sender.cpp, AEAD is symmetric
 //
 // sender.cpp is the other end. The link here is faked -- send_frame() just
 // drops the bytes and link_poll() always delivers nothing, so receive()
@@ -43,9 +48,17 @@
 // consumer does that on its own schedule, whether or not a frame happened
 // to land that same instant.
 
+#include <btp/aead.hpp>
 #include <btp/node.hpp>
 
 namespace {
+    // Must be the SAME 16 bytes as sender.cpp's kDemoAeadKey -- AEAD is
+    // symmetric, both peers seal/open with one shared key. A real
+    // deployment provisions each pair's key out of band, never like this.
+    const std::uint8_t kDemoAeadKey[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    };
     // Built once and handed to node.begin() below -- this peer's side of
     // the handshake: who it is, what it can take, how long it waits before
     // giving up on a quiet peer.
@@ -94,6 +107,26 @@ namespace {
                              const btp::Header& /*header*/,
                              btp::ByteView /*payload*/, std::uint64_t /*now_ms*/) {}
 
+    // EndpointSealFn / NodeOpenFn -- see sender.cpp's seal_message() /
+    // open_message() for the full comment; identical here, same key.
+    bool seal_message(void* context, const btp::Header& header,
+                      std::uint16_t payload_size, const std::uint8_t* plaintext,
+                      std::uint8_t* out) {
+        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
+                               btp::kAesGcmKeySize};
+        return btp::aead_seal(key, header, payload_size, plaintext, out) ==
+               btp::AeadError::Ok;
+    }
+
+    bool open_message(void* context, const btp::Header& header,
+                      std::uint16_t sealed_size, const std::uint8_t* sealed,
+                      std::uint8_t* out_plaintext) {
+        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
+                               btp::kAesGcmKeySize};
+        return btp::aead_open(key, header, sealed_size, sealed,
+                              out_plaintext) == btp::AeadError::Ok;
+    }
+
     // The node hands every finished frame here. Fake: a real node transmits it.
     // Needed now that this node also connect()s / subscribe()s out.
     bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
@@ -113,6 +146,10 @@ int main() {
     cfg.transport = btp::TransportProfile::EspNow;
     cfg.send      = &send_frame;
     cfg.terminal  = &handle_terminal_out;
+    cfg.seal      = &seal_message;
+    cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);  // void* ctx never modifies it
+    cfg.open      = &open_message;
+    cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);
 
     btp::StaticNode<> node(cfg);
     node.learn_catalog(&on_drive_status);  // this node's own catalogue, learned from the wire

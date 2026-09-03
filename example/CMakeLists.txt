@@ -10,20 +10,24 @@
 # transmit anything.
 #
 # It pulls btp::codec / btp::messages / btp::telemetry / btp::endpoint /
-# btp::receiver / btp::session / btp::node straight from the sources one level
-# up. BTP's own CMakeLists switches its tests and install rules off when it is
-# not the top-level project, so this stays lean.
+# btp::receiver / btp::session / btp::node / btp::aead straight from the
+# sources one level up. BTP's own CMakeLists switches its tests and install
+# rules off when it is not the top-level project, so this stays lean.
 
 cmake_minimum_required(VERSION 3.16)
 project(btp_examples LANGUAGES CXX)
 
-set(BTP_ENABLE_AEAD OFF CACHE BOOL "" FORCE)   # the examples use only the plaintext path
+# sender.cpp / receiver.cpp seal / open every frame (btp::aead, AES-128-GCM)
+# -- BTP_ENABLE_AEAD ON pulls in mbedtls (fetched at configure time unless
+# BTP_USE_SYSTEM_MBEDTLS or a parent project already provides mbedcrypto --
+# see the top-level CMakeLists.txt).
+set(BTP_ENABLE_AEAD ON CACHE BOOL "" FORCE)
 add_subdirectory(.. "${CMAKE_CURRENT_BINARY_DIR}/btp")
 
 # The btp::Node pair -- the friendly facade.
 foreach(example sender receiver)
     add_executable(${example} ${example}.cpp)
-    target_link_libraries(${example} PRIVATE btp::node btp::telemetry)
+    target_link_libraries(${example} PRIVATE btp::node btp::telemetry btp::aead)
     target_compile_features(${example} PRIVATE cxx_std_11)
 endforeach()
 

@@ -23,6 +23,11 @@
 //                                                TERMINAL_IN (NodeRx::
 //                                                TerminalDelivered), which
 //                                                answers with TERMINAL_OUT
+//   cfg.seal / cfg.open = AES-128-GCM (btp/aead.hpp), kDemoAeadKey below --
+//                                                every one of the above,
+//                                                sealed / opened the same
+//                                                way, ENCRYPTED set on its
+//                                                own from cfg.seal != nullptr
 //
 // receiver.cpp is the other end: it connect()s in, subscribes to the topic,
 // and learns the schema from the wire, never from a shared header. The link
@@ -40,9 +45,18 @@
 // publishes telemetry and sweeps its watchdog on its own schedule, whether
 // or not a SUBSCRIBE happened to land that same instant.
 
+#include <btp/aead.hpp>
 #include <btp/node.hpp>
 
 namespace {
+    // Both peers need the SAME key -- sender.cpp and receiver.cpp hardcode
+    // the same 16 bytes here for the demo. A real deployment provisions
+    // each pair's key out of band (radio pairing, a manifest, a factory
+    // step) -- never like this, and never the same key for every pair.
+    const std::uint8_t kDemoAeadKey[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    };
     // Built once and handed to node.begin() below -- this peer's side of
     // the handshake: who it is, what it can take, how long it waits before
     // giving up on a quiet peer.
@@ -105,6 +119,30 @@ namespace {
                  payload.data, payload.size, now_ms * 1000ULL);
     }
 
+    // EndpointSealFn -- `context` is kDemoAeadKey. CIPHER_ID on `header` is
+    // already AesGcm (fragmenting_flags() never sets those bits, and AesGcm
+    // is 0), so aead_seal() dispatches there on its own; the KEY is the only
+    // thing living here, never inside BTP itself.
+    bool seal_message(void* context, const btp::Header& header,
+                      std::uint16_t payload_size, const std::uint8_t* plaintext,
+                      std::uint8_t* out) {
+        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
+                               btp::kAesGcmKeySize};
+        return btp::aead_seal(key, header, payload_size, plaintext, out) ==
+               btp::AeadError::Ok;
+    }
+
+    // NodeOpenFn -- the mirror; same key, dispatched by whatever CIPHER_ID
+    // the sender actually sealed with.
+    bool open_message(void* context, const btp::Header& header,
+                      std::uint16_t sealed_size, const std::uint8_t* sealed,
+                      std::uint8_t* out_plaintext) {
+        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
+                               btp::kAesGcmKeySize};
+        return btp::aead_open(key, header, sealed_size, sealed,
+                              out_plaintext) == btp::AeadError::Ok;
+    }
+
     // The node hands every finished frame here. Fake: a real node transmits it.
     bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
         return true;
@@ -118,12 +156,17 @@ namespace {
 
 int main() {
     btp::NodeConfig cfg = {};
-    cfg.source_id = 0x00CAFE01U;   // this robot    (non-zero)
-    cfg.boot_id   = 0x0000B001U;   // new each boot (non-zero)
+    cfg.source_id = 0x00CAFE01U;                    // this robot    (non-zero)
+    // attention: to use criptography, you need count the boots
+    cfg.boot_id   = 0x0000B001U;                    // new each boot (non-zero)
     cfg.transport = btp::TransportProfile::EspNow;
     cfg.send      = &send_frame;
-    cfg.command   = &handle_command;    // StaticNode<> already owns the dedup cache
+    cfg.command   = &handle_command;                // StaticNode<> already owns the dedup cache
     cfg.terminal  = &handle_terminal_in;
+    cfg.seal      = &seal_message;
+    cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);  // void* ctx never modifies it
+    cfg.open      = &open_message;
+    cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);
 
     btp::StaticNode<> node(cfg);
 
