@@ -45,6 +45,11 @@ constexpr std::uint32_t kSenderId = 0x00CAFE01U;
 constexpr std::uint32_t kSenderBoot = 0x0000B001U;
 constexpr std::uint32_t kPeerId = 0x00B0B0FEU;
 constexpr std::uint32_t kPeerBoot = 0x0000C0DEU;
+// A second requester identity, for reply_seal_for() tests: distinct from
+// kPeerId so a picker callback keyed on request_header.source_id can be
+// checked against both "the known alt requester" and "everyone else".
+constexpr std::uint32_t kAltPeerId = 0x00A17E51U;
+constexpr std::uint32_t kAltPeerBoot = 0x0000A17EU;
 
 // Captures every frame a Node hands to its send callback.
 struct Sink {
@@ -83,6 +88,30 @@ bool fake_open(void*, const btp::Header&, std::uint16_t sealed_size,
         out_plaintext[i] = static_cast<std::uint8_t>(sealed[i] ^ 0x5AU);
     }
     return true;
+}
+
+// A SECOND, distinguishable stand-in key (0x3C / tag 0x5B, vs. fake_seal's
+// 0x5A / 0xA5) -- reply_seal_for() tests use the tag byte alone to tell
+// which of the two actually sealed a given outgoing frame, the same way a
+// real test would distinguish RadioSeal::seal from RadioSeal::seal_e.
+bool fake_seal_b(void*, const btp::Header&, std::uint16_t n,
+                 const std::uint8_t* plaintext, std::uint8_t* out) {
+    for (std::uint16_t i = 0; i < n; ++i) {
+        out[i] = static_cast<std::uint8_t>(plaintext[i] ^ 0x3CU);
+    }
+    for (std::size_t i = 0; i < btp::kEndpointAeadTagSize; ++i) {
+        out[n + i] = 0x5BU;
+    }
+    return true;
+}
+
+bool frame_tagged_b(const std::vector<std::uint8_t>& frame) {
+    // header | sealed_payload (ciphertext + 16-octet AEAD tag) | crc32 (4
+    // octets) -- the last tag octet sits right before the 4-octet CRC
+    // trailer, whichever fake_seal wrote it.
+    constexpr std::size_t kCrcSize = 4U;
+    if (frame.size() < kCrcSize + 1U) return false;
+    return frame[frame.size() - kCrcSize - 1U] == 0x5BU;
 }
 
 std::vector<std::uint8_t> make_payload(std::size_t n, std::uint8_t seed) {
@@ -808,6 +837,65 @@ void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     CHECK(!consumer.unsubscribe(local_id));
 }
 
+// cfg.reply_seal, when set, picks the seal for one automatic reply from the
+// ORIGINAL request's header -- the hub case docs/library.md notes as node.hpp's
+// escape hatch: kAltPeerId gets fake_seal_b, anyone else (kPeerId here) falls
+// back to fake_seal explicitly, the same "known channel vs. default" shape a
+// dual-key responder needs. cfg.seal itself is left null, so a frame reaching
+// the wire unsealed (the hook not firing at all) would fail_open's tag check
+// below instead of silently passing.
+void pick_seal_by_alt_requester(void*, const btp::Header& request,
+                                btp::EndpointSealFn* out_seal,
+                                void** out_seal_ctx) {
+    *out_seal = (request.source_id == kAltPeerId) ? &fake_seal_b : &fake_seal;
+    *out_seal_ctx = nullptr;
+}
+
+void test_reply_seal_hook_picks_seal_per_subscribe_requester() {
+    Sink prod_tx;
+    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.reply_seal = &pick_seal_by_alt_requester;
+    TestNode producer(cfg);
+    btp::StaticCatalog<> served;
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.begin());
+
+    // kPeerId: not the alt requester -- falls back to fake_seal (the "A" tag).
+    Sink cons_tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    ClientSubscription cons_slots[4];
+    SubscriptionClient cons_client(cons_slots, 4);
+    consumer.enable_subscription_client(&cons_client);
+    CHECK(consumer.begin());
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    CHECK(cons_tx.count() == 1U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(prod_tx.count() == 1U);
+    CHECK(!frame_tagged_b(prod_tx.frames[0]));
+
+    // kAltPeerId: the reply_seal callback recognises it -- fake_seal_b (the
+    // "B" tag), a DIFFERENT key from the one above, for the exact same node.
+    prod_tx.clear();
+    Sink alt_tx;
+    TestNode alt_consumer(base_config(kAltPeerId, kAltPeerBoot, &alt_tx));
+    ClientSubscription alt_slots[4];
+    SubscriptionClient alt_client(alt_slots, 4);
+    alt_consumer.enable_subscription_client(&alt_client);
+    CHECK(alt_consumer.begin());
+    alt_consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    CHECK(alt_tx.count() == 1U);
+    CHECK(deliver(producer, alt_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(prod_tx.count() == 1U);
+    CHECK(frame_tagged_b(prod_tx.frames[0]));
+}
+
 // on_publish() + publish_subscribed_topics() together do what the test above
 // does by hand (due() then publish_named() then note_published(), per topic)
 // -- same producer/consumer setup, but the producer registers its fill once
@@ -1234,6 +1322,66 @@ void test_command_round_trip_and_dedup_replay() {
     CHECK(resp_tx.count() == 1U);
 }
 
+// Same cfg.reply_seal mechanism as the subscribe test above, exercised on
+// BOTH command reply paths: a Fresh COMMAND_REQUEST (emit_command_result)
+// and a retransmission's DuplicateComplete replay -- reply_seal_for() is
+// called separately by each, and both must still pick by the ORIGINAL
+// request's source_id, not by which code path answered it.
+void test_reply_seal_hook_picks_seal_per_command_requester() {
+    Sink resp_tx;
+    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
+    cfg.reply_seal = &pick_seal_by_alt_requester;
+    TestNode responder(cfg);
+    DedupSlot dedup_slots[4];
+    std::uint8_t dedup_bytes[4][64];
+    DedupStorage dedup_storage[4];
+    for (std::size_t i = 0; i < 4; ++i) dedup_storage[i] = {dedup_bytes[i], 64};
+    DedupRequester dedup_requesters[2];
+    DedupCache dedup(dedup_slots, dedup_storage, 4, dedup_requesters, 2);
+    ActionCalls calls = {};
+    responder.enable_commands(&dedup, &echo_action, &calls);
+    CHECK(responder.begin());
+
+    // kPeerId: falls back to fake_seal (the "A" tag) on the Fresh reply...
+    Sink init_tx;
+    TestNode initiator(base_config(kPeerId, kPeerBoot, &init_tx));
+    ClientCommand cmd_slots[2];
+    CommandClient client(cmd_slots, 2);
+    initiator.enable_command_client(&client);
+    CHECK(initiator.begin());
+    const std::uint8_t params[3] = {1, 2, 3};
+    initiator.command(kSenderId, kSenderBoot, 42U, 1U, params, sizeof(params));
+    CHECK(init_tx.count() == 1U);
+    ReceivedMessage msg{};
+    CHECK(deliver(responder, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(resp_tx.count() == 1U);
+    CHECK(!frame_tagged_b(resp_tx.frames[0]));
+
+    // ...and still the "A" tag on the DuplicateComplete replay of the exact
+    // same retransmitted request.
+    resp_tx.clear();
+    CHECK(deliver(responder, init_tx, 100U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);  // replayed, not re-run
+    CHECK(resp_tx.count() == 1U);
+    CHECK(!frame_tagged_b(resp_tx.frames[0]));
+
+    // kAltPeerId: a DIFFERENT requester, on a Fresh request of its own --
+    // the "B" tag, same responder node, same enable_commands() wiring.
+    Sink alt_tx;
+    TestNode alt_initiator(base_config(kAltPeerId, kAltPeerBoot, &alt_tx));
+    ClientCommand alt_cmd_slots[2];
+    CommandClient alt_client(alt_cmd_slots, 2);
+    alt_initiator.enable_command_client(&alt_client);
+    CHECK(alt_initiator.begin());
+    alt_initiator.command(kSenderId, kSenderBoot, 43U, 1U, params, sizeof(params));
+    CHECK(alt_tx.count() == 1U);
+    resp_tx.clear();
+    CHECK(deliver(responder, alt_tx, 200U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 2);
+    CHECK(resp_tx.count() == 1U);
+    CHECK(frame_tagged_b(resp_tx.frames[0]));
+}
+
 void test_command_times_out_without_a_reply() {
     Sink tx;
     TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
@@ -1485,6 +1633,7 @@ int main() {
 
     test_command_round_trip_and_dedup_replay();
     test_command_times_out_without_a_reply();
+    test_reply_seal_hook_picks_seal_per_command_requester();
     test_on_terminal_delivers_and_falls_back_to_complete();
     test_node_config_wires_on_terminal();
     test_static_node_bundles_commands();
@@ -1495,6 +1644,7 @@ int main() {
 
     test_subscribe_grant_publish_cadence_and_unsubscribe();
     test_subscribe_renews_before_the_lease_runs_out();
+    test_reply_seal_hook_picks_seal_per_subscribe_requester();
     test_publish_subscribed_topics_walks_registered_topics();
     test_topic_with_fill_registers_publish_in_one_call();
     test_static_node_grants_subscriptions_with_no_setup_call();

@@ -110,6 +110,18 @@ bool Node::send(MessageType type, std::uint16_t object_id,
                      cfg_.seal_ctx);
 }
 
+void Node::reply_seal_for(const Header& request, EndpointSealFn* out_seal,
+                          void** out_seal_ctx) const noexcept {
+    if (cfg_.reply_seal != nullptr) {
+        *out_seal = nullptr;
+        *out_seal_ctx = nullptr;
+        cfg_.reply_seal(cfg_.reply_seal_ctx, request, out_seal, out_seal_ctx);
+        return;
+    }
+    *out_seal = cfg_.seal;
+    *out_seal_ctx = cfg_.seal_ctx;
+}
+
 // ---------------------------------------------------------------------------
 // Receive
 // ---------------------------------------------------------------------------
@@ -342,8 +354,11 @@ void Node::serve_subscribe(const Header& request, ByteView payload,
         MessageError::Ok) {
         return;
     }
-    send(MessageType::Control, object_id::kSubscribeResult, buffer, written,
-        resolve_now(0U) * 1000ULL);
+    EndpointSealFn seal = nullptr;
+    void* seal_ctx = nullptr;
+    reply_seal_for(request, &seal, &seal_ctx);
+    send_with(MessageType::Control, object_id::kSubscribeResult, buffer, written,
+             resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
@@ -366,8 +381,11 @@ void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
         MessageError::Ok) {
         return;
     }
-    send(MessageType::Control, object_id::kUnsubscribeResult, buffer, written,
-        resolve_now(0U) * 1000ULL);
+    EndpointSealFn seal = nullptr;
+    void* seal_ctx = nullptr;
+    reply_seal_for(request, &seal, &seal_ctx);
+    send_with(MessageType::Control, object_id::kUnsubscribeResult, buffer, written,
+             resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
@@ -476,12 +494,16 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
                                 slot);
             break;
         }
-        case DedupVerdict::DuplicateComplete:
+        case DedupVerdict::DuplicateComplete: {
             // A retransmission of an identity already executed: replay the
             // exact stored result, do not run the action again.
-            send(MessageType::Command, object_id::kCommandResult, stored.data,
-                stored.size, resolve_now(0U) * 1000ULL);
+            EndpointSealFn seal = nullptr;
+            void* seal_ctx = nullptr;
+            reply_seal_for(request, &seal, &seal_ctx);
+            send_with(MessageType::Command, object_id::kCommandResult, stored.data,
+                     stored.size, resolve_now(0U) * 1000ULL, seal, seal_ctx);
             break;
+        }
         case DedupVerdict::DuplicateInFlight:
             break;  // still executing -- drop, the peer will retry
         case DedupVerdict::Conflict:
@@ -526,8 +548,11 @@ void Node::emit_command_result(const Header& request, std::uint16_t action_id,
     // whether or not this send succeeds; a later retransmission of the same
     // identity must still find it and replay rather than running again.
     commands_->record_result(slot, scratch_buffer_, written);
-    send(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
-        resolve_now(0U) * 1000ULL);
+    EndpointSealFn seal = nullptr;
+    void* seal_ctx = nullptr;
+    reply_seal_for(request, &seal, &seal_ctx);
+    send_with(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
+             resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 void Node::emit_command_reject(const Header& request, std::uint16_t action_id,
@@ -547,8 +572,11 @@ void Node::emit_command_reject(const Header& request, std::uint16_t action_id,
         MessageError::Ok) {
         return;
     }
-    send(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
-        resolve_now(0U) * 1000ULL);
+    EndpointSealFn seal = nullptr;
+    void* seal_ctx = nullptr;
+    reply_seal_for(request, &seal, &seal_ctx);
+    send_with(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
+             resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
@@ -668,9 +696,9 @@ void Node::serve_catalog(Catalog* catalog, std::uint8_t role,
     }
 }
 
-void Node::emit_manifest(const RequestRef& reply_to, std::uint8_t status,
-                         std::uint8_t flags, std::uint16_t error_code,
-                         bool with_topics) noexcept {
+void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
+                         std::uint8_t status, std::uint8_t flags,
+                         std::uint16_t error_code, bool with_topics) noexcept {
     if (serve_catalog_ == nullptr || cfg_.send == nullptr ||
         scratch_buffer_ == nullptr) {
         return;
@@ -709,8 +737,11 @@ void Node::emit_manifest(const RequestRef& reply_to, std::uint8_t status,
     std::size_t written = 0U;
     if (writer.finish(&written) != MessageError::Ok) return;
 
-    send(MessageType::Control, object_id::kManifestData, scratch_buffer_,
-         written, resolve_now(0U) * 1000ULL);
+    EndpointSealFn seal = nullptr;
+    void* seal_ctx = nullptr;
+    reply_seal_for(request, &seal, &seal_ctx);
+    send_with(MessageType::Control, object_id::kManifestData, scratch_buffer_,
+             written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
@@ -732,7 +763,7 @@ void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
     reply_to.reply_to_sequence = request.sequence;
 
     if (req.target_boot_id != 0U && req.target_boot_id != cfg_.boot_id) {
-        emit_manifest(reply_to,
+        emit_manifest(request, reply_to,
                       static_cast<std::uint8_t>(ResultStatus::Rejected),
                       0U,
                       static_cast<std::uint16_t>(ResultError::StaleTargetBoot),
@@ -741,12 +772,12 @@ void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
     }
     if (req.known_config_revision != 0U &&
         req.known_config_revision == serve_catalog_->config_revision()) {
-        emit_manifest(reply_to,
+        emit_manifest(request, reply_to,
                       static_cast<std::uint8_t>(ResultStatus::Success),
                       kManifestNotModified, 0U, /*with_topics=*/false);
         return;
     }
-    emit_manifest(reply_to, static_cast<std::uint8_t>(ResultStatus::Success),
+    emit_manifest(request, reply_to, static_cast<std::uint8_t>(ResultStatus::Success),
                   kManifestCatalogComplete, 0U, /*with_topics=*/true);
 }
 
@@ -755,7 +786,11 @@ bool Node::announce_catalog() noexcept {
         scratch_buffer_ == nullptr) {
         return false;
     }
-    emit_manifest(RequestRef{}, static_cast<std::uint8_t>(ResultStatus::Success),
+    // Unsolicited: no request to reply to, so nothing to classify by either
+    // -- reply_seal_for() falls through to cfg.seal/cfg.seal_ctx for a
+    // default-constructed Header exactly as it would for any other source_id
+    // a reply_seal callback does not recognise.
+    emit_manifest(Header{}, RequestRef{}, static_cast<std::uint8_t>(ResultStatus::Success),
                   kManifestCatalogComplete, 0U, /*with_topics=*/true);
     return true;
 }
