@@ -2,87 +2,35 @@
 //
 // The consumer half, with btp::Node. Run ./build/sender first.
 //
-// This node has NEVER seen the producer's schema. It reads the MANIFEST_DATA
-// frame, builds a btp::FieldSpec table from it (btp::field_spec() per
-// FieldRecord), caches it, and then decodes the TELEMETRY sample against the
-// cached schema. Nothing about topic 0x0101 is hard-coded here.
+// This node has NEVER seen the producer's schema. node.learn_catalog() points
+// it at a btp::Catalog; from then on the node ingests every MANIFEST_DATA into
+// it, and -- with node.on_sample() set -- decodes each TELEMETRY sample against
+// the learned schema. Nothing about topic 0x0101 is written here.
 //
-// by_hand_receiver.cpp is the wire-level walkthrough of a single sample.
+// by_hand_receiver.cpp walks the same decode step by step at the wire level.
 
-#include <btp/messages.hpp>
 #include <btp/node.hpp>
-#include <btp/telemetry.hpp>
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 
 namespace {
 
-// The consumer's schema cache -- one topic is enough for the example. A real
-// consumer keeps a fixed-capacity table keyed by (topic_id, schema_version)
-// and refreshes it when config_revision moves (docs/library.md 11.2).
-struct SchemaCache {
-    bool valid;
-    std::uint16_t topic_id;
-    std::uint16_t schema_version;
-    btp::FieldSpec fields[16];
-    char names[16][24];
-    std::size_t field_count;
-};
-
-void ingest_manifest(SchemaCache* cache, const btp::ByteView& payload) {
-    btp::ManifestReader reader(payload.data, payload.size);
-    btp::ManifestHeader header = {};
-    if (reader.header(&header) != btp::MessageError::Ok) {
-        std::printf("  manifest header rejected\n");
-        return;
-    }
-
-    btp::TopicRecord topic = {};
-    btp::ByteView field_bytes = {};
-    while (reader.next_topic(&topic, &field_bytes) == btp::ManifestStep::Item) {
-        btp::FieldRecordReader fields(field_bytes, topic.field_count);
-        btp::FieldRecord record = {};
-        btp::ByteView enum_bytes = {};
-        std::size_t n = 0;
-        while (n < 16 &&
-               fields.next(&record, &enum_bytes) == btp::ManifestStep::Item) {
-            cache->fields[n] = btp::field_spec(record);
-            const std::size_t len = record.name.size < sizeof(cache->names[0])
-                                        ? record.name.size
-                                        : sizeof(cache->names[0]) - 1;
-            std::memcpy(cache->names[n], record.name.data, len);
-            cache->names[n][len] = '\0';
-            ++n;
-        }
-        cache->valid = true;
-        cache->topic_id = topic.topic_id;
-        cache->schema_version = topic.schema_version;
-        cache->field_count = n;
-        std::printf("  learned topic 0x%04X \"", topic.topic_id);
-        std::fwrite(topic.name.data, 1, topic.name.size, stdout);
-        std::printf("\": %lu fields, schema_version %u\n",
-                    static_cast<unsigned long>(n), topic.schema_version);
-    }
-    reader.finish();
-}
-
-void print_sample(const SchemaCache& cache, const btp::ByteView& payload) {
-    btp::SampleReader reader(payload.data, payload.size, cache.fields,
-                             cache.field_count, btp::kEncodingPackedLe);
-    if (reader.schema_version() != cache.schema_version) {
-        std::printf("  sample is schema_version %u, cached schema is %u\n",
-                    reader.schema_version(), cache.schema_version);
-        return;
-    }
-    std::printf("  {");
+// The node calls this for every TELEMETRY sample of a topic in the catalogue --
+// values already converted (raw * scale + offset), matched to the field names
+// the manifest carried.
+void print_sample(void* /*ctx*/, const btp::CatalogTopic& topic,
+                  btp::SampleReader& reader) {
+    std::printf("TELEMETRY topic 0x%04X \"%s\":\n  {", topic.topic_id,
+                topic.name);
     btp::SampleValue v = {};
     int i = 0;
     while (reader.next(&v) == btp::SampleStep::Item) {
-        std::printf("%s\n    \"%s\": ", (i != 0) ? "," : "",
-                    cache.names[v.field->order]);
+        const char* name = topic.field_names != nullptr
+                               ? topic.field_names[v.field->order]
+                               : "";
+        std::printf("%s\n    \"%s\": ", (i != 0) ? "," : "", name);
         if (v.is_null) {
             std::printf("null");
         } else {
@@ -91,10 +39,6 @@ void print_sample(const SchemaCache& cache, const btp::ByteView& payload) {
         ++i;
     }
     std::printf("\n  }\n");
-    if (reader.finish() != btp::MessageError::Ok) {
-        std::printf("  (sample rejected: %s)\n",
-                    btp::message_error_string(reader.error()));
-    }
 }
 
 }  // namespace
@@ -113,13 +57,14 @@ int main() {
     // no `send`: this node only receives.
 
     btp::StaticNode<> node(config);
+    btp::StaticCatalog<> catalog;   // the node fills this from MANIFEST_DATA
+    node.learn_catalog(&catalog);
+    node.on_sample(&print_sample, nullptr);
     if (!node.begin()) {
         std::printf("node configuration rejected\n");
         std::fclose(f);
         return 1;
     }
-
-    SchemaCache cache = {};
 
     // Each [uint16 length][frame] block in the file is "one datagram arrived".
     std::uint8_t length[2];
@@ -134,23 +79,24 @@ int main() {
         }
 
         btp::ReceivedMessage msg = {};
-        if (node.receive(datagram, size, /*now_ms=*/0, &msg) !=
-            btp::NodeRx::Complete) {
-            continue;
-        }
-
-        if (msg.header.type == btp::MessageType::Control &&
-            msg.header.object_id == btp::object_id::kManifestData) {
-            std::printf("MANIFEST_DATA from 0x%08lX:\n",
-                        static_cast<unsigned long>(msg.header.source_id));
-            ingest_manifest(&cache, msg.payload);
-        } else if (msg.header.type == btp::MessageType::Telemetry) {
-            std::printf("TELEMETRY topic 0x%04X:\n", msg.header.object_id);
-            if (cache.valid && msg.header.object_id == cache.topic_id) {
-                print_sample(cache, msg.payload);
-            } else {
-                std::printf("  no schema for this topic yet\n");
-            }
+        const btp::NodeRx rx = node.receive(datagram, size, /*now_ms=*/0, &msg);
+        switch (rx) {
+            case btp::NodeRx::CatalogUpdated:
+                std::printf("learned %lu topic(s) from MANIFEST_DATA "
+                            "(config_revision %lu)\n",
+                            static_cast<unsigned long>(catalog.topic_count()),
+                            static_cast<unsigned long>(catalog.config_revision()));
+                break;
+            case btp::NodeRx::SampleDelivered:
+                break;  // print_sample already ran
+            case btp::NodeRx::Ignored:
+                std::printf("(a sample arrived before its manifest)\n");
+                break;
+            case btp::NodeRx::Pending:
+                break;  // a fragment -- more to come
+            default:
+                std::printf("frame: %s\n", btp::node_rx_string(rx));
+                break;
         }
     }
 

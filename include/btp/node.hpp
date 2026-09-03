@@ -45,11 +45,13 @@
 //
 // This is library 2.11.0 territory.
 
+#include "btp/catalog.hpp"    // Catalog, CatalogTopic (brings btp/telemetry.hpp, btp/messages.hpp)
 #include "btp/codec.hpp"      // Header, ByteView, MessageType, TransportProfile, kFlagEncrypted
 #include "btp/endpoint.hpp"   // Endpoint, EndpointSealFn, LogicalMessage, kEndpointAeadTagSize
 #include "btp/fragmentation.hpp"  // ReassemblySlot, ReassemblyStorage
 #include "btp/receiver.hpp"   // Receiver, ReceivedMessage, ReceiveOutcome
 #include "btp/session.hpp"    // Session, Hello, SessionEvent, kSessionMaxReplySize
+#include "btp/telemetry.hpp"  // SampleReader
 
 #include <cstddef>
 #include <cstdint>
@@ -78,6 +80,14 @@ using NodeOpenFn = bool (*)(void* ctx, const Header& header,
                             std::uint16_t sealed_size,
                             const std::uint8_t* sealed,
                             std::uint8_t* out_plaintext);
+
+// Called by receive() for one TELEMETRY sample of a topic the attached learn
+// catalog knows. `reader` is positioned at the first field; pull values with
+// reader.next() -- raw*scale+offset already applied -- and match them to
+// topic.fields[i] / catalog.field_name(topic, i). Do not keep `reader` past the
+// callback.
+using NodeSampleFn = void (*)(void* ctx, const CatalogTopic& topic,
+                              SampleReader& reader);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -117,14 +127,16 @@ struct NodeConfig {
 // session_event().
 
 enum class NodeRx : std::uint8_t {
-    Complete,        // *out is a whole logical message (plaintext if `open` ran) -- route it.
+    Complete,        // *out is a whole logical message the node did not consume -- route it.
     Pending,         // a fragment was stored or a duplicate absorbed -- nothing yet.
     SessionHandled,  // a HELLO / SESSION_CLOSE / session timeout -- the node already
                      // replied (if a reply was due) through `send`. See session_event().
-    Ignored,         // a frame arrived with a session enabled but not yet Active
-                     // (no HELLO yet), or the session is Idle. Dropped, not routed.
-    DroppedFrame,    // btp::decode / reassembly rejected it (CRC, bad dialect,
-                     // conflict, ...). Counts are in receiver().stats().
+    CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
+    SampleDelivered, // a TELEMETRY sample -- the node decoded it and called on_sample.
+    Ignored,         // a frame the node would manage but cannot yet: a session not
+                     // Active, or a sample for a topic the catalog has not learned.
+    DroppedFrame,    // btp::decode / reassembly / a malformed managed payload rejected it.
+                     // Counts are in receiver().stats().
 };
 
 const char* node_rx_string(NodeRx rx) noexcept;
@@ -253,6 +265,28 @@ public:
     // The session event the most recent receive() / tick() produced.
     SessionEvent session_event() const noexcept { return last_session_event_; }
 
+    // ---- discovery: consumer side (opt-in) --------------------------------
+    // Attach a catalogue for the node to keep current from MANIFEST_DATA. Once
+    // set, receive() ingests every MANIFEST_DATA frame into it (returning
+    // NodeRx::CatalogUpdated) instead of handing it back, and -- with on_sample
+    // set -- decodes TELEMETRY samples against the learned schema. `catalog`
+    // stays the caller's; pass nullptr to detach.
+    void learn_catalog(Catalog* catalog) noexcept;
+    const Catalog* learned_catalog() const noexcept { return learn_catalog_; }
+
+    // Send a MANIFEST_REQUEST. `known_config_revision` 0 asks for the complete
+    // manifest; a non-zero value the responder already published gets a
+    // NOT_MODIFIED reply (which ingest() treats as "keep what I have").
+    // target_source_id 0 is a full-catalog request. Needs `cfg.send`.
+    bool request_manifest(std::uint32_t target_source_id,
+                          std::uint32_t target_boot_id,
+                          std::uint32_t known_config_revision) noexcept;
+
+    // Called by receive() for a TELEMETRY sample of a topic the learn catalogue
+    // knows. Without this, a TELEMETRY frame comes back as NodeRx::Complete for
+    // the caller to decode itself.
+    void on_sample(NodeSampleFn callback, void* ctx) noexcept;
+
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -292,6 +326,10 @@ private:
     SessionEvent last_session_event_;
     std::uint32_t session_path_dropped_crc_;
     std::uint32_t session_path_dropped_decode_;
+
+    Catalog* learn_catalog_;
+    NodeSampleFn on_sample_;
+    void* on_sample_ctx_;
 };
 
 // ---------------------------------------------------------------------------

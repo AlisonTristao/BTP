@@ -2,6 +2,7 @@
 #include <btp/codec.hpp>
 #include <btp/endpoint.hpp>
 #include <btp/fragmentation.hpp>
+#include <btp/catalog.hpp>
 #include <btp/messages.hpp>
 #include <btp/node.hpp>
 #include <btp/receiver.hpp>
@@ -257,6 +258,37 @@ void setup() {
     (void)node.endpoint();
     (void)node.receiver();
     (void)btp::node_rx_string(btp::NodeRx::Complete);
+
+    // btp::catalog compiles and links on the embedded target: the schema
+    // catalogue a producer fills or a consumer learns from MANIFEST_DATA,
+    // pools owned by btp::StaticCatalog, no allocation, no exceptions.
+    static const btp::FieldRecord catalog_fields[] = {
+        {1U, 0U, static_cast<std::uint8_t>(btp::WireType::Float32), 0U, 1U, 0U,
+         1.0, 0.0, 0U, {nullptr, 0U}, {nullptr, 0U}, {nullptr, 0U}},
+        {2U, 1U, static_cast<std::uint8_t>(btp::WireType::Int16), 0U, 1U, 0U,
+         0.01, 0.0, 0U, {nullptr, 0U}, {nullptr, 0U}, {nullptr, 0U}},
+    };
+    static btp::StaticCatalog<2U, 8U, 128U> catalog;
+    (void)catalog.valid();
+    catalog.set_config_revision(3U);
+    (void)catalog.add_topic(0x0101U, 1U, btp::TelemetryEncoding::PackedLe, true,
+                            0U, "drive", catalog_fields, 2U);
+    (void)catalog.topic(0x0101U);
+    (void)catalog.topic_count();
+
+    static btp::ManifestWriter catalog_writer(message_buffer,
+                                              sizeof(message_buffer));
+    btp::ManifestHeader catalog_header = {};
+    catalog_header.manifest_format_version = 1U;
+    catalog_header.topic_count = 1U;
+    (void)catalog_writer.begin(catalog_header);
+    (void)catalog.write_topics(&catalog_writer);
+    (void)catalog_writer.finish(&message_written);
+    (void)catalog.ingest(message_buffer, message_written);
+
+    node.learn_catalog(&catalog);
+    node.on_sample(nullptr, nullptr);
+    (void)node.request_manifest(0x11111111U, 0x22222222U, 0U);
 }
 
 void loop() {}

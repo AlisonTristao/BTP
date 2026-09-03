@@ -7,8 +7,10 @@
 
 #include "btp/node.hpp"
 
+#include "btp/catalog.hpp"
 #include "btp/codec.hpp"
 #include "btp/messages.hpp"
+#include "btp/telemetry.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -351,6 +353,158 @@ void test_stats() {
     CHECK(receiver.stats().rx.completed == 1U);
 }
 
+// --- discovery: consumer learns a schema from MANIFEST_DATA -----------------
+
+btp::FieldRecord frecord(std::uint16_t id, std::uint16_t order,
+                         btp::WireType type, std::uint8_t flags, double scale,
+                         const char* name) {
+    btp::FieldRecord f = {};
+    f.field_id = id;
+    f.order = order;
+    f.type = static_cast<std::uint8_t>(type);
+    f.flags = flags;
+    f.element_count = 1U;
+    f.scale = scale;
+    f.name = btp::ByteView{reinterpret_cast<const std::uint8_t*>(name),
+                           std::strlen(name)};
+    return f;
+}
+
+// Serialise a one-topic catalogue into a MANIFEST_DATA payload.
+std::size_t manifest_of(const btp::Catalog& cat, std::uint8_t* out,
+                        std::size_t cap) {
+    btp::ManifestHeader h = {};
+    h.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    h.manifest_format_version = 1U;
+    h.config_revision = cat.config_revision();
+    h.described_source_id = kSenderId;
+    h.described_boot_id = kSenderBoot;
+    h.source_role = static_cast<std::uint8_t>(Role::Producer);
+    h.source_flags = btp::kSourceOnline;
+    h.catalog_count = 1U;
+    h.topic_count = static_cast<std::uint16_t>(cat.topic_count());
+    h.source_name = btp::ByteView{reinterpret_cast<const std::uint8_t*>("robot"),
+                                  5U};
+    btp::ManifestWriter w(out, cap);
+    if (w.begin(h) != btp::MessageError::Ok) return 0U;
+    if (cat.write_topics(&w) != btp::MessageError::Ok) return 0U;
+    std::size_t n = 0U;
+    return w.finish(&n) == btp::MessageError::Ok ? n : 0U;
+}
+
+struct SampleCapture {
+    int calls;
+    double values[8];
+    const char* names[8];
+    int count;
+};
+
+void capture_sample(void* ctx, const btp::CatalogTopic& topic,
+                    btp::SampleReader& reader) {
+    SampleCapture* c = static_cast<SampleCapture*>(ctx);
+    ++c->calls;
+    c->count = 0;
+    btp::SampleValue v = {};
+    while (reader.next(&v) == btp::SampleStep::Item && c->count < 8) {
+        c->values[c->count] = v.is_null ? -999.0 : v.f64(0);
+        c->names[c->count] = topic.field_names != nullptr
+                                 ? topic.field_names[v.field->order]
+                                 : "";
+        ++c->count;
+    }
+}
+
+void test_catalog_discovery() {
+    static const btp::FieldRecord kDrive[] = {
+        frecord(1, 0, btp::WireType::Float32, 0U, 1.0, "left_rpm"),
+        frecord(2, 1, btp::WireType::Uint16, 0U, 0.001, "battery_v"),
+        frecord(3, 2, btp::WireType::Int16, btp::kFieldNullable, 0.1, "temp_c"),
+    };
+    btp::StaticCatalog<> producer_cat;
+    producer_cat.set_config_revision(9U);
+    CHECK(producer_cat.add_topic(0x0101U, 2U, btp::TelemetryEncoding::PackedLe,
+                                 true, 0U, "drive_status", kDrive, 3U) ==
+          btp::MessageError::Ok);
+
+    std::uint8_t manifest[512];
+    const std::size_t manifest_n =
+        manifest_of(producer_cat, manifest, sizeof(manifest));
+    CHECK(manifest_n != 0U);
+
+    // A sender node just relays the raw MANIFEST_DATA / TELEMETRY frames.
+    Sink tx;
+    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    sender.begin();
+
+    Sink rx_out;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &rx_out));
+    btp::StaticCatalog<> learned;
+    consumer.learn_catalog(&learned);
+    SampleCapture capture = {};
+    consumer.on_sample(&capture_sample, &capture);
+    consumer.begin();
+
+    // A TELEMETRY sample arriving before the manifest: no schema yet.
+    std::uint8_t body[32];
+    btp::SampleWriter w0(body, sizeof(body), producer_cat.topic(0x0101U)->fields,
+                         3U);
+    w0.begin(2U);
+    w0.put_f64(1400.0);
+    w0.put_f64(3.71);
+    w0.put_null();
+    std::size_t body_n = 0U;
+    CHECK(w0.finish(&body_n) == btp::MessageError::Ok);
+
+    tx.clear();
+    sender.send(MessageType::Telemetry, 0x0101U, body, body_n, 1ULL);
+    ReceivedMessage msg{};
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::Ignored);
+    CHECK(capture.calls == 0);
+
+    // The manifest: the consumer learns the schema.
+    tx.clear();
+    sender.send(MessageType::Control, btp::object_id::kManifestData, manifest,
+                manifest_n, 2ULL);
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(learned.config_revision() == 9U);
+    const btp::CatalogTopic* t = learned.topic(0x0101U);
+    CHECK(t != nullptr);
+    CHECK(t->field_count == 3U);
+    CHECK(t->fields[1].scale == 0.001);
+
+    // Now the same sample decodes against the learned schema.
+    tx.clear();
+    sender.send(MessageType::Telemetry, 0x0101U, body, body_n, 3ULL);
+    CHECK(deliver(consumer, tx, 0U, &msg) == NodeRx::SampleDelivered);
+    CHECK(capture.calls == 1);
+    CHECK(capture.count == 3);
+    CHECK(capture.values[0] == 1400.0);
+    CHECK(capture.values[1] > 3.70 && capture.values[1] < 3.72);  // 3710 * 0.001
+    CHECK(capture.values[2] == -999.0);                           // null temp_c
+    CHECK(std::strcmp(capture.names[1], "battery_v") == 0);
+}
+
+// --- consumer sends MANIFEST_REQUEST ---------------------------------------
+
+void test_request_manifest() {
+    Sink tx;
+    TestNode consumer(base_config(kPeerId, kPeerBoot, &tx));
+    consumer.begin();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, /*known_rev=*/0U));
+    CHECK(tx.count() == 1U);
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
+                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+    CHECK(frame.header.type == MessageType::Control);
+    CHECK(frame.header.object_id == btp::object_id::kManifestRequest);
+    btp::ManifestRequest req{};
+    CHECK(btp::decode_manifest_request(frame.payload.data, frame.payload.size,
+                                       &req) == btp::MessageError::Ok);
+    CHECK(req.target_source_id == kSenderId);
+    CHECK(req.known_config_revision == 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -361,6 +515,8 @@ int main() {
     test_session_handshake();
     test_session_ignores_frame_before_hello();
     test_stats();
+    test_catalog_discovery();
+    test_request_manifest();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

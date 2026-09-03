@@ -22,7 +22,10 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       session_on_(false),
       last_session_event_(SessionEvent::None),
       session_path_dropped_crc_(0U),
-      session_path_dropped_decode_(0U) {}
+      session_path_dropped_decode_(0U),
+      learn_catalog_(nullptr),
+      on_sample_(nullptr),
+      on_sample_ctx_(nullptr) {}
 
 bool Node::begin() noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
@@ -167,7 +170,58 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out) noexcept {
         out->payload =
             ByteView{open_buffer_, out->payload.size - kEndpointAeadTagSize};
     }
+
+    // ----- discovery the node manages itself (consumer side) -----
+    if (learn_catalog_ != nullptr &&
+        out->header.type == MessageType::Control &&
+        out->header.object_id == object_id::kManifestData) {
+        return learn_catalog_->ingest(out->payload.data, out->payload.size) ==
+                       MessageError::Ok
+                   ? NodeRx::CatalogUpdated
+                   : NodeRx::DroppedFrame;
+    }
+    if (learn_catalog_ != nullptr && on_sample_ != nullptr &&
+        out->header.type == MessageType::Telemetry) {
+        const CatalogTopic* topic = learn_catalog_->topic(out->header.object_id);
+        if (topic == nullptr) {
+            return NodeRx::Ignored;  // no schema for this topic yet
+        }
+        SampleReader reader(out->payload.data, out->payload.size, topic->fields,
+                            topic->field_count, topic->encoding);
+        on_sample_(on_sample_ctx_, *topic, reader);
+        return NodeRx::SampleDelivered;
+    }
+
     return NodeRx::Complete;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery: consumer side
+// ---------------------------------------------------------------------------
+
+void Node::learn_catalog(Catalog* catalog) noexcept { learn_catalog_ = catalog; }
+
+void Node::on_sample(NodeSampleFn callback, void* ctx) noexcept {
+    on_sample_ = callback;
+    on_sample_ctx_ = ctx;
+}
+
+bool Node::request_manifest(std::uint32_t target_source_id,
+                            std::uint32_t target_boot_id,
+                            std::uint32_t known_config_revision) noexcept {
+    ManifestRequest request = {};
+    request.target_source_id = target_source_id;
+    request.target_boot_id = target_boot_id;
+    request.known_config_revision = known_config_revision;
+
+    std::uint8_t buffer[16];
+    std::size_t written = 0U;
+    if (encode_manifest_request(request, buffer, sizeof(buffer), &written) !=
+        MessageError::Ok) {
+        return false;
+    }
+    return send(MessageType::Control, object_id::kManifestRequest, buffer,
+                written, resolve_now(0U) * 1000ULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +263,8 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::Complete: return "complete";
         case NodeRx::Pending: return "pending";
         case NodeRx::SessionHandled: return "session handled";
+        case NodeRx::CatalogUpdated: return "catalog updated";
+        case NodeRx::SampleDelivered: return "sample delivered";
         case NodeRx::Ignored: return "ignored";
         case NodeRx::DroppedFrame: return "dropped frame";
     }

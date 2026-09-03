@@ -202,10 +202,33 @@ btp_strict_warnings(btp_receiver)
 set_target_properties(btp_receiver PROPERTIES EXPORT_NAME receiver)
 
 # ---------------------------------------------------------------------------
+# btp::catalog -- the schema catalogue btp::Node keeps current: the TELEMETRY
+# topics a producer exposes, or the ones a consumer learned from a
+# MANIFEST_DATA (docs/commands.md section 3, docs/library.md section 11.2). The
+# ManifestReader walk and the FieldSpec cache, with the storage still the
+# caller's. Links btp::telemetry (FieldSpec, field_spec) which brings
+# btp::messages; NO mbedtls, always built.
+# ---------------------------------------------------------------------------
+
+add_library(btp_catalog src/catalog.cpp)
+add_library(btp::catalog ALIAS btp_catalog)
+
+target_include_directories(
+    btp_catalog
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_catalog PUBLIC cxx_std_11)
+target_link_libraries(btp_catalog PUBLIC btp::telemetry)
+btp_strict_warnings(btp_catalog)
+set_target_properties(btp_catalog PROPERTIES EXPORT_NAME catalog)
+
+# ---------------------------------------------------------------------------
 # btp::node -- the friendly facade (docs/library.md chapter 16): btp::Endpoint,
 # btp::Receiver and (opt-in) btp::Session in one object, sharing one identity,
 # one clock notion and one set of caller-owned buffers, with every external
-# dependency a C function pointer. Adds NO wire field. Links the three layers it
+# dependency a C function pointer. Adds NO wire field. Links the layers it
 # wires; NO mbedtls (seal / open are caller callbacks), so it is always built.
 # ---------------------------------------------------------------------------
 
@@ -219,7 +242,8 @@ target_include_directories(
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_compile_features(btp_node PUBLIC cxx_std_11)
-target_link_libraries(btp_node PUBLIC btp::endpoint btp::receiver btp::session)
+target_link_libraries(btp_node PUBLIC btp::endpoint btp::receiver btp::session
+                                      btp::catalog)
 btp_strict_warnings(btp_node)
 set_target_properties(btp_node PROPERTIES EXPORT_NAME node)
 
@@ -304,7 +328,7 @@ if(BTP_INSTALL)
     include(CMakePackageConfigHelpers)
 
     set(btp_export_targets btp_codec btp_messages btp_telemetry btp_session
-                           btp_endpoint btp_receiver btp_node)
+                           btp_endpoint btp_receiver btp_catalog btp_node)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -425,6 +449,15 @@ if(BTP_BUILD_TESTS)
     target_compile_features(btp_receiver_tests PRIVATE cxx_std_11)
     btp_strict_warnings(btp_receiver_tests)
     add_test(NAME btp_receiver_tests COMMAND btp_receiver_tests)
+
+    # btp::catalog: the schema catalogue is state above btp::messages, not a
+    # wire layout -- the suite fills a Catalog, round-trips it through a real
+    # MANIFEST_DATA (ManifestWriter -> ingest), and checks the topics come back.
+    add_executable(btp_catalog_tests tests/test_catalog.cpp)
+    target_link_libraries(btp_catalog_tests PRIVATE btp::catalog)
+    target_compile_features(btp_catalog_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_catalog_tests)
+    add_test(NAME btp_catalog_tests COMMAND btp_catalog_tests)
 
     # btp::node: the facade is wiring over endpoint + receiver + session, not a
     # wire layout, so it has no vector tree -- the suite drives a Node (often a

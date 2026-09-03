@@ -76,7 +76,7 @@ important when considering memory usage.
 
 ## 1. The headers
 
-The public API is divided into ten headers.
+The public API is divided into eleven headers.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -88,10 +88,11 @@ The public API is divided into ten headers.
 | `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
 | `btp/endpoint.hpp`      | `btp::Endpoint` — identity, sequencing and the transmit pipeline |
 | `btp/receiver.hpp`      | `btp::Receiver` — decode, CRC and reassembly on the receive path |
-| `btp/node.hpp`          | `btp::Node` — endpoint + receiver + session in one object   |
+| `btp/catalog.hpp`       | `btp::Catalog` — the schema catalogue behind `MANIFEST_DATA` |
+| `btp/node.hpp`          | `btp::Node` — endpoint + receiver + session + catalogue in one object |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through eight CMake targets.
+The implementation is exposed through nine CMake targets.
 
 ### `btp::codec`
 
@@ -215,16 +216,36 @@ and opening an encrypted payload, stay the integration's.
 node.cpp
 ```
 
-It links `btp::endpoint`, `btp::receiver` and `btp::session` — the three
-layers it wires together — and, like them, needs no mbedtls and is always
+It links `btp::endpoint`, `btp::receiver`, `btp::session` and `btp::catalog` —
+the layers it wires together — and, like them, needs no mbedtls and is always
 built. Same guarantees as the rest of the library.
 
 It is `btp::Node`: `btp::Endpoint`, `btp::Receiver` and — opt-in —
-`btp::Session` in one object, sharing one identity, one `now_ms` notion and one
-set of caller-owned buffers, with every external dependency (`send`, `clock`,
-`seal`, `open`) a C function pointer in a `NodeConfig`. It adds no wire field
-and holds no new state — the three members stay reachable for a caller that
-wants a layer directly. [The node layer](#16-the-node-layer) covers it.
+`btp::Session` and a `btp::Catalog` in one object, sharing one identity, one
+`now_ms` notion and one set of caller-owned buffers, with every external
+dependency (`send`, `clock`, `seal`, `open`) a C function pointer in a
+`NodeConfig`. It adds no wire field and holds no new state — the members stay
+reachable for a caller that wants a layer directly.
+[The node layer](#16-the-node-layer) covers it.
+
+### `btp::catalog`
+
+`btp::catalog` contains:
+
+```text
+catalog.cpp
+```
+
+It links `btp::telemetry` (for `FieldSpec` / `field_spec`, which brings
+`btp::messages`) and, like it, needs no mbedtls and is always built. Same
+guarantees as the rest of the library.
+
+It is `btp::Catalog`: the TELEMETRY topics a producer exposes, or the ones a
+consumer has learned from a `MANIFEST_DATA` — the `ManifestReader` walk and the
+`FieldSpec` cache that [§11.2](#112-the-manifest-catalogue-is-not-stored) left
+above the wire, with the storage still the caller's (fixed-capacity on a
+microcontroller). `btp::Node` attaches one and keeps it current.
+[§16.4](#164-the-schema-catalogue-btpcatalog) covers it.
 
 ### `btp::aead`
 
@@ -256,18 +277,21 @@ Conceptually:
        +-------------+------+------+
        |             |             |
  btp::messages  btp::endpoint  btp::receiver     btp::aead
-       ^             ^     ^      ^   ^              |
-+------+------+      |     +--+---+   |              v
-|             |      |        |      |         mbedcrypto
-btp::telemetry  btp::session  btp::node
+    ^     ^          ^                 ^             |
+    |     +----+     |     +-----------+             v
+    |          |     |     |                    mbedcrypto
+btp::telemetry btp::session |
+    ^     ^                 |
+    |     +-----------------+---------- btp::node
+btp::catalog ------------------------------/
 ```
 
 `btp::messages`, `btp::endpoint` and `btp::receiver` each link `btp::codec`;
-`btp::telemetry` and `btp::session` each link `btp::messages`; `btp::node`
-links `btp::endpoint`, `btp::receiver` and `btp::session`; `btp::aead`
-additionally links mbedcrypto. Encryption is therefore optional at build time,
-and the basic frame codec requires neither the payload layer nor the
-cryptographic component.
+`btp::telemetry` and `btp::session` each link `btp::messages`; `btp::catalog`
+links `btp::telemetry`; `btp::node` links `btp::endpoint`, `btp::receiver`,
+`btp::session` and `btp::catalog`; `btp::aead` additionally links mbedcrypto.
+Encryption is therefore optional at build time, and the basic frame codec
+requires neither the payload layer nor the cryptographic component.
 
 ---
 
@@ -2562,12 +2586,14 @@ The routing switch on a completed message; **opening** an encrypted payload
 ## 16. The node layer
 
 `btp::Node` (`btp/node.hpp`, target `btp::node`) is the friendly facade:
-`btp::Endpoint`, `btp::Receiver` and — opt-in — `btp::Session` in **one
-object**. Those three layers already un-hand-roll the transmit, receive and
-responder-session mechanisms; what stayed the integration's, and what every
-consumer then wrote once by hand, is the *wiring* between them — give the
-endpoint an identity, size and bind the reassembly storage, thread one `now_ms`
-through both, feed each decoded frame to the session before routing it, answer
+`btp::Endpoint`, `btp::Receiver` and — opt-in — `btp::Session` and a
+`btp::Catalog` in **one object**. Those layers already un-hand-roll the
+transmit, receive, responder-session and schema-discovery mechanisms; what
+stayed the integration's, and what every consumer then wrote once by hand, is
+the *wiring* between them — give the endpoint an identity, size and bind the
+reassembly storage, thread one `now_ms` through both, feed each decoded frame to
+the session before routing it, ingest each `MANIFEST_DATA` into the catalogue,
+answer
 `HELLO` / `SESSION_CLOSE` through the same send path. `btp::Node` is that wiring
 written once.
 
@@ -2652,16 +2678,64 @@ from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
 `tick()` sweeps reassembly timeouts and polls the session watchdog, returning
 the `SessionEvent` (`TimedOut` once when a dead session is noticed).
 
-### 16.3 What stays out
+### 16.4 The schema catalogue (`btp::Catalog`)
 
-Everything §11 keeps above the wire, unchanged: the **session initiator** (`Node`
-is responder + producer), **routing policy** (`receive()` hands back the whole
-message; relay-or-drop is the caller's one switch), manifest storage, the
+A `TELEMETRY` body is `PACKED_LE` octets against a schema
+([§12.4](#124-decoding-and-encoding-telemetry-samples)); a consumer that has
+never met the producer gets that schema from a `MANIFEST_DATA`
+([Commands and discovery §3](commands.md#3-the-manifest)). `btp::messages` walks
+the manifest and `btp::telemetry` decodes the sample — the piece between,
+"which schemas a consumer caches"
+([§11.2](#112-the-manifest-catalogue-is-not-stored)), is `btp::Catalog`
+(`btp/catalog.hpp`, target `btp::catalog`), with the storage still the caller's.
+
+`btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes>`, which owns
+the pools) holds one topic per entry — `topic_id`, `schema_version`, encoding,
+`max_rate_millihz`, subscribable, a `FieldSpec[]` and the topic + field names.
+`add_topic()` fills it from `FieldRecord`s (a producer's own schema);
+`ingest(payload, size)` fills it by walking a `MANIFEST_DATA`;
+`write_topics(ManifestWriter*)` serialises it back. Same guarantees as the rest
+of the library.
+
+**On the consumer**, `node.learn_catalog(&catalog)` hands it to the node:
+
+```cpp
+btp::StaticCatalog<> catalog;
+node.learn_catalog(&catalog);
+node.on_sample(&on_drive_status, &ui);   // per-topic, values already converted
+node.request_manifest(robot_source_id, robot_boot_id, /*known_revision=*/0);
+// ... then, per datagram:
+switch (node.receive(datagram, n, &msg)) {
+    case btp::NodeRx::CatalogUpdated:  break;  // a MANIFEST_DATA was ingested
+    case btp::NodeRx::SampleDelivered: break;  // on_sample already ran
+    case btp::NodeRx::Ignored:         break;  // a sample before its manifest
+    // ...
+}
+```
+
+`receive()` ingests every `MANIFEST_DATA` into the catalogue
+(`NodeRx::CatalogUpdated`), and — with `on_sample` set — decodes each
+`TELEMETRY` sample of a known topic against the learned `FieldSpec[]` and calls
+the callback with a `SampleReader` positioned at the first field
+(`NodeRx::SampleDelivered`); a sample for a topic not yet in the catalogue is
+`NodeRx::Ignored`. `NOT_MODIFIED` keeps the current contents.
+
+The **producer** side — the node serving `MANIFEST_DATA` from a catalogue on a
+`MANIFEST_REQUEST`, and `node.publish(topic_id, fill)` — is not wired yet;
+today a producer builds the manifest with `ManifestWriter` (or
+`Catalog::write_topics`) and sends it with `node.send()`.
+
+### 16.5 What stays out
+
+Everything §11 keeps above the wire, unchanged: the **session initiator**
+(`Node` is responder + producer), **routing policy** (`receive()` hands back a
+message it does not manage; relay-or-drop is the caller's one switch), the
 subscription aggregator, the priority scheduler, and **key derivation** (the
-body of your `seal` / `open`). Plus, in this first cut: **serial byte-stream
-framing** — a `Node` speaks packet transports (`receive()` wants one whole
-datagram), and a single encoded frame must fit the ESP-NOW ceiling, so native
-COBS and large-Serial frames are a later addition.
+body of your `seal` / `open`). Plus, in this first cut: the producer-side
+manifest serving and typed publish above, and **serial byte-stream framing** —
+a `Node` speaks packet transports (`receive()` wants one whole datagram), and a
+single encoded frame must fit the ESP-NOW ceiling, so native COBS and
+large-Serial frames are a later addition.
 
 ---
 
@@ -2803,7 +2877,8 @@ COMMAND / CONTROL payload layout      (btp::messages)
 identity, sequencing, transmit path   (btp::endpoint)
 decode + CRC + reassembly path        (btp::receiver)
 session lifecycle + inactivity watchdog, responder side   (btp::session)
-endpoint + receiver + session in one object   (btp::node)
+the MANIFEST_DATA schema catalogue, caller-owned   (btp::catalog)
+endpoint + receiver + session + catalogue in one object   (btp::node)
 ```
 
 It deliberately does not own the surrounding application.
