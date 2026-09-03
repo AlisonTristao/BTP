@@ -16,10 +16,10 @@
 //   node.topic(..., fill) + routine()          -> TELEMETRY, only when a
 //                                                subscriber is actually
 //                                                waiting for it
-//   node.enable_commands(&handle_command)      -> answers COMMAND_REQUEST;
+//   cfg.command = &handle_command               -> answers COMMAND_REQUEST;
 //                                                StaticNode<> already owns
 //                                                the dedup cache
-//   node.on_terminal(&handle_terminal_in)      -> calls it directly for
+//   cfg.terminal = &handle_terminal_in          -> calls it directly for
 //                                                TERMINAL_IN (NodeRx::
 //                                                TerminalDelivered), which
 //                                                answers with TERMINAL_OUT
@@ -122,6 +122,8 @@ int main() {
     cfg.boot_id   = 0x0000B001U;   // new each boot (non-zero)
     cfg.transport = btp::TransportProfile::EspNow;
     cfg.send      = &send_frame;
+    cfg.command   = &handle_command;    // StaticNode<> already owns the dedup cache
+    cfg.terminal  = &handle_terminal_in;
 
     btp::StaticNode<> node(cfg);
 
@@ -146,9 +148,6 @@ int main() {
         .u16("battery_v", 0.001, "V")
         .i16("temp_c",    0.1,   "Cel", /*is_nullable=*/true)
         .end();
-
-    node.enable_commands(&handle_command);  // StaticNode<> already owns the dedup cache
-    node.on_terminal(&handle_terminal_in, nullptr);
 
     if (!node.begin("example-robot", make_hello(btp::Role::Producer))) {
         return 1;

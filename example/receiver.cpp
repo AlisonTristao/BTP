@@ -22,11 +22,11 @@
 //                                                correlated result comes
 //                                                back as NodeRx::CommandHandled
 //                                                (command_outcome())
-//   node.on_terminal(&handle_terminal_out)      -> calls it directly for
+//   cfg.terminal = &handle_terminal_out          -> calls it directly for
 //                                                TERMINAL_OUT (NodeRx::
 //                                                TerminalDelivered); a
 //                                                node.send(kTerminalIn, ...)
-//                                                above is what prompted it
+//                                                below is what prompted it
 //
 // sender.cpp is the other end. The link here is faked -- send_frame() just
 // drops the bytes and link_poll() always delivers nothing, so receive()
@@ -112,6 +112,7 @@ int main() {
     cfg.boot_id   = 0x0000C0DEU;   // new each boot (non-zero)
     cfg.transport = btp::TransportProfile::EspNow;
     cfg.send      = &send_frame;
+    cfg.terminal  = &handle_terminal_out;
 
     btp::StaticNode<> node(cfg);
     node.learn_catalog(&on_drive_status);  // this node's own catalogue, learned from the wire
@@ -142,8 +143,6 @@ int main() {
 
     // in your code, you need to call the clock, and get the time
     std::uint64_t now_ms = 0U;
-
-    node.on_terminal(&handle_terminal_out, nullptr);
 
     // Simulate a user typing something into this node's shell -- see
     // sender.cpp's handle_terminal_in() for what answers it (TERMINAL_OUT,
