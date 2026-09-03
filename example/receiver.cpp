@@ -156,11 +156,10 @@ int main() {
         const std::size_t n = link_poll(datagram, sizeof datagram);
 
         // datagram (if any) -> receive(); either way, connection watchdog +
-        // subscription renewal. COMMAND_RESULT / TERMINAL_OUT are both
-        // handled inside routine() itself now -- handle_command_outcome() /
-        // handle_terminal_out() above already ran for whichever arrived.
-        btp::ReceivedMessage msg = {};
-        if (node.routine(datagram, n, now_ms, &msg) == btp::NodeRx::CommandHandled) {
+        // subscription renewal. TERMINAL_OUT is handled inside routine()
+        // itself now -- handle_terminal_out() above already ran; only
+        // CommandHandled still needs a check here, to read command_outcome().
+        if (node.routine(datagram, n, now_ms) == btp::NodeRx::CommandHandled) {
             handle_command_outcome(node.command_outcome());
         }
 

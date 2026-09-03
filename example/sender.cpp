@@ -163,9 +163,8 @@ int main() {
         // datagram (if any) -> receive(); either way, publish due topics +
         // session watchdog. COMMAND_REQUEST / TERMINAL_IN are both handled
         // inside routine() itself now -- handle_command() / handle_terminal_in()
-        // above already ran, nothing left to check here.
-        btp::ReceivedMessage msg = {};
-        node.routine(datagram, n, now_ms, &msg);
+        // above already ran, nothing left to check here, so no *out to pass.
+        node.routine(datagram, n, now_ms);
 
         // remember to update the clock in your code, and get the time
         now_ms += 1U;
