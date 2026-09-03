@@ -2,24 +2,32 @@
 //
 // The consumer, with btp::Node. It has NEVER seen the producer's schema and
 // writes nothing about topic 0x0101. It is also the INITIATOR -- it connects
-// OUT to the producer instead of waiting to be connected to:
+// OUT to the producer and asks to be subscribed, instead of receiving
+// whatever the producer feels like sending:
 //
-//   node.connect(my_hello, deadline_ms)  -- HELLO -> HELLO_RESULT; once
+//   node.connect(my_hello, deadline_ms)   -- HELLO -> HELLO_RESULT; once
 //                                          connected(), every frame from the
 //                                          peer renews the watchdog on its own
-//   node.learn_catalog()                 -- from now on the node ingests
+//   node.subscribe(peer, topic, rate,     -- SUBSCRIBE; tick() renews it on
+//                  lease_ms)                 its own before the lease runs out
+//   node.learn_catalog()                  -- from now on the node ingests
 //                                          every MANIFEST_DATA into its OWN
 //                                          catalogue (node.catalog())
-//   node.on_sample(&on_drive_status)     -- and decodes every TELEMETRY
+//   node.on_sample(&on_drive_status)      -- and decodes every TELEMETRY
 //                                          sample of a learned topic, fields
 //                                          already scaled
 //
-// The link is faked -- link_poll() delivers nothing, it is only there to show
-// the shape. by_hand_receiver.cpp is the runnable wire-level version.
+// The link is faked -- link_poll() delivers nothing, so the loop below never
+// actually runs; it is only there to show the shape. by_hand_receiver.cpp is
+// the runnable wire-level version.
 
 #include <btp/node.hpp>
 
 namespace {
+
+const std::uint32_t kProducerSourceId = 0x00CAFE01U;  // must match sender.cpp
+const std::uint32_t kProducerBootId = 0x0000B001U;
+const std::uint16_t kDriveStatus = 0x0101U;
 
 btp::Hello make_hello(btp::Role role) {
     btp::Hello h = {};
@@ -48,12 +56,17 @@ void on_drive_status(void* /*ctx*/, const btp::CatalogTopic& topic,
 }
 
 // Hand one delivered datagram to the node and act on what it was.
-void on_datagram(btp::Node& node, const std::uint8_t* data, std::size_t size) {
+void on_datagram(btp::Node& node, const std::uint8_t* data, std::size_t size,
+                 std::uint64_t now_ms) {
     btp::ReceivedMessage msg = {};
-    switch (node.receive(data, size, /*now_ms=*/0, &msg)) {
+    switch (node.receive(data, size, now_ms, &msg)) {
         case btp::NodeRx::InitiatorHandled:
             // connect()'s HELLO_RESULT arrived, or the connection timed out --
             // node.initiator_event() says which (Connected / Rejected / TimedOut)
+            break;
+        case btp::NodeRx::SubscriptionHandled:
+            // subscribe()'s SUBSCRIBE_RESULT (or a renewal's) arrived --
+            // node.subscription_event() says Granted / Rejected
             break;
         case btp::NodeRx::CatalogUpdated:
             // learned / refreshed the schema from a MANIFEST_DATA
@@ -74,7 +87,7 @@ void on_datagram(btp::Node& node, const std::uint8_t* data, std::size_t size) {
 }
 
 // The node hands every finished frame here. Fake: a real node transmits it.
-// Needed now that this node also connect()s out -- that sends a HELLO.
+// Needed now that this node also connect()s / subscribe()s out.
 bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
     return true;
 }
@@ -93,19 +106,33 @@ int main() {
     cfg.send      = &send_frame;
 
     btp::StaticNode<> node(cfg);
-    node.learn_catalog();                  // the node's own catalogue
+    node.learn_catalog();  // the node's own catalogue
     node.on_sample(&on_drive_status, nullptr);
-    node.begin();
 
+    // The subscriptions THIS node holds on peers -- one slot per topic
+    // subscribed to, across however many peers.
+    btp::ClientSubscription subscription_slots[4];
+    btp::SubscriptionClient subscriptions(subscription_slots, 4);
+    node.enable_subscription_client(&subscriptions);
+
+    node.begin();
     node.connect(make_hello(btp::Role::Consumer), /*deadline_ms=*/2000U);
 
+    // subscribe() works whether or not the schema has been learned yet --
+    // SUBSCRIBE only names a topic_id, not its fields. A real loop would
+    // more likely wait for InitiatorHandled / connected() first; shown right
+    // here only because the fake link never delivers that event anyway.
+    const std::uint32_t subscription_id = node.subscribe(
+        kProducerSourceId, kProducerBootId, kDriveStatus,
+        /*rate_millihz=*/10000U, /*lease_ms=*/60000U);
+
+    std::uint64_t now_ms = 0U;
     std::uint8_t datagram[256];
-    for (std::size_t n; (n = link_poll(datagram, sizeof datagram)) != 0U; ) {
-        on_datagram(node, datagram, n);
+    for (std::size_t n; (n = link_poll(datagram, sizeof datagram)) != 0U; ++now_ms) {
+        on_datagram(node, datagram, n, now_ms);
+        node.tick(now_ms);  // connection watchdog + subscription renewal, both automatic
     }
 
-    // Nothing arrived (the link is faked) -- tick() would report TimedOut
-    // here in a real run, InitiatorEvent::TimedOut via initiator_event().
-    node.tick(2000U);
+    node.unsubscribe(subscription_id);
     return 0;
 }
