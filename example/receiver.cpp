@@ -90,8 +90,9 @@ namespace {
     // node.on_terminal() below is what gets this called for a TERMINAL_OUT
     // frame at all -- see sender.cpp's handle_terminal_in() for the other
     // direction. A real shell would render `payload` to the console instead.
-    void handle_terminal_out(void* /*ctx*/, const btp::Header& /*header*/,
-                             btp::ByteView /*payload*/) {}
+    void handle_terminal_out(void* /*ctx*/, btp::Node& /*node*/,
+                             const btp::Header& /*header*/,
+                             btp::ByteView /*payload*/, std::uint64_t /*now_ms*/) {}
 
     // The node hands every finished frame here. Fake: a real node transmits it.
     // Needed now that this node also connect()s / subscribe()s out.

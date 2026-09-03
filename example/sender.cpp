@@ -91,24 +91,18 @@ namespace {
         }
     }
 
-    // Bundled as handle_terminal_in()'s ctx below -- NodeTerminalFn's
-    // signature has no room to smuggle in "who do I send the reply through"
-    // or "what time is it" otherwise.
-    struct TerminalCtx {
-        btp::Node* node;
-        std::uint64_t* now_ms;
-    };
-
     // TERMINAL has no other btp::Node support -- its payload is opaque
     // bytes, no struct, on purpose (docs/session-and-terminal.md section
     // 7). node.on_terminal() below is what gets this called for a
-    // TERMINAL_IN frame at all; here it just echoes the bytes back as
-    // TERMINAL_OUT -- a real shell would feed `payload` to a line editor.
-    void handle_terminal_in(void* ctx, const btp::Header& /*header*/,
-                            btp::ByteView payload) {
-        TerminalCtx* t = static_cast<TerminalCtx*>(ctx);
-        t->node->send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
-                      payload.data, payload.size, *t->now_ms * 1000ULL);
+    // TERMINAL_IN frame at all; `node`/`now_ms` arrive straight from
+    // receive() itself, so answering back needs nothing threaded in via
+    // `ctx`. Here it just echoes the bytes back as TERMINAL_OUT -- a real
+    // shell would feed `payload` to a line editor instead.
+    void handle_terminal_in(void* /*ctx*/, btp::Node& node,
+                            const btp::Header& /*header*/, btp::ByteView payload,
+                            std::uint64_t now_ms) {
+        node.send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
+                 payload.data, payload.size, now_ms * 1000ULL);
     }
 
     // The node hands every finished frame here. Fake: a real node transmits it.
@@ -154,6 +148,7 @@ int main() {
         .end();
 
     node.enable_commands(&handle_command);  // StaticNode<> already owns the dedup cache
+    node.on_terminal(&handle_terminal_in, nullptr);
 
     if (!node.begin("example-robot", make_hello(btp::Role::Producer))) {
         return 1;
@@ -161,9 +156,6 @@ int main() {
 
     // in your code, you need to call the clock, and get the time
     std::uint64_t now_ms = 0U;
-
-    TerminalCtx terminal_ctx{&node, &now_ms};
-    node.on_terminal(&handle_terminal_in, &terminal_ctx);
 
     std::uint8_t datagram[256];
     for (;;) {
