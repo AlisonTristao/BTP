@@ -84,6 +84,26 @@ using NodeOpenFn = bool (*)(void* ctx, const Header& header,
                             const std::uint8_t* sealed,
                             std::uint8_t* out_plaintext);
 
+// Picks the seal for ONE automatic reply the node is about to send: a
+// SUBSCRIBE_RESULT / UNSUBSCRIBE_RESULT, a COMMAND_RESULT (a fresh one or a
+// DuplicateComplete replay), or a MANIFEST_DATA. `request_header` is the
+// ORIGINAL request's header -- source_id names who actually asked, unlike
+// the reply's own header, which always carries this node's own identity, so
+// this is the one place a hub-shaped node (several keys, one per relayed
+// peer or channel) can pick the matching key per reply instead of one key
+// for every automatic send. Leave both `*out_seal`/`*out_seal_ctx` at their
+// nullptr default to send this ONE reply in the clear, whatever cfg.seal is.
+//
+// Optional: nullptr (the default) means every automatic reply seals with
+// cfg.seal/cfg.seal_ctx, exactly as if this callback did not exist. Does NOT
+// apply to send() / send_with() / publish() / publish_named() -- those are
+// the caller's own sends, already covered by send_with()'s explicit seal
+// argument -- nor to an INITIATOR's own outgoing requests (connect() /
+// subscribe() / command() and their renewals), which have no "original
+// request" to classify by and always use cfg.seal.
+using NodeReplySealFn = void (*)(void* ctx, const Header& request_header,
+                                 EndpointSealFn* out_seal, void** out_seal_ctx);
+
 // Called by receive() for one TELEMETRY sample of a topic the attached learn
 // catalog knows. `reader` is positioned at the first field; pull values with
 // reader.next() -- raw*scale+offset already applied -- and match them to
@@ -153,6 +173,13 @@ struct NodeConfig {
 
     NodeOpenFn open;          // optional. nullptr -> receive() returns sealed bytes.
     void* open_ctx;
+
+    // Optional, and last on purpose: a caller building NodeConfig with a
+    // positional aggregate initializer (an existing one, or docs/library.md's
+    // own mockup) leaves both nullptr -- see NodeReplySealFn's own comment
+    // for what that means.
+    NodeReplySealFn reply_seal;
+    void* reply_seal_ctx;
 };
 
 // ---------------------------------------------------------------------------
@@ -544,10 +571,16 @@ private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
     NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out,
                  std::uint64_t now_ms) noexcept;
+    // cfg_.reply_seal, or cfg_.seal/cfg_.seal_ctx when it is null -- see
+    // NodeReplySealFn's comment. Every automatic-reply send site below calls
+    // this once, right before send_with(), instead of using send()/cfg_.seal
+    // directly.
+    void reply_seal_for(const Header& request, EndpointSealFn* out_seal,
+                        void** out_seal_ctx) const noexcept;
     void serve_manifest(const Header& request, ByteView payload) noexcept;
-    void emit_manifest(const RequestRef& reply_to, std::uint8_t status,
-                       std::uint8_t flags, std::uint16_t error_code,
-                       bool with_topics) noexcept;
+    void emit_manifest(const Header& request, const RequestRef& reply_to,
+                       std::uint8_t status, std::uint8_t flags,
+                       std::uint16_t error_code, bool with_topics) noexcept;
     void serve_subscribe(const Header& request, ByteView payload,
                          std::uint64_t now_ms) noexcept;
     void serve_unsubscribe(const Header& request, ByteView payload) noexcept;

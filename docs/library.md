@@ -2655,6 +2655,7 @@ context and a plain function — never `std::function`, never virtual):
 | `clock` | optional | `→ now_ms`; `nullptr` means you pass `now_ms` to `receive()` / `tick()` |
 | `seal` | optional | encrypt one logical payload; `nullptr` → `send()` is cleartext |
 | `open` | optional | decrypt one received payload; `nullptr` → `receive()` hands back the sealed bytes |
+| `reply_seal` | optional | picks the seal for ONE automatic reply (`SUBSCRIBE_RESULT` / `UNSUBSCRIBE_RESULT` / `COMMAND_RESULT` / `MANIFEST_DATA`) from the *original request's* header; `nullptr` → every automatic reply uses `seal` |
 
 The **key never enters BTP**. `seal` is a `btp::EndpointSealFn` and `open` a
 `btp::NodeOpenFn`; the key lives in *your* functions, which select it from
@@ -2705,7 +2706,14 @@ for (;;) {
 `send()` reserves a sequence, seals once over the whole payload when
 `cfg.seal` is set, fragments, and hands each frame to `cfg.send` — a `false`
 from the seal sends nothing (fail-closed). `send_with()` takes a seal for one
-message (a hub sealing channel C and channel B with different keys).
+message (a hub sealing channel C and channel B with different keys) — that
+covers the caller's OWN sends, but not the node's automatic replies to a
+SUBSCRIBE / UNSUBSCRIBE / COMMAND_REQUEST / MANIFEST_REQUEST, which always
+used `cfg.seal` alone until `reply_seal` (§16.1): a hub-shaped responder that
+answers a request with whichever key matches ITS ORIGIN (not one key for
+every automatic reply) sets `cfg.reply_seal` to a function of the *original
+request's* header instead — see `NodeReplySealFn`'s doc comment in
+`node.hpp`. `nullptr` (the default) is exactly today's single-key behavior.
 
 `receive()` sweeps stale partials, decodes, checks CRC and reassembles; with a
 session enabled it also runs the `HELLO` handshake, renews the watchdog and
