@@ -225,6 +225,28 @@ btp_strict_warnings(btp_catalog)
 set_target_properties(btp_catalog PROPERTIES EXPORT_NAME catalog)
 
 # ---------------------------------------------------------------------------
+# btp::subscription -- docs/commands.md section 4 (SUBSCRIBE / SUBSCRIBE_RESULT
+# / UNSUBSCRIBE) as state above the wire: btp::SubscriptionTable (the
+# responder, granting subscriptions against a btp::Catalog) and
+# btp::SubscriptionClient (the initiator, holding and renewing them). Links
+# btp::catalog (topic validation, max_rate_millihz); NO mbedtls, always built.
+# ---------------------------------------------------------------------------
+
+add_library(btp_subscription src/subscription.cpp)
+add_library(btp::subscription ALIAS btp_subscription)
+
+target_include_directories(
+    btp_subscription
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_features(btp_subscription PUBLIC cxx_std_11)
+target_link_libraries(btp_subscription PUBLIC btp::catalog)
+btp_strict_warnings(btp_subscription)
+set_target_properties(btp_subscription PROPERTIES EXPORT_NAME subscription)
+
+# ---------------------------------------------------------------------------
 # btp::node -- the friendly facade (docs/library.md chapter 16): btp::Endpoint,
 # btp::Receiver and (opt-in) btp::Session in one object, sharing one identity,
 # one clock notion and one set of caller-owned buffers, with every external
@@ -243,7 +265,7 @@ target_include_directories(
 )
 target_compile_features(btp_node PUBLIC cxx_std_11)
 target_link_libraries(btp_node PUBLIC btp::endpoint btp::receiver btp::session
-                                      btp::catalog)
+                                      btp::catalog btp::subscription)
 btp_strict_warnings(btp_node)
 set_target_properties(btp_node PROPERTIES EXPORT_NAME node)
 
@@ -328,7 +350,8 @@ if(BTP_INSTALL)
     include(CMakePackageConfigHelpers)
 
     set(btp_export_targets btp_codec btp_messages btp_telemetry btp_session
-                           btp_endpoint btp_receiver btp_catalog btp_node)
+                           btp_endpoint btp_receiver btp_catalog
+                           btp_subscription btp_node)
 
     # btp_aead joins the export set only when mbedtls came from outside this
     # build. A fetched mbedcrypto is never installed, so exporting a target
@@ -458,6 +481,15 @@ if(BTP_BUILD_TESTS)
     target_compile_features(btp_catalog_tests PRIVATE cxx_std_11)
     btp_strict_warnings(btp_catalog_tests)
     add_test(NAME btp_catalog_tests COMMAND btp_catalog_tests)
+
+    # btp::subscription: SUBSCRIBE / SUBSCRIBE_RESULT / UNSUBSCRIBE lifecycle
+    # is behaviour with state, not wire layout -- no vector tree, the golden
+    # sequences of docs/commands.md section 4 live in this suite instead.
+    add_executable(btp_subscription_tests tests/test_subscription.cpp)
+    target_link_libraries(btp_subscription_tests PRIVATE btp::subscription)
+    target_compile_features(btp_subscription_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_subscription_tests)
+    add_test(NAME btp_subscription_tests COMMAND btp_subscription_tests)
 
     # btp::node: the facade is wiring over endpoint + receiver + session, not a
     # wire layout, so it has no vector tree -- the suite drives a Node (often a
