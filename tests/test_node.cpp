@@ -800,6 +800,50 @@ void test_publish_named_round_trips() {
     CHECK(!producer.publish_named(0x0999U, &fill_drive_by_name, nullptr, 1ULL));
 }
 
+// publish_with()/publish_named_with() take the seal for THIS sample instead
+// of cfg.seal -- checked the same way send_with()'s own contract reads: a
+// null override forces cleartext regardless of cfg.seal, so the two sends
+// below (same fill, same topic) differ by exactly kEndpointAeadTagSize on
+// the wire -- proof the override, not cfg.seal, decided each one.
+void test_publish_with_overrides_cfg_seal() {
+    Sink prod_tx;
+    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.seal = &fake_seal;  // the node's default -- publish_with() bypasses it
+    TestNode producer(cfg);
+    CHECK(producer.topic(0x0101U, 2U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog();
+    CHECK(producer.begin());
+
+    CHECK(producer.publish_named(0x0101U, &fill_drive_by_name, nullptr, 3ULL));
+    CHECK(prod_tx.count() == 1U);
+    const std::size_t sealed_size = prod_tx.frames[0].size();
+
+    prod_tx.clear();
+    CHECK(producer.publish_named_with(0x0101U, &fill_drive_by_name, nullptr,
+                                      4ULL, /*seal=*/nullptr, nullptr));
+    CHECK(prod_tx.count() == 1U);
+    const std::size_t cleartext_size = prod_tx.frames[0].size();
+
+    CHECK(sealed_size == cleartext_size + btp::kEndpointAeadTagSize);
+
+    // publish() itself is unaffected -- still cfg.seal, same as before this.
+    prod_tx.clear();
+    CHECK(producer.publish(
+        0x0101U,
+        [](void*, btp::SampleWriter& w) {
+            w.put_f64(1.0);
+            w.put_f64(2.0);
+            w.put_null();
+        },
+        nullptr, 5ULL));
+    CHECK(prod_tx.count() == 1U);
+    CHECK(prod_tx.frames[0].size() == sealed_size);
+}
+
 // ===========================================================================
 // btp::Node -- subscriptions (btp::SubscriptionTable / btp::SubscriptionClient)
 // ===========================================================================
@@ -1657,6 +1701,7 @@ int main() {
 
     test_static_node_owns_its_catalog();
     test_publish_named_round_trips();
+    test_publish_with_overrides_cfg_seal();
 
     test_command_round_trip_and_dedup_replay();
     test_command_times_out_without_a_reply();
