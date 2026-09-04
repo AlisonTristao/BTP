@@ -288,6 +288,82 @@ struct Hello {
     std::uint32_t config_revision;                  // 0 = peer publishes no manifest
 };
 
+// Builds a Hello with sane defaults for every field a deployment rarely
+// needs to touch -- one protocol version (1), max_logical_payload 2048,
+// max_inflight_reassemblies 4, max_subscriptions 8, max_dedup_entries 32,
+// session_timeout_ms 30000, config_revision 0 (no manifest advertised).
+// Override only what your deployment actually needs; `Hello h = {}; h.role
+// = ...; h.version_count = ...` field by field is still there for the rest.
+//
+// `role` and `peer_uuid` have no safe default -- peer_uuid all-zero is
+// explicitly invalid on the wire (Hello's own field comment above) -- so
+// both are constructor arguments, not chain calls: a HelloBuilder always
+// builds a wire-valid Hello, never a half-filled one waiting on a call you
+// forgot.
+//
+//   btp::Hello h = btp::HelloBuilder(btp::Role::Producer, my_uuid).build();
+//
+//   btp::Hello h = btp::HelloBuilder(btp::Role::Consumer, my_uuid)
+//                      .session_timeout_ms(15000U)
+//                      .max_logical_payload(4096U)
+//                      .build();
+class HelloBuilder {
+public:
+    HelloBuilder(Role role, const std::uint8_t peer_uuid[16]) noexcept : hello_() {
+        hello_.role = static_cast<std::uint8_t>(role);
+        hello_.version_count = 1U;
+        hello_.versions[0] = 1U;
+        hello_.max_logical_payload = 2048U;
+        hello_.max_inflight_reassemblies = 4U;
+        hello_.max_subscriptions = 8U;
+        hello_.max_dedup_entries = 32U;
+        hello_.session_timeout_ms = 30000U;
+        for (int i = 0; i < 16; ++i) hello_.peer_uuid[i] = peer_uuid[i];
+        hello_.config_revision = 0U;
+    }
+
+    // Overrides the single announced version the constructor already set
+    // (the common case -- more than one is still reachable off build()'s
+    // own Hello by hand, same as any other field this builder does not
+    // wrap: version_count / versions[] stay plain data).
+    HelloBuilder& version(std::uint8_t v) noexcept {
+        hello_.versions[0] = v;
+        return *this;
+    }
+    HelloBuilder& max_logical_payload(std::uint32_t bytes) noexcept {
+        hello_.max_logical_payload = bytes;
+        return *this;
+    }
+    HelloBuilder& max_inflight_reassemblies(std::uint16_t n) noexcept {
+        hello_.max_inflight_reassemblies = n;
+        return *this;
+    }
+    HelloBuilder& max_subscriptions(std::uint16_t n) noexcept {
+        hello_.max_subscriptions = n;
+        return *this;
+    }
+    HelloBuilder& max_dedup_entries(std::uint32_t n) noexcept {
+        hello_.max_dedup_entries = n;
+        return *this;
+    }
+    HelloBuilder& session_timeout_ms(std::uint32_t ms) noexcept {
+        hello_.session_timeout_ms = ms;
+        return *this;
+    }
+    // Non-zero advertises "I serve a manifest, and this is its current
+    // revision" (docs/commands.md section 3) -- 0 (the constructor's
+    // default) means this peer publishes none.
+    HelloBuilder& config_revision(std::uint32_t revision) noexcept {
+        hello_.config_revision = revision;
+        return *this;
+    }
+
+    Hello build() const noexcept { return hello_; }
+
+private:
+    Hello hello_;
+};
+
 struct HelloResult {
     RequestRef request;
     std::uint8_t status;            // ResultStatus: Success or Unsupported
