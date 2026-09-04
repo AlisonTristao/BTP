@@ -324,10 +324,32 @@ public:
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
+    // Replaces the whole external configuration (identity, transport, send /
+    // seal / open / reply_seal / terminal / command) without touching the
+    // receiver's storage, any attached session/catalogue/subscription/
+    // command state, or frames_tx(). The one way to change it after
+    // construction -- the constructor is the only other place `cfg` is read.
+    // Meant for a caller whose identity or send callback is only known
+    // after something else exists (e.g. TxScheduler configured later than
+    // the Node itself is constructed): build with a placeholder NodeConfig,
+    // reconfigure() with the real one once it is known, THEN begin().
+    //
+    // Calling it again later (already begin()'d, maybe already receiving)
+    // is not guarded -- the same trust the rest of this library places in
+    // the caller. begin() afterward re-runs endpoint.configure(), which
+    // resets the sequence counter to 1 (btp::Endpoint::configure()'s own
+    // documented behaviour) -- correct for a fresh identity, a corruption of
+    // any in-flight correlation (a session, an outstanding subscribe()/
+    // command()) if the identity did not actually change. A hub re-keying a
+    // still-idle node (no session armed, nothing outstanding) is the
+    // intended later-call case; mid-flight is the caller's call to make.
+    void reconfigure(const NodeConfig& cfg) noexcept { cfg_ = cfg; }
+
     // endpoint.configure() + receiver.valid() + (session enabled?
-    // session.valid()). Check once at boot. A missing `send` is not a failure
-    // here -- send() / send_with() and a session reply check for it in place --
-    // so a receive-only node can leave it null.
+    // session.valid()). Check once at boot, and again after reconfigure() if
+    // identity/transport changed. A missing `send` is not a failure here --
+    // send() / send_with() and a session reply check for it in place -- so a
+    // receive-only node can leave it null.
     //
     // `arm_and_announce` (default false -- every existing begin() call keeps
     // meaning exactly what it always did) additionally arm_session()s any

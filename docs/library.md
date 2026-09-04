@@ -2689,6 +2689,14 @@ btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
                         &open_c,     nullptr}); // open
 if (!node.begin()) { /* bad identity or storage */ }
 
+// If identity/send/seal/... is only known after something else exists (say,
+// a TxScheduler configured later than the Node itself is constructed), build
+// with a placeholder NodeConfig and call this once the real one is known,
+// before begin() -- see reconfigure()'s own doc comment for the later-call
+// case (a hub re-keying an idle node):
+//   node.reconfigure(real_cfg);
+//   if (!node.begin()) { /* ... */ }
+
 // producer:
 node.send(btp::MessageType::Telemetry, 0x0101, body, body_size, now_us());
 
