@@ -1026,6 +1026,10 @@ std::uint32_t Node::connected_peer_boot_id() const noexcept {
     return initiator_.peer_boot_id();
 }
 
+std::uint32_t Node::connected_peer_config_revision() const noexcept {
+    return initiator_.peer_config_revision();
+}
+
 bool Node::disconnect(std::uint8_t reason,
                       std::uint32_t drain_timeout_ms) noexcept {
     return disconnect(resolve_now(0U), reason, drain_timeout_ms);

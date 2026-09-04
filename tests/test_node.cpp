@@ -891,7 +891,9 @@ void test_connect_handshake_and_effective_limits() {
     Sink peer_tx;
     TestConfig peer_cfg = base_config(kPeerId, kPeerBoot, &peer_tx);
     TestNode peer(peer_cfg);
-    peer.enable_session(make_hello(Role::Producer), 0U);
+    Hello peer_hello = make_hello(Role::Producer);
+    peer_hello.config_revision = 7U;  // the peer's own catalogue revision
+    peer.enable_session(peer_hello, 0U);
     CHECK(peer.begin());
     peer.arm_session(0U);
 
@@ -905,6 +907,7 @@ void test_connect_handshake_and_effective_limits() {
     CHECK(initiator.connected());
     CHECK(initiator.connected_peer_source_id() == kPeerId);
     CHECK(initiator.connected_peer_boot_id() == kPeerBoot);
+    CHECK(initiator.connected_peer_config_revision() == 7U);
     CHECK(initiator.effective_limits().session_timeout_ms == 30000U);
 
     // An application frame from the peer now routes normally AND renews the

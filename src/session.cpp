@@ -595,7 +595,8 @@ SessionInitiator::SessionInitiator() noexcept
       own_boot_id_(0U),
       own_sequence_(0U),
       peer_source_id_(0U),
-      peer_boot_id_(0U) {}
+      peer_boot_id_(0U),
+      peer_config_revision_(0U) {}
 
 InitiatorOutcome SessionInitiator::check_expiry(std::uint64_t now_ms) noexcept {
     if (state_ == InitiatorState::AwaitingResult) {
@@ -690,6 +691,7 @@ InitiatorOutcome SessionInitiator::on_frame(const DecodedFrame& frame,
         effective_.session_timeout_ms = result.session_timeout_ms;
         peer_source_id_ = frame.header.source_id;
         peer_boot_id_ = frame.header.boot_id;
+        peer_config_revision_ = result.config_revision;
         state_ = InitiatorState::Active;
         deadline_ms_ = now_ms + effective_.session_timeout_ms;
         return InitiatorOutcome{InitiatorEvent::Connected};

@@ -2889,7 +2889,11 @@ for (;;) {
     const btp::NodeRx rx = node.receive(datagram, n, &msg);
     if (rx == btp::NodeRx::InitiatorHandled &&
         node.initiator_event() == btp::InitiatorEvent::Connected) {
-        // node.effective_limits() / node.connected_peer_source_id() now set
+        // node.effective_limits() / node.connected_peer_source_id() /
+        // node.connected_peer_config_revision() (2.37.0 -- the peer's own
+        // manifest-catalogue revision, HELLO_RESULT's own field, not part of
+        // effective_limits() because it is reported as-is, never negotiated)
+        // now set
     }
     node.tick();   // TimedOut if HELLO_RESULT, or the peer, goes quiet
 }

@@ -595,6 +595,14 @@ public:
     const EffectiveLimits& effective_limits() const noexcept { return effective_; }
     std::uint32_t peer_source_id() const noexcept { return peer_source_id_; }
     std::uint32_t peer_boot_id() const noexcept { return peer_boot_id_; }
+    // HELLO_RESULT's own config_revision (session-and-terminal.md section 2,
+    // offset 48) -- the responder's manifest-catalogue revision, reported
+    // as-is, never negotiated (unlike everything in EffectiveLimits, which is
+    // a field-by-field minimum of both sides -- this is why it lives here and
+    // not there). A caller that skips a redundant MANIFEST_REQUEST enumeration
+    // when this has not changed since the last session (ManifestClient's own
+    // job) needs it; nothing in this class reads it back.
+    std::uint32_t peer_config_revision() const noexcept { return peer_config_revision_; }
 
     // Idle -> AwaitingResult. Encodes `local` as a HELLO into `out`; the
     // caller sends it framed with `own_source_id` / `own_boot_id` /
@@ -654,6 +662,7 @@ private:
     std::uint32_t own_sequence_;
     std::uint32_t peer_source_id_;
     std::uint32_t peer_boot_id_;
+    std::uint32_t peer_config_revision_;
 };
 
 // ===========================================================================

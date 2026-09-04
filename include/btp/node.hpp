@@ -573,6 +573,10 @@ public:
     const EffectiveLimits& effective_limits() const noexcept;
     std::uint32_t connected_peer_source_id() const noexcept;
     std::uint32_t connected_peer_boot_id() const noexcept;
+    // HELLO_RESULT's own config_revision -- see SessionInitiator::
+    // peer_config_revision()'s own comment on why it is not part of
+    // EffectiveLimits.
+    std::uint32_t connected_peer_config_revision() const noexcept;
 
     // Sends SESSION_CLOSE and tears the connection down locally right away
     // (does not wait for SESSION_CLOSE_RESULT). A no-op outside AwaitingResult
