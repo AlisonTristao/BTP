@@ -27,7 +27,7 @@ where `N` is the payload size of the current frame.
 
 There is no padding or alignment between fields.
 
-The frame itself does not contain transport delimiters, escape sequences, or terminators. A transport profile may add external framing when required.
+The frame itself does not contain transport delimiters, escape sequences, or terminators. The transport itself may add external framing when required.
 
 For a fragmented logical message, `N` represents the payload carried by the current fragment, not the complete logical payload.
 
@@ -209,7 +209,7 @@ frame_size = 40 + payload_size
 
 For a fragmented message, `payload_size` describes only the current fragment.
 
-The maximum permitted value may be further restricted by the selected transport profile.
+The maximum permitted value may be further restricted by the selected `TransportLimits`.
 
 ### 2.8 `source_id`
 
@@ -467,13 +467,13 @@ A received frame must pass structural, integrity, transport, and header validati
 
 The reference decoder performs validation in the following order:
 
-1. validate input arguments and transport profile;
+1. validate input arguments and `TransportLimits`;
 2. verify the minimum frame size;
-3. verify the maximum size permitted by the transport profile;
+3. verify the maximum size permitted by `TransportLimits`;
 4. verify `magic`;
 5. verify that `version` is supported;
 6. verify `header_size`;
-7. verify `payload_size` against the selected transport profile;
+7. verify `payload_size` against the selected `TransportLimits`;
 8. verify the total frame size;
 9. verify CRC-32;
 10. verify version and encryption consistency;
@@ -485,7 +485,7 @@ The corresponding errors are:
 
 | Condition                                  | Error                            |
 | ------------------------------------------ | -------------------------------- |
-| Invalid argument or transport profile      | `InvalidArgument`                |
+| Invalid argument or `TransportLimits`      | `InvalidArgument`                |
 | Frame smaller than 40 octets               | `FrameTooShort`                  |
 | Frame exceeds transport limit              | `FrameTooLarge`                  |
 | Invalid magic sequence                     | `InvalidMagic`                   |
@@ -495,7 +495,7 @@ The corresponding errors are:
 | `input_size != 40 + payload_size`          | `SizeMismatch`                   |
 | Invalid CRC                                | `CrcMismatch`                    |
 | `ENCRYPTED` with incompatible version      | `EncryptedVersionMismatch`       |
-| Encryption prohibited by transport profile | `EncryptedNotAllowedOnTransport` |
+| Encryption prohibited by `TransportLimits` | `EncryptedNotAllowedOnTransport` |
 | Invalid message type                       | `InvalidType`                    |
 | Reserved flag set                          | `InvalidFlags`                   |
 | Invalid `CIPHER_ID`                        | `InvalidCipherId`                |
@@ -553,9 +553,9 @@ Any other combination is rejected.
 An implementation generating a BTP frame must:
 
 1. validate the header fields;
-2. validate restrictions imposed by the selected transport profile;
+2. validate restrictions imposed by the selected `TransportLimits`;
 3. determine the payload size;
-4. verify that the payload fits the transport profile;
+4. verify that the payload fits the selected `TransportLimits`;
 5. serialize the 36-octet header;
 6. append the payload;
 7. calculate CRC-32 over the header and payload;
@@ -666,6 +666,6 @@ The payload is opaque to the frame layer.
 
 CRC-32 validates the integrity of each transmitted frame against accidental corruption.
 
-Transport profiles define additional constraints such as maximum frame and payload sizes.
+The selected `TransportLimits` define additional constraints such as maximum frame and payload sizes.
 
 Higher-level chapters define payload semantics, fragmentation, authenticated encryption, commands, telemetry, and protocol control.

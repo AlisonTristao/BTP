@@ -223,17 +223,17 @@ and opening an encrypted payload, stay the integration's.
 node.cpp
 ```
 
-It links `btp::endpoint`, `btp::receiver`, `btp::session` and `btp::catalog` —
-the layers it wires together — and, like them, needs no mbedtls and is always
-built. Same guarantees as the rest of the library.
+It links `btp::endpoint`, `btp::receiver`, `btp::session`, `btp::catalog` and
+`btp::subscription` — the layers it wires together — and, like them, needs no
+mbedtls and is always built. Same guarantees as the rest of the library.
 
 It is `btp::Node`: `btp::Endpoint`, `btp::Receiver` and — opt-in —
-`btp::Session` and a `btp::Catalog` in one object, sharing one identity, one
-`now_ms` notion and one set of caller-owned buffers, with every external
-dependency (`send`, `clock`, `seal`, `open`) a C function pointer in a
-`NodeConfig`. It adds no wire field and holds no new state — the members stay
-reachable for a caller that wants a layer directly.
-[The node layer](#16-the-node-layer) covers it.
+`btp::Session`, a `btp::Catalog` and subscriptions in one object, sharing one
+identity, one `now_ms` notion and one set of caller-owned buffers, with every
+external dependency (`send`, `clock`, `seal`, `open`, ...) a virtual method on
+`NodeConfig`, an abstract class a consumer inherits from once. It adds no wire
+field and holds no new state — the members stay reachable for a caller that
+wants a layer directly. [The node layer](#16-the-node-layer) covers it.
 
 ### `btp::catalog`
 
@@ -926,7 +926,7 @@ complete logical message
 
 ### 5.1 Determining fragment count
 
-`fragment_count()` calculates how many BTP frames are required for a logical payload under the selected transport profile.
+`fragment_count()` calculates how many BTP frames are required for a logical payload under the selected `TransportLimits`.
 
 If the complete logical payload fits into one frame:
 
@@ -2006,7 +2006,7 @@ many queues to keep, and how to drain them -- inherently transport-specific
 
 The reassembler accepts frames only after they have already passed transport-specific validation through `decode()`.
 
-Internally, the current implementation uses the serial payload ceiling as its fragment-storage backstop rather than binding each `Reassembler` instance to one transport profile.
+Internally, the current implementation uses the serial payload ceiling as its fragment-storage backstop rather than binding each `Reassembler` instance to one `TransportLimits`.
 
 This also allows a gateway to:
 
@@ -2080,6 +2080,28 @@ it needs a schema in hand. `btp::telemetry` covers it, from the same schema
 | `STATUS` v1 and v2 | `decode_status`, `status_topic_count`, `encode_status_v1` / `encode_status_v2` |
 | `HELLO` negotiation | `negotiate(local, remote)` -> `EffectiveLimits` |
 | Traffic priority | `priority_class(type, object_id, status_degraded)` -> `PriorityClass` |
+
+`btp::HelloBuilder(role, peer_uuid)` builds a wire-valid `Hello` with sane
+defaults for every field a deployment rarely touches -- one protocol version,
+`max_logical_payload` 2048, 4 concurrent reassemblies, 8 subscriptions, 32
+dedup entries, a 30 s watchdog, no manifest advertised (`config_revision`
+0). Chain `.session_timeout_ms(...)` / `.max_logical_payload(...)` / ... to
+override only the fields that matter for this deployment:
+
+```cpp
+const btp::Hello h = btp::HelloBuilder(btp::Role::Consumer, my_uuid)
+                          .session_timeout_ms(15000U)
+                          .max_logical_payload(4096U)
+                          .build();
+```
+
+`role` and `peer_uuid` have no safe default -- an all-zero `peer_uuid` is
+explicitly invalid on the wire -- so both are constructor arguments, not
+chain calls: a `HelloBuilder` always builds a wire-valid `Hello`, never a
+half-filled one waiting on a call that was forgotten. `Hello h = {}; h.role =
+...;` field by field is still there for anything the builder does not wrap
+(`version_count` / `versions[]` for more than one announced protocol
+version, say).
 
 `TERMINAL_IN` / `TERMINAL_OUT` have no decode entry: their payload is opaque
 bytes with no structure ([Session and terminal](session-and-terminal.md#7-the-terminal)).
@@ -2417,16 +2439,14 @@ millisecond source — `millis()` or `esp_timer_get_time() / 1000` on an MCU,
 only ever computes `now_ms >= deadline`; it never includes `<ctime>`.
 
 ```cpp
-btp::Hello local{};
-local.role = static_cast<std::uint8_t>(btp::Role::Producer);
-local.version_count = 1; local.versions[0] = 1;
-local.max_logical_payload = 2048;
-local.max_inflight_reassemblies = 1;
-local.max_subscriptions = 8;
-local.max_dedup_entries = 32;
-local.session_timeout_ms = 30000;
-std::memcpy(local.peer_uuid, my_uuid, 16);
-local.config_revision = manifest_revision;
+// btp::HelloBuilder (§12) fills every field a deployment rarely touches --
+// only max_inflight_reassemblies and config_revision differ from its
+// defaults here.
+const btp::Hello local =
+    btp::HelloBuilder(btp::Role::Producer, my_uuid)
+        .max_inflight_reassemblies(1U)
+        .config_revision(manifest_revision)
+        .build();
 
 btp::Session session(local, /*hello_deadline_ms=*/2000);  // 2000: serial §5.1
 
@@ -2653,92 +2673,164 @@ library.
 
 ### 16.1 The contract
 
-Every external dependency is a **C function pointer** in `NodeConfig` (a `void*`
-context and a plain function — never `std::function`, never virtual):
+`NodeConfig` is an abstract class a consumer **inherits from once** — not a
+struct of `(function pointer, void* ctx)` pairs to fill in by hand, which is
+what it was through library 2.33. `source_id`, `boot_id` and `transport` (a
+`TransportLimits`, [§4.2](#42-transport-limits)) stay plain data, set in your
+constructor; every external dependency is a virtual method, each an optional
+`has_X()` / `X()` pair Node calls in that order — it calls `X()` only when
+`has_X()` says `true` — except `send()`, the one axis every node needs:
 
-| field | when | what it does |
+| method | when | what it does |
 | --- | --- | --- |
-| `send` | to send / run a session | one encoded frame → your radio / UART / HID; a receive-only node omits it |
-| `clock` | optional | `→ now_ms`; `nullptr` means you pass `now_ms` to `receive()` / `tick()` |
-| `seal` | optional | encrypt one logical payload; `nullptr` → `send()` is cleartext |
-| `open` | optional | decrypt one received payload; `nullptr` → `receive()` hands back the sealed bytes |
-| `reply_seal` | optional | picks the seal for ONE automatic reply (`SUBSCRIBE_RESULT` / `UNSUBSCRIBE_RESULT` / `COMMAND_RESULT` / `MANIFEST_DATA`) from the *original request's* header; `nullptr` → every automatic reply uses `seal` |
+| `send()` | REQUIRED | one encoded frame → your radio / UART / HID; a receive-only node still overrides it, returning `false` |
+| `has_clock()` / `clock()` | optional | → `now_ms`; not overridden means you pass `now_ms` explicitly to `receive()` / `tick()` / `routine()` |
+| `has_seal()` / `seal()` | optional | encrypt one logical payload; not overridden → `send()` is cleartext |
+| `has_open()` / `open()` | optional | decrypt one received payload; not overridden → `receive()` hands back the sealed bytes |
+| `has_terminal()` / `terminal()` | optional | answer a `TERMINAL_IN` / `TERMINAL_OUT` frame directly ([§16.5](#165-terminal-nodeon_terminal-nodeconfigterminal)) |
+| `has_command()` / `command()` | optional, `SizedNode<>` / `StaticNode<>` only | run a Fresh `COMMAND_REQUEST` synchronously ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
+| `reply_seal()` | optional | picks the seal for ONE automatic reply (`SUBSCRIBE_RESULT` / `UNSUBSCRIBE_RESULT` / `COMMAND_RESULT` / `MANIFEST_DATA`) from the *original request's* header; default falls through to `has_seal()` / `seal()` |
 
-The **key never enters BTP**. `seal` is a `btp::EndpointSealFn` and `open` a
-`btp::NodeOpenFn`; the key lives in *your* functions, which select it from
-`header.source_id` (real: `RadioSeal` / `bally-seal`) and call `btp::aead_seal`
-/ `btp::aead_open`. The nonce (`source_id ‖ boot_id ‖ sequence`) and the AAD
-(the canonical header) are `btp::aead`'s.
+```cpp
+class RobotLink : public btp::NodeConfig {
+public:
+    RobotLink(const AeadKey& key) : key_(key) {
+        source_id = 0x00CAFE01U;
+        boot_id   = 0x0000B001U;
+        transport = btp::kEspNowTransport;
+    }
+    bool send(const std::uint8_t* frame, std::size_t n) override {
+        return esp_now_send(peer_mac_, frame, n) == ESP_OK;
+    }
+    bool has_seal() const override { return true; }
+    bool seal(const btp::Header& h, std::uint16_t n, const std::uint8_t* pt,
+              std::uint8_t* out) override {
+        return btp::aead_seal(key_, h, n, pt, out) == btp::AeadError::Ok;
+    }
+    // has_open()/open() the same, if this node also receives.
+private:
+    AeadKey key_;
+};
+```
+
+The **key never enters BTP** — `seal()` / `open()` select it from
+`header.source_id` (real: `RadioSeal` / `bally-seal`) and call
+`btp::aead_seal` / `btp::aead_open`. The nonce (`source_id ‖ boot_id ‖
+sequence`) and the AAD (the canonical header) are `btp::aead`'s.
+
+`Node` holds `cfg` by **reference**, reading it live at each call rather than
+copying it in at construction — a caller whose identity is only known after
+something else exists (a `TxScheduler` configured later than the `Node`
+itself) just mutates `source_id` / `boot_id` / `transport` directly, any time
+before `begin()`. (This is also what replaced the short-lived
+`Node::reconfigure()` method — see the [README](../README.md)'s version
+history.) The usual shape both inherits `NodeConfig` and owns its
+`Node` as a member ([`example/sender.cpp`](../example/sender.cpp),
+[`example/receiver.cpp`](../example/receiver.cpp), via
+[`example/node_config.hpp`](../example/node_config.hpp)): base-before-member
+construction order means `*this` is already a live `NodeConfig` by the time
+the `Node` member's own constructor runs, and a member outlives the object it
+is declared in, so the reference stays valid for the `Node`'s whole lifetime
+with no manual bookkeeping. Don't call any method on the `Node` you're
+mid-constructing from your own mem-initializers or constructor body.
 
 Storage stays caller-owned, exactly as `btp::Receiver` and `btp::Endpoint`
 expect: the reassembly slots and their byte regions, a buffer `receive()`
 copies a completed message into, a seal scratch for the fragmented-encrypted
-path, a buffer `open` writes plaintext into, and a scratch buffer
-`serve_catalog()` / `publish()` build into. **`btp::StaticNode<Slots,
-SlotBytes, SealBytes, ScratchBytes, CatalogTopics, CatalogFields,
-CatalogStringBytes>`** owns all of it as members (defaults `4, 600, 2048, 512,
-8, 64, 1024` — the bally_OS / bally_dongle reassembly shape, plus
-`btp::StaticCatalog`'s own defaults for the node's *own* catalogue —
-[§16.4](#164-the-schema-catalogue-btpcatalog)) for the common embedded case.
+path, a buffer `open()` writes plaintext into, and a scratch buffer
+`serve_catalog()` / `publish()` build into. **`btp::SizedNode<NodeSize::Low |
+Medium | High>`** owns all of it as members, pre-sized to one of three memory
+tiers — `Low` ≈ 7.2 KiB (one small topic, a battery-powered sensor), `Medium`
+≈ 17.4 KiB (the ESP32-class robot this library was sized for, and identical to
+`StaticNode<>`'s own bare defaults), `High` ≈ 67.7 KiB (a hub or desktop
+aggregator) — the right starting point for the common embedded case
+([§16.2](#162-using-it)). **`btp::StaticNode<Slots, SlotBytes, SealBytes,
+ScratchBytes, CatalogTopics, CatalogFields, CatalogStringBytes,
+MaxSubscriptions, MaxCommands, CommandBytes>`** is the same storage with every
+dimension spelled out by hand (`SizedNode`'s own alias target) — the escape
+hatch for a node that needs one dimension off that curve, a desktop hub with a
+huge catalogue but few concurrent reassemblies, say.
 
-**One context** calls `send` / `receive` / `tick`, as `btp::Receiver` and
-`btp::Session` require. A timer may *pace* `tick()` — but by raising a flag the
-loop reads, never by calling `tick()` from the ISR. Reading the *clock* from an
-ISR is fine.
+**One context** calls `send` / `receive` / `tick` / `routine`, as
+`btp::Receiver` and `btp::Session` require. A timer may *pace* `tick()` /
+`routine()` — but by raising a flag the loop reads, never by calling either
+from the ISR. Reading the *clock* from an ISR is fine.
 
 ### 16.2 Using it
 
 ```cpp
-btp::StaticNode<> node({source_id, boot_id, btp::kEspNowTransport,
-                        &radio_send, nullptr,   // send  (required)
-                        &clock_ms,   nullptr,   // clock
-                        &seal_c,     nullptr,   // seal  (the key lives here)
-                        &open_c,     nullptr}); // open
-if (!node.begin()) { /* bad identity or storage */ }
+class RobotLink : public btp::NodeConfig { /* send() etc. -- §16.1 */ };
 
-// If identity/send/seal/... is only known after something else exists (say,
-// a TxScheduler configured later than the Node itself is constructed), build
-// with a placeholder NodeConfig and call this once the real one is known,
-// before begin() -- see reconfigure()'s own doc comment for the later-call
-// case (a hub re-keying an idle node):
-//   node.reconfigure(real_cfg);
-//   if (!node.begin()) { /* ... */ }
+RobotLink link;
+link.source_id = 0x00CAFE01U;
+link.boot_id   = 0x0000B001U;
+link.transport = btp::kEspNowTransport;
 
-// producer:
-node.send(btp::MessageType::Telemetry, 0x0101, body, body_size, now_us());
+// SizedNode<Low | Medium | High> owns every buffer as a member, pre-sized to
+// one of three memory tiers (§16.1). `link` is held by REFERENCE and must
+// outlive `node` -- true here simply because it is declared first.
+btp::SizedNode<btp::NodeSize::Medium> node(link);
 
-// consumer, opt-in responder session:
-node.enable_session(local_hello, /*hello_deadline_ms=*/0);
-node.arm_session();
+// producer: declare a topic on the node's own catalogue, with the callback
+// that fills a sample registered in the SAME statement (§16.6 has the fill
+// function's own shape) --
+node.topic(0x0101U, /*schema_version=*/3U, "drive_status", &fill_drive_status)
+    .f32("left_rpm", "rpm")
+    .u16("battery_v", 0.001, "V")
+    .end();
+
+// Every other Hello field takes btp::HelloBuilder's own default (messages.hpp)
+// -- override one with e.g. .session_timeout_ms(15000U) if this robot needs a
+// shorter watchdog. StaticNode<>::begin(name, hello) -- SizedNode<> included,
+// it is a StaticNode<> alias -- serves the catalogue, arms the session and
+// announces MANIFEST_DATA in the one call.
+if (!node.begin("example-robot",
+                btp::HelloBuilder(btp::Role::Producer, my_uuid).build())) {
+    /* bad identity or storage */
+}
+
+// consumer instead: connect() OUT rather than accept a connection -- §16.3 --
+//   if (!node.begin(hello, /*connect_deadline_ms=*/2000U)) { ... }
+
+std::uint64_t now_ms = 0U;
 for (;;) {
-    btp::ReceivedMessage msg{};
-    if (node.receive(datagram, n, &msg) == btp::NodeRx::Complete)
-        route(msg.header, msg.payload);          // the caller's one switch
-    node.tick();                                  // watchdog + reassembly sweep
+    const std::size_t n = link_poll(datagram, sizeof datagram);
+    // datagram (if any) -> receive(); either way, publish due topics and
+    // sweep the session watchdog. COMMAND_REQUEST / TERMINAL_IN are both
+    // handled INSIDE routine() -- RobotLink::command() / RobotLink::terminal()
+    // (if overridden, §16.5 / §16.7) already ran by the time it returns.
+    node.routine(datagram, n, now_ms);
+    now_ms = read_clock();
 }
 ```
 
+If identity/`send`/`seal`/... is only known after something else exists (say,
+a `TxScheduler` configured later than the config object itself), there is no
+placeholder-then-reconfigure dance to do: `cfg` is read live at each call
+(§16.1), so a caller in that shape just assigns `link.source_id = ...` /
+`link.transport = ...` directly, any time before `begin()`.
+
 `send()` reserves a sequence, seals once over the whole payload when
-`cfg.seal` is set, fragments, and hands each frame to `cfg.send` — a `false`
-from the seal sends nothing (fail-closed). `send_with()` takes a seal for one
+`cfg.has_seal()`, fragments, and hands each frame to `cfg.send()` — a `false`
+from `seal()` sends nothing (fail-closed). `send_with()` takes a seal for one
 message (a hub sealing channel C and channel B with different keys) — that
 covers the caller's OWN sends, but not the node's automatic replies to a
 SUBSCRIBE / UNSUBSCRIBE / COMMAND_REQUEST / MANIFEST_REQUEST, which always
-used `cfg.seal` alone until `reply_seal` (§16.1): a hub-shaped responder that
-answers a request with whichever key matches ITS ORIGIN (not one key for
-every automatic reply) sets `cfg.reply_seal` to a function of the *original
-request's* header instead — see `NodeReplySealFn`'s doc comment in
-`node.hpp`. `nullptr` (the default) is exactly today's single-key behavior.
+used `has_seal()`/`seal()` alone until `reply_seal()` (§16.1): a hub-shaped
+responder that answers a request with whichever key matches ITS ORIGIN (not
+one key for every automatic reply) overrides `reply_seal()` instead — see its
+own doc comment in `node.hpp`. The default (falling through to
+`has_seal()`/`seal()`) is exactly today's single-key behavior.
 
 `receive()` sweeps stale partials, decodes, checks CRC and reassembles; with a
 session enabled it also runs the `HELLO` handshake, renews the watchdog and
-answers `SESSION_CLOSE` (framing the reply and sending it through `cfg.send`)
-*before* a frame is routed. It returns a `NodeRx` — five outcomes collapsed
-from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
+answers `SESSION_CLOSE` (framing the reply and sending it through `cfg.send()`)
+*before* a frame is routed. It returns a `NodeRx` — the outcomes collapsed
+from `btp::ReceiveOutcome` and `btp::SessionEvent`:
 
 | `NodeRx` | meaning |
 | --- | --- |
-| `Complete` | `*out` is a whole logical message (plaintext if `open` ran) — route it |
+| `Complete` | `*out` is a whole logical message (plaintext if `open()` ran) — route it |
 | `Pending` | a fragment stored or a duplicate absorbed — nothing yet |
 | `SessionHandled` | a `HELLO` / `SESSION_CLOSE` / session timeout — the node already replied; see `session_event()` |
 | `InitiatorHandled` | `connect()`'s `HELLO_RESULT` arrived, or the connection watchdog timed out; see `initiator_event()` ([§16.3](#163-the-session-initiator-connect)) |
@@ -2746,11 +2838,37 @@ from `btp::ReceiveOutcome` (7) and `btp::SessionEvent` (7):
 | `SubscriptionHandled` | a `SUBSCRIBE_RESULT` for a `subscribe()` / renewal this node holds; see `subscription_event()` |
 | `CommandServed` | a `COMMAND_REQUEST` against `commands()` -- the node already ran / replayed / rejected it and replied ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
 | `CommandHandled` | a `COMMAND_RESULT` for a `command()` this node holds; see `command_outcome()` |
-| `Ignored` | a frame arrived with a session enabled but not yet `Active` |
-| `DroppedFrame` | `btp::decode` / reassembly rejected it — the breakdown is in `stats()` |
+| `CatalogUpdated` | a `MANIFEST_DATA` — ingested into the attached learn catalogue ([§16.4](#164-the-schema-catalogue-btpcatalog)) |
+| `SampleDelivered` | a `TELEMETRY` sample of a known topic — decoded and handed to `on_sample()` |
+| `TerminalDelivered` | a `TERMINAL_IN` / `TERMINAL_OUT` frame — handed to `terminal()` / `on_terminal()` ([§16.5](#165-terminal-nodeon_terminal-nodeconfigterminal)) |
+| `RequestServed` | a `MANIFEST_REQUEST` — the node built and sent `MANIFEST_DATA` |
+| `Ignored` | a frame the node would manage but cannot yet: a session not `Active`, or a sample for a topic the catalogue has not learned |
+| `DroppedFrame` | `btp::decode` / reassembly / a malformed managed payload rejected it — the breakdown is in `stats()` |
+| `NoDatagram` | `routine()` only, below — nothing arrived this pass, `receive()` did not run, but the housekeeping still did |
 
 `tick()` sweeps reassembly timeouts and polls the session watchdog, returning
 the `SessionEvent` (`TimedOut` once when a dead session is noticed).
+
+`routine()` — library 2.26 — is `receive()` plus the per-pass housekeeping
+every loop needs regardless of whether a datagram arrived this pass:
+`size == 0` skips `receive()` (returning `NodeRx::NoDatagram`) instead of
+decoding nothing, and either way `publish_subscribed_topics(now_ms)`
+([§16.6](#166-subscriptions-btpsubscriptiontable-btpsubscriptionclient)) and `tick(now_ms)` run right after — due topics get sent, then the
+session/connection watchdog and subscription lease renewal, each a no-op
+when the matching axis is not enabled. The SAME call covers a producer, a
+consumer, or a node that is both — see `example/sender.cpp` /
+`example/receiver.cpp`, both down to one `routine()` call in their loop.
+
+Three overloads: `routine(datagram, size, now_ms)` — the one in the example
+above, and in both — drops `Complete`'s payload, for a caller with a callback
+attached for everything it cares about (every OTHER outcome already ran its
+own — `on_sample()` / `on_publish()` / `terminal()` — before returning);
+`routine(datagram, size, now_ms, out)` keeps it, for a caller that still
+wants to read an unmanaged message type by hand; `routine(now_ms)` runs the
+housekeeping alone, with no `receive()` at all, for a caller whose datagrams
+arrive on their own task/thread/ISR and call `receive()` there directly.
+`receive()` / `tick()` stay reachable on their own for a caller that wants
+every piece apart.
 
 ### 16.3 The session initiator (`connect()`)
 
@@ -2774,7 +2892,7 @@ for (;;) {
 }
 ```
 
-`connect()` sends a `HELLO` (needs `cfg.send`) and waits up to `deadline_ms`
+`connect()` sends a `HELLO` (needs `cfg.send()`) and waits up to `deadline_ms`
 for `HELLO_RESULT`. `receive()` feeds every decoded frame to the initiator the
 same way it does the responder session: while awaiting a result, only a
 correlated `HELLO_RESULT` progresses the state (`NodeRx::InitiatorHandled`,
@@ -2806,7 +2924,7 @@ the manifest and `btp::telemetry` decodes the sample — the piece between,
 `btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes>`, which owns
 the pools) holds one topic per entry — `topic_id`, `schema_version`, encoding,
 `max_rate_millihz`, subscribable, a `FieldSpec[]`, the topic + field names, and
-(since 2.18.0) each field's unit and description, read back with
+(since 2.28.0) each field's unit and description, read back with
 `field_unit()`/`field_description()` next to `field_name()` — `""` when that
 pool was not kept or the field is out of range, never `nullptr`. A topic's own
 description does not round-trip yet. `add_topic()` fills it from `FieldRecord`s
@@ -2905,14 +3023,56 @@ schema — `fill` writes the values in schema order — and sends the `TELEMETRY
 frame; the `serve_catalog` / `publish` scratch is the node's fourth buffer
 (`StaticNode`'s `ScratchBytes`, default 512).
 
-`publish()` / `publish_named()` always seal with `cfg.seal` — no override, the
-one gap `send()` (which has `send_with()`) did not share until 2.20.0:
+`publish()` / `publish_named()` always seal with `cfg.seal()` — no override,
+the one gap `send()` (which has `send_with()`) did not share until 2.30.0:
 `publish_with(topic_id, fill, ctx, ts, seal, seal_ctx)` /
 `publish_named_with(...)` are the same pipeline with a seal for THIS sample,
-for a producer whose TELEMETRY key differs from whatever `cfg.seal` is set to
-(a hub sealing its own automatic replies with one key and a topic with
-another). A null override forces cleartext regardless of `cfg.seal`, the same
-rule `send_with()` already follows.
+for a producer whose TELEMETRY key differs from whatever `cfg.seal()`
+returns (a hub sealing its own automatic replies with one key and a topic
+with another). A null override forces cleartext regardless of `cfg.seal()`,
+the same rule `send_with()` already follows.
+
+### 16.5 Terminal (`node.on_terminal()` / `NodeConfig::terminal()`)
+
+`TERMINAL_IN` / `TERMINAL_OUT` carry opaque bytes, no struct — [Session and
+terminal §7.2](session-and-terminal.md#72-opaque-payload) is the whole reason
+why, and `btp::Node` mirrors that: no serve/learn split (there is no
+schema to negotiate) and no send sugar either — sending stays plain
+`node.send(btp::MessageType::Terminal, btp::object_id::kTerminalIn` (or
+`kTerminalOut`) `, payload, size, timestamp_us)`. The only thing `Node` adds
+is a place to answer FROM:
+
+```cpp
+bool has_terminal() const noexcept override { return true; }
+void terminal(btp::Node& node, const btp::Header& header,
+              btp::ByteView payload, std::uint64_t now_ms) override {
+    node.send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
+              payload.data, payload.size, now_ms * 1000ULL);   // echo
+}
+```
+
+`receive()` (and `routine()`) call this for EITHER direction — `kTerminalIn`
+and `kTerminalOut` both reach it, check `header.object_id` if this node only
+expects one — and report `NodeRx::TerminalDelivered` instead of `Complete`.
+`node` is this same node, already mid-`receive()` — `send()` / `send_with()`
+are fine to call from inside `terminal()`, the same reentrant-from-inside-
+`receive()` pattern the automatic SUBSCRIBE / COMMAND / MANIFEST_REQUEST
+replies already use ([§16.6](#166-subscriptions-btpsubscriptiontable-btpsubscriptionclient), [§16.7](#167-commands-btpdedupcache-btpcommandclient)), so a handler that talks back (the usual
+case: `TERMINAL_IN` answered with `TERMINAL_OUT`) needs nothing threaded in
+via a `ctx` to reach it. `now_ms` is `receive()`'s own now, for a reply's
+timestamp; do not keep `payload` past the callback, same lifetime as
+`ReceivedMessage::payload`.
+
+Unlike commands ([§16.7](#167-commands-btpdedupcache-btpcommandclient)), this wires on ANY `Node`, not only a `SizedNode<>` /
+`StaticNode<>` — there is no dedicated storage `terminal()` needs, so the base
+`Node` constructor reads `cfg.has_terminal()` once and sets its internal
+callback straight from `cfg.terminal()` when it says `true`. Without an
+override, a `TERMINAL` frame comes back as `NodeRx::Complete` for the caller
+to route by hand — the same fallback every unmanaged message type gets.
+`Node::on_terminal(callback, ctx)` stays reachable to set or replace a plain
+function-pointer handler after construction, independent of `cfg`'s own
+override — the form a raw `Node` with no `NodeConfig::terminal()` override
+(or a handler that needs an unrelated `ctx`) uses instead.
 
 ### 16.6 Subscriptions (`btp::SubscriptionTable` / `btp::SubscriptionClient`)
 
@@ -2949,6 +3109,20 @@ node.on_publish(0x0101, &fill_drive_status, nullptr);   // once, next to the top
 // per tick(), instead of the table.due()/publish()/note_published() block above:
 node.publish_subscribed_topics(now_ms);
 ```
+
+`StaticNode<>::topic(topic_id, schema_version, name, fill, fill_ctx, ...)`
+folds those two statements into one -- declaring a topic and saying how to
+fill it become a single call (`example/sender.cpp`'s own shape, [§16.2](#162-using-it)):
+
+```cpp
+node.topic(0x0101, 3, "drive_status", &fill_drive_status)
+    .f32("left_rpm", "rpm")./*...*/.end();
+```
+
+`fill` defaults to `nullptr` -- every call site written before this
+parameter existed still compiles, declaring a topic with nothing
+`on_publish()`-registered for it, same as calling the two-argument
+`catalog().topic(...)` form directly.
 
 `on_publish(topic_id, fill, ctx)` registers a `NodeNamedFillFn` for a topic
 already in the served catalogue -- `StaticNode<>` has storage for the
@@ -3003,8 +3177,20 @@ RESPONDER side reuses `btp::DedupCache` ([§13](#13-the-session-layer)) --
 already the executor's memory of "did I run this identity before" -- and the
 INITIATOR side is `btp::CommandClient`, new alongside it.
 
+On a `SizedNode<>` / `StaticNode<>`, overriding `has_command()` / `command()`
+on the `NodeConfig` (§16.1) is enough -- the constructor reads
+`cfg.has_command()` once and wires `command()` straight into its own
+`btp::DedupCache`, no `enable_commands()` call needed. This is the ONE axis
+that only takes effect there: `command()` needs a `DedupCache` a bare `Node`
+has no storage to bind, so on a bare `Node`, `cfg.command()` is ignored and
+`enable_commands(cache, handler, ctx)` below is the only way in, same as
+always.
+
 ```cpp
-// responder:
+// responder, a raw Node -- a SizedNode<>/StaticNode<> either overrides
+// NodeConfig::command() (above) or calls its own two-argument
+// enable_commands(handler, ctx) sugar, reaching its already-owned
+// DedupCache without repeating &commands:
 btp::DedupSlot slots[8]; std::uint8_t bytes[8][256]; btp::DedupStorage storage[8];
 btp::DedupRequester requesters[4];
 btp::DedupCache commands(slots, storage, 8, requesters, 4);

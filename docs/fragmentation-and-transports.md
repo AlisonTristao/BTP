@@ -55,7 +55,7 @@ Each fragment is validated independently before reassembly.
 
 ### 1.1 Fragment generation
 
-The maximum payload carried by one frame is defined by the selected transport profile.
+The maximum payload carried by one frame is defined by the selected `TransportLimits`.
 
 For a transport with payload limit `L`, the number of fragments required for a logical payload of size `S` is:
 
@@ -88,7 +88,7 @@ Fragments are indexed from zero:
 
 The reference fragmenter fills each fragment up to the transport payload limit before generating the next fragment.
 
-For example, a 500-octet logical payload transmitted through a profile with a 210-octet payload limit produces:
+For example, a 500-octet logical payload transmitted through a transport with a 210-octet payload limit produces:
 
 ```text
 Fragment 0: 210 octets
@@ -144,9 +144,9 @@ A logical message can therefore contain at most:
 255 fragments
 ```
 
-The maximum logical payload supported by the fragmentation layer depends on the payload capacity of the transport profile:
+The maximum logical payload supported by the fragmentation layer depends on the payload capacity of the selected `TransportLimits`:
 
-| Profile | Payload per frame | Maximum logical payload |
+| Preset  | Payload per frame | Maximum logical payload |
 | ------- | ----------------: | ----------------------: |
 | ESP-NOW |        210 octets |           53,550 octets |
 | Serial  |      4,056 octets |        1,034,280 octets |
@@ -376,7 +376,7 @@ It does not change:
 
 ---
 
-## 5. ESP-NOW profile
+## 5. ESP-NOW
 
 ESP-NOW provides datagram boundaries.
 
@@ -392,7 +392,7 @@ One ESP-NOW datagram carries exactly one BTP frame:
 
 No additional BTP delimiter, length prefix, or padding is added.
 
-The profile limits are:
+`kEspNowTransport`'s `TransportLimits` are:
 
 ```text
 maximum frame   = 250 octets
@@ -429,7 +429,7 @@ Transport delivery and application completion are separate events.
 
 ---
 
-## 6. Serial profile
+## 6. Serial
 
 A serial connection is a byte stream.
 
@@ -514,7 +514,7 @@ BTP decode
 
 ### 6.2 Serial limits
 
-The BTP serial profile defines:
+`kSerialTransport`'s `TransportLimits` define:
 
 | Quantity               |     Maximum |
 | ---------------------- | ----------: |
@@ -568,9 +568,9 @@ Mode transitions occur through the session mechanism described in [Session and t
 
 ---
 
-## 7. USB HID profile
+## 7. USB HID
 
-The USB HID profile uses fixed-size 64-octet reports.
+USB HID uses fixed-size 64-octet reports.
 
 The BTP frame occupies part of the report:
 
@@ -582,7 +582,7 @@ The BTP frame occupies part of the report:
                     64 octets total
 ```
 
-The profile limits are:
+`kUsbHidTransport`'s `TransportLimits` are:
 
 ```text
 maximum BTP frame   = 62 octets
@@ -609,7 +609,8 @@ The logical message format does not change because the transport has a smaller f
 
 ### 7.3 Encryption restriction
 
-The current USB HID profile does not permit BTP authenticated encryption.
+`kUsbHidTransport` does not permit BTP authenticated encryption
+(`allow_encrypted == false`).
 
 A frame with:
 
@@ -617,17 +618,19 @@ A frame with:
 ENCRYPTED = 1
 ```
 
-is rejected when encoded or decoded using this transport profile.
+is rejected when encoded or decoded against this `TransportLimits`.
 
-This is a transport-profile restriction. It does not change the general BTP frame format or the encryption capabilities of other profiles.
+This is a restriction of that one preset's `TransportLimits`. It does not
+change the general BTP frame format or the encryption capabilities of any
+other transport.
 
 USB HID is point-to-point and does not define an additional BTP peer-addressing mechanism at the link layer.
 
 ---
 
-## 8. Crossing transport profiles
+## 8. Crossing transports
 
-A gateway may receive a logical message using one transport profile and transmit it using another.
+A gateway may receive a logical message using one `TransportLimits` and transmit it using another.
 
 For example:
 
@@ -635,17 +638,17 @@ For example:
             small frame limit             large frame limit
 
 Producer --------------------> Gateway --------------------> Consumer
-                Profile A                   Profile B
+              TransportLimits A            TransportLimits B
 ```
 
 The number and size of fragments may change across the gateway.
 
-The gateway first reconstructs the logical message and then fragments it according to the outgoing transport profile.
+The gateway first reconstructs the logical message and then fragments it according to the outgoing `TransportLimits`.
 
 For example:
 
 ```text
-Incoming profile limit = 22 octets
+Incoming limit = 22 octets
 
 Fragment 0
 Fragment 1
@@ -710,7 +713,7 @@ As a result, a gateway can:
 
 1. receive fragments;
 2. reassemble the protected logical payload;
-3. fragment it according to another transport profile;
+3. fragment it according to another `TransportLimits`;
 4. forward it without decrypting the application payload.
 
 The gateway does not require the encryption key for this operation.
@@ -734,7 +737,7 @@ Encrypted logical message
 
 The authentication tag remains associated with the logical message.
 
-A gateway cannot forward an encrypted BTP message through a transport profile that prohibits encrypted frames.
+A gateway cannot forward an encrypted BTP message through a transport whose `TransportLimits` prohibits encrypted frames (`allow_encrypted == false`).
 
 The complete cryptographic procedure is defined in [Encryption](encryption.md).
 
@@ -742,11 +745,11 @@ The complete cryptographic procedure is defined in [Encryption](encryption.md).
 
 ## 10. Summary
 
-BTP uses one frame format across all transport profiles.
+BTP uses one frame format across every transport.
 
-Transport profiles define how that frame is carried and how much payload can be placed in one frame.
+`TransportLimits` -- one of the three presets, or a caller's own -- defines how that frame is carried and how much payload can be placed in one frame.
 
-When the logical payload exceeds the selected profile limit, BTP fragmentation divides it into multiple independently validated frames.
+When the logical payload exceeds the selected limit, BTP fragmentation divides it into multiple independently validated frames.
 
 The receiver reconstructs these fragments using the logical message identity:
 

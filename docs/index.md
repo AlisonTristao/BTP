@@ -19,10 +19,13 @@ is correct. They ship as one version.
 | `COMMAND` / `CONTROL` payload layout | Specified, implemented in `btp::messages`, covered by `test-vectors/v2/messages/`. |
 | `TELEMETRY` sample body | Specified, implemented in `btp::telemetry` (`PACKED_LE` / `TLV_LE` against a schema), covered by `test-vectors/v2/telemetry/`. |
 | Command deduplication | Specified, implemented in `btp::session` (`btp::DedupCache`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
-| The session lifecycle and inactivity watchdog (responder side) | Implemented in `btp::session` (`btp::Session`), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
+| The session lifecycle and inactivity watchdog, both sides | Implemented in `btp::session` (`btp::Session`, the responder; `btp::SessionInitiator`, the peer that connects out), covered by `tests/test_session.cpp` (behaviour, no vector tree). |
 | Identity, sequencing and the transmit pipeline | Implemented in `btp::endpoint` (`btp::Endpoint`), covered by `tests/test_endpoint.cpp` (orchestration over the codec, no vector tree). |
 | The decode + CRC + reassembly receive path | Implemented in `btp::receiver` (`btp::Receiver`), covered by `tests/test_receiver.cpp` (orchestration over the codec, no vector tree). |
-| Version | `2.10.0` — one number, in [`include/btp/version.hpp`](../include/btp/version.hpp); `CMakeLists.txt` parses it and `library.json` is checked against it. |
+| The `MANIFEST_DATA` schema catalogue | Implemented in `btp::catalog` (`btp::Catalog`), covered by `tests/test_catalog.cpp` (behaviour, no vector tree). |
+| Subscriptions (`SUBSCRIBE` / `SUBSCRIBE_RESULT` / `UNSUBSCRIBE`) | Implemented in `btp::subscription` (`btp::SubscriptionTable` / `btp::SubscriptionClient`), covered by `tests/test_subscription.cpp` (behaviour, no vector tree). |
+| Endpoint + receiver + session + catalogue + subscriptions, wired into one object | Implemented in `btp::node` (`btp::Node`, `btp::StaticNode` / `btp::SizedNode`), covered by `tests/test_node.cpp` (orchestration, no vector tree). |
+| Version | `2.34.0` — one number, in [`include/btp/version.hpp`](../include/btp/version.hpp); `CMakeLists.txt` parses it and `library.json` is checked against it. |
 | Branches | `main` carries the newest major (introduced wire `0x02`); [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) keeps the wire `0x01` line alive. |
 
 BTP is **one** SemVer line, `MAJOR.MINOR.PATCH`. `MAJOR` is also the newest
@@ -57,12 +60,12 @@ finished when it produces and consumes the same octets as the vectors.
 | [Why BTP exists](why-btp.md) | The problem, what the design buys, what it costs, where it fits. |
 | [The model](model.md) | Roles, the five logical channels, identity, time, delivery. |
 | [The datagram](frame.md) | The 36-octet header octet by octet, flags, CRC, validation. |
-| [Getting it across the link](fragmentation-and-transports.md) | Fragmentation, reassembly, and the three transport profiles. |
+| [Getting it across the link](fragmentation-and-transports.md) | Fragmentation, reassembly, and `TransportLimits` -- the three ready-made presets, or a caller's own. |
 | [Encryption](encryption.md) | Wire v2 AEAD: ciphers, nonce, the canonicalized AAD, and the limits. |
 | [Telemetry payloads](telemetry.md) | Topics, schemas, encodings, and how a client binds a field. |
 | [Commands and discovery](commands.md) | Requests, results, deduplication, the manifest, subscriptions, status. |
 | [Session and terminal](session-and-terminal.md) | `HELLO`, session lifetime, the opaque terminal, priority under load. |
-| [Using the library](library.md) | The API, `btp::messages`, `btp::telemetry`, `btp::DedupCache`, guarantees, build, vectors, versioning, known limits. |
+| [Using the library](library.md) | The API, `btp::messages`, `btp::telemetry`, `btp::node`, guarantees, build, vectors, versioning, known limits. |
 
 ## Scope
 

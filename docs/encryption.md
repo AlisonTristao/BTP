@@ -82,7 +82,7 @@ authentication    =  16 octets
 encrypted payload = 116 octets
 ```
 
-The encrypted logical payload may then be fragmented according to the selected transport profile.
+The encrypted logical payload may then be fragmented according to the selected `TransportLimits`.
 
 ---
 
@@ -749,13 +749,13 @@ BTP can detect invalid authenticated messages, but it cannot guarantee that vali
 
 ## 17. Transport restrictions
 
-A transport profile may impose additional restrictions on encrypted messages.
+A transport's `TransportLimits` may impose additional restrictions on encrypted messages.
 
-The current USB HID profile does not support `ENCRYPTED` frames because the 16-octet authentication tag consumes a significant portion of its available frame payload.
+`btp::kUsbHidTransport` does not allow `ENCRYPTED` frames (`allow_encrypted == false`) because the 16-octet authentication tag consumes a significant portion of its available frame payload.
 
-This restriction belongs to the transport profile and does not change the general BTP encryption model.
+This restriction belongs to the transport's own `TransportLimits`, set by the caller, and does not change the general BTP encryption model.
 
-Transport-specific encryption support is defined in [Fragmentation and transport profiles](fragmentation-and-transports.md).
+Transport-specific encryption support is defined in [Getting it across the link](fragmentation-and-transports.md).
 
 ---
 
