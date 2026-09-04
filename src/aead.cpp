@@ -82,6 +82,8 @@
 #include <psa/crypto.h>
 #endif
 
+#include <new>  // placement-new for AeadCipher::storage_ (no heap involved)
+
 namespace btp {
 
 namespace {
@@ -116,15 +118,34 @@ Header aad_header(const Header& header) noexcept {
     return canonical;
 }
 
-// All four entry points validate the same arguments and build the same two
-// buffers. Doing it once keeps the AAD construction -- the subtle part, and
-// the one both peers must agree on byte for byte -- from being spelled out
-// four times and drifting in one of them.
-//
 // wire_payload_size is what the AAD records: the size of the whole logical
 // payload as it appears on the wire, ciphertext plus tag. A sealer therefore
 // passes plaintext_size + kTagSize, while an opener passes ciphertext_size
 // unchanged because it already includes the tag.
+//
+// Shared by every stateless entry point below AND by AeadCipher::seal() /
+// open() (this file, further down): the two differ only in whether the key
+// is imported fresh on this call (prepare(), which does that too) or was
+// already imported by a prior AeadCipher::reset() (AeadCipher's own methods,
+// which have no key to validate here and call this directly) -- the AAD /
+// nonce construction is identical either way and both must agree with it
+// byte for byte, so it is written once.
+AeadError build_aad_and_nonce(const Header& header,
+                              std::uint16_t wire_payload_size,
+                              std::uint8_t out_aad[kAadSize],
+                              std::uint8_t out_nonce[kNonceSize]) noexcept {
+    if (encode_header(aad_header(header), wire_payload_size, out_aad) !=
+        Error::Ok) {
+        return AeadError::InvalidArgument;
+    }
+    aead_nonce(header, out_nonce);
+    return AeadError::Ok;
+}
+
+// All four stateless entry points validate the same arguments and build the
+// same two buffers. Doing it once keeps that -- the subtle part, and the one
+// both peers must agree on byte for byte -- from being spelled out four times
+// and drifting in one of them.
 //
 // Pointer rules follow the rest of the library: an input may be null only when
 // its size is zero, and an output buffer is always required.
@@ -146,12 +167,7 @@ AeadError prepare(const AeadKey& key,
     if (output == nullptr) {
         return AeadError::InvalidArgument;
     }
-    if (encode_header(aad_header(header), wire_payload_size, out_aad) !=
-        Error::Ok) {
-        return AeadError::InvalidArgument;
-    }
-    aead_nonce(header, out_nonce);
-    return AeadError::Ok;
+    return build_aad_and_nonce(header, wire_payload_size, out_aad, out_nonce);
 }
 
 // Guards the plaintext_size + kTagSize sum a sealer has to compute: the size
@@ -325,6 +341,179 @@ AeadError aead_open_chacha20poly1305(const AeadKey& key, const Header& header,
         return AeadError::TagMismatch;
     }
     return AeadError::InvalidArgument;
+}
+
+// ---------------------------------------------------------------------------
+// AeadCipher (classic backend) -- the key schedule / GHASH table live in
+// storage_, imported once by reset(), reused by every seal() / open().
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// storage_ is raw bytes; these just name the two ways this file interprets
+// it, matching whichever cipher_ says is actually live. Never both at once --
+// reset() destroys the previous object (of whichever type it was) before
+// placement-constructing the new one.
+mbedtls_gcm_context* as_gcm(unsigned char* storage) noexcept {
+    return reinterpret_cast<mbedtls_gcm_context*>(storage);
+}
+mbedtls_chachapoly_context* as_chachapoly(unsigned char* storage) noexcept {
+    return reinterpret_cast<mbedtls_chachapoly_context*>(storage);
+}
+
+}  // namespace
+
+// A silent overflow here would be storage_ corruption the first time a
+// context bigger than the buffer got placement-constructed into it -- this
+// turns that into a build failure instead, the moment either struct grows
+// past what AeadCipher was sized for.
+static_assert(sizeof(mbedtls_gcm_context) <= kAeadCipherStorageSize,
+             "AeadCipher::storage_ is too small for mbedtls_gcm_context -- "
+             "raise kAeadCipherStorageSize in include/btp/aead.hpp");
+static_assert(sizeof(mbedtls_chachapoly_context) <= kAeadCipherStorageSize,
+             "AeadCipher::storage_ is too small for mbedtls_chachapoly_context "
+             "-- raise kAeadCipherStorageSize in include/btp/aead.hpp");
+
+AeadCipher::AeadCipher() noexcept
+    : storage_(), cipher_(CipherId::AesGcm), valid_(false) {}
+
+AeadCipher::~AeadCipher() noexcept {
+    if (!valid_) {
+        return;
+    }
+    if (cipher_ == CipherId::AesGcm) {
+        mbedtls_gcm_free(as_gcm(storage_));
+    } else {
+        mbedtls_chachapoly_free(as_chachapoly(storage_));
+    }
+}
+
+bool AeadCipher::reset(CipherId cipher, const AeadKey& key) noexcept {
+    if (valid_) {
+        if (cipher_ == CipherId::AesGcm) {
+            mbedtls_gcm_free(as_gcm(storage_));
+        } else {
+            mbedtls_chachapoly_free(as_chachapoly(storage_));
+        }
+        valid_ = false;
+    }
+
+    if (cipher == CipherId::AesGcm) {
+        if (key.data == nullptr || key.size != kAesGcmKeySize) {
+            return false;
+        }
+        mbedtls_gcm_context* ctx = new (storage_) mbedtls_gcm_context;
+        mbedtls_gcm_init(ctx);
+        const int rc = mbedtls_gcm_setkey(ctx, MBEDTLS_CIPHER_ID_AES, key.data,
+                                          static_cast<unsigned int>(key.size * 8U));
+        if (rc != 0) {
+            mbedtls_gcm_free(ctx);
+            return false;
+        }
+        cipher_ = cipher;
+        valid_ = true;
+        return true;
+    }
+    if (cipher == CipherId::ChaCha20Poly1305) {
+        if (key.data == nullptr || key.size != kChaCha20Poly1305KeySize) {
+            return false;
+        }
+        mbedtls_chachapoly_context* ctx = new (storage_) mbedtls_chachapoly_context;
+        mbedtls_chachapoly_init(ctx);
+        const int rc = mbedtls_chachapoly_setkey(ctx, key.data);
+        if (rc != 0) {
+            mbedtls_chachapoly_free(ctx);
+            return false;
+        }
+        cipher_ = cipher;
+        valid_ = true;
+        return true;
+    }
+    return false;
+}
+
+AeadError AeadCipher::seal(const Header& header, std::uint16_t payload_size,
+                           const std::uint8_t* plaintext,
+                           std::uint8_t* out_ciphertext_and_tag) noexcept {
+    if (!valid_) {
+        return AeadError::InvalidArgument;  // reset() never succeeded (or failed)
+    }
+    if (cipher_id(header.flags) != cipher_) {
+        return AeadError::InvalidCipherId;
+    }
+    if (!seal_size_fits(payload_size)) {
+        return AeadError::InvalidArgument;
+    }
+    if (plaintext == nullptr && payload_size != 0U) {
+        return AeadError::InvalidArgument;
+    }
+    if (out_ciphertext_and_tag == nullptr) {
+        return AeadError::InvalidArgument;
+    }
+
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    if (build_aad_and_nonce(header, static_cast<std::uint16_t>(payload_size + kTagSize),
+                            aad, nonce) != AeadError::Ok) {
+        return AeadError::InvalidArgument;
+    }
+
+    int rc;
+    if (cipher_ == CipherId::AesGcm) {
+        rc = mbedtls_gcm_crypt_and_tag(
+            as_gcm(storage_), MBEDTLS_GCM_ENCRYPT, payload_size, nonce,
+            sizeof(nonce), aad, sizeof(aad), non_null(plaintext),
+            out_ciphertext_and_tag, kTagSize,
+            out_ciphertext_and_tag + payload_size);
+    } else {
+        rc = mbedtls_chachapoly_encrypt_and_tag(
+            as_chachapoly(storage_), payload_size, nonce, aad, sizeof(aad),
+            non_null(plaintext), out_ciphertext_and_tag,
+            out_ciphertext_and_tag + payload_size);
+    }
+    return rc == 0 ? AeadError::Ok : AeadError::InvalidArgument;
+}
+
+AeadError AeadCipher::open(const Header& header, std::uint16_t ciphertext_size,
+                           const std::uint8_t* ciphertext_and_tag,
+                           std::uint8_t* out_plaintext) noexcept {
+    if (!valid_) {
+        return AeadError::InvalidArgument;  // reset() never succeeded (or failed)
+    }
+    if (cipher_id(header.flags) != cipher_) {
+        return AeadError::InvalidCipherId;
+    }
+    if (ciphertext_size < kTagSize) {
+        return AeadError::InvalidArgument;
+    }
+    if (ciphertext_and_tag == nullptr || out_plaintext == nullptr) {
+        return AeadError::InvalidArgument;
+    }
+
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    if (build_aad_and_nonce(header, ciphertext_size, aad, nonce) != AeadError::Ok) {
+        return AeadError::InvalidArgument;
+    }
+    const std::size_t plaintext_size =
+        static_cast<std::size_t>(ciphertext_size) - kTagSize;
+
+    int rc;
+    if (cipher_ == CipherId::AesGcm) {
+        rc = mbedtls_gcm_auth_decrypt(
+            as_gcm(storage_), plaintext_size, nonce, sizeof(nonce), aad,
+            sizeof(aad), ciphertext_and_tag + plaintext_size, kTagSize,
+            ciphertext_and_tag, out_plaintext);
+        if (rc == 0) return AeadError::Ok;
+        return rc == MBEDTLS_ERR_GCM_AUTH_FAILED ? AeadError::TagMismatch
+                                                  : AeadError::InvalidArgument;
+    }
+    rc = mbedtls_chachapoly_auth_decrypt(
+        as_chachapoly(storage_), plaintext_size, nonce, aad, sizeof(aad),
+        ciphertext_and_tag + plaintext_size, ciphertext_and_tag, out_plaintext);
+    if (rc == 0) return AeadError::Ok;
+    return rc == MBEDTLS_ERR_CHACHAPOLY_AUTH_FAILED ? AeadError::TagMismatch
+                                                     : AeadError::InvalidArgument;
 }
 
 #else  // BTP_AEAD_BACKEND_PSA
@@ -534,6 +723,149 @@ AeadError psa_open(const AeadKey& key, std::size_t expected_key_size,
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// AeadCipher (PSA backend) -- one imported key id, live in storage_ from
+// reset() until the next reset() or the destructor.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+mbedtls_svc_key_id_t* as_psa_key_id(unsigned char* storage) noexcept {
+    return reinterpret_cast<mbedtls_svc_key_id_t*>(storage);
+}
+
+}  // namespace
+
+// See the classic backend's own pair of these (above #else): same reasoning,
+// a much smaller bound here since a PSA key id is not a cipher context.
+static_assert(sizeof(mbedtls_svc_key_id_t) <= kAeadCipherStorageSize,
+             "AeadCipher::storage_ is too small for a PSA key id -- raise "
+             "kAeadCipherStorageSize in include/btp/aead.hpp");
+
+AeadCipher::AeadCipher() noexcept
+    : storage_(), cipher_(CipherId::AesGcm), valid_(false) {}
+
+AeadCipher::~AeadCipher() noexcept {
+    if (!valid_) {
+        return;
+    }
+    (void)psa_destroy_key(*as_psa_key_id(storage_));
+}
+
+bool AeadCipher::reset(CipherId cipher, const AeadKey& key) noexcept {
+    if (valid_) {
+        (void)psa_destroy_key(*as_psa_key_id(storage_));
+        valid_ = false;
+    }
+
+    psa_key_type_t type = PSA_KEY_TYPE_AES;
+    psa_algorithm_t alg = kAlgAesGcm;
+    std::size_t expected_size = kAesGcmKeySize;
+    if (cipher == CipherId::ChaCha20Poly1305) {
+        type = PSA_KEY_TYPE_CHACHA20;
+        alg = kAlgChaCha20Poly1305;
+        expected_size = kChaCha20Poly1305KeySize;
+    } else if (cipher != CipherId::AesGcm) {
+        return false;
+    }
+    if (key.data == nullptr || key.size != expected_size) {
+        return false;
+    }
+    if (ensure_initialized() != PSA_SUCCESS) {
+        return false;
+    }
+
+    // Both usages granted, unlike PsaKey's single-purpose import (aead_seal /
+    // aead_open above): this object exists so a node can seal its own
+    // traffic AND open its peer's under the one symmetric key, not two
+    // separately-scoped one-way imports.
+    mbedtls_svc_key_id_t* id =
+        new (storage_) mbedtls_svc_key_id_t(MBEDTLS_SVC_KEY_ID_INIT);
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attributes, type);
+    psa_set_key_bits(&attributes, key.size * 8U);
+    psa_set_key_algorithm(&attributes, alg);
+    psa_set_key_usage_flags(&attributes,
+                            PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
+    const psa_status_t status = psa_import_key(&attributes, key.data, key.size, id);
+    if (status != PSA_SUCCESS) {
+        return false;
+    }
+    cipher_ = cipher;
+    valid_ = true;
+    return true;
+}
+
+AeadError AeadCipher::seal(const Header& header, std::uint16_t payload_size,
+                           const std::uint8_t* plaintext,
+                           std::uint8_t* out_ciphertext_and_tag) noexcept {
+    if (!valid_) {
+        return AeadError::InvalidArgument;  // reset() never succeeded (or failed)
+    }
+    if (cipher_id(header.flags) != cipher_) {
+        return AeadError::InvalidCipherId;
+    }
+    if (!seal_size_fits(payload_size)) {
+        return AeadError::InvalidArgument;
+    }
+    if (plaintext == nullptr && payload_size != 0U) {
+        return AeadError::InvalidArgument;
+    }
+    if (out_ciphertext_and_tag == nullptr) {
+        return AeadError::InvalidArgument;
+    }
+
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    if (build_aad_and_nonce(header, static_cast<std::uint16_t>(payload_size + kTagSize),
+                            aad, nonce) != AeadError::Ok) {
+        return AeadError::InvalidArgument;
+    }
+
+    const psa_algorithm_t alg =
+        cipher_ == CipherId::AesGcm ? kAlgAesGcm : kAlgChaCha20Poly1305;
+    std::size_t written = 0U;
+    const psa_status_t status = psa_aead_encrypt(
+        *as_psa_key_id(storage_), alg, nonce, sizeof(nonce), aad, sizeof(aad),
+        non_null(plaintext), payload_size, out_ciphertext_and_tag,
+        static_cast<std::size_t>(payload_size) + kTagSize, &written);
+    return from_psa(status);
+}
+
+AeadError AeadCipher::open(const Header& header, std::uint16_t ciphertext_size,
+                           const std::uint8_t* ciphertext_and_tag,
+                           std::uint8_t* out_plaintext) noexcept {
+    if (!valid_) {
+        return AeadError::InvalidArgument;  // reset() never succeeded (or failed)
+    }
+    if (cipher_id(header.flags) != cipher_) {
+        return AeadError::InvalidCipherId;
+    }
+    if (ciphertext_size < kTagSize) {
+        return AeadError::InvalidArgument;
+    }
+    if (ciphertext_and_tag == nullptr || out_plaintext == nullptr) {
+        return AeadError::InvalidArgument;
+    }
+
+    std::uint8_t aad[kAadSize];
+    std::uint8_t nonce[kNonceSize];
+    if (build_aad_and_nonce(header, ciphertext_size, aad, nonce) != AeadError::Ok) {
+        return AeadError::InvalidArgument;
+    }
+    const std::size_t plaintext_size =
+        static_cast<std::size_t>(ciphertext_size) - kTagSize;
+
+    const psa_algorithm_t alg =
+        cipher_ == CipherId::AesGcm ? kAlgAesGcm : kAlgChaCha20Poly1305;
+    std::size_t written = 0U;
+    const psa_status_t status = psa_aead_decrypt(
+        *as_psa_key_id(storage_), alg, nonce, sizeof(nonce), aad, sizeof(aad),
+        non_null(ciphertext_and_tag), ciphertext_size, out_plaintext,
+        plaintext_size, &written);
+    return from_psa(status);
+}
 
 AeadError aead_seal_aes_gcm(const AeadKey& key, const Header& header,
                             std::uint16_t payload_size,

@@ -467,6 +467,202 @@ void test_sealed_message_survives_fragmentation_and_reassembly() {
     CHECK(std::memcmp(opened.data(), plaintext.data(), plaintext.size()) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// AeadCipher -- one reset(), many seal()/open() calls against the same key
+// ---------------------------------------------------------------------------
+
+void test_aead_cipher_aes_gcm_round_trip_reuses_key() {
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    btp::AeadCipher cipher;
+    CHECK(cipher.reset(btp::CipherId::AesGcm, key));
+    CHECK(cipher.valid());
+    CHECK(cipher.cipher() == btp::CipherId::AesGcm);
+
+    // Several messages under the ONE import -- the case reset() exists for.
+    // Only `sequence` (part of the nonce) changes between them.
+    for (std::uint32_t sequence = 1U; sequence <= 5U; ++sequence) {
+        btp::Header header = make_aes_gcm_header();
+        header.sequence = sequence;
+
+        const std::uint8_t plaintext[] = "AeadCipher reused across many frames";
+        const std::uint16_t plaintext_size =
+            static_cast<std::uint16_t>(sizeof(plaintext));
+        std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+        std::uint8_t recovered[sizeof(plaintext)] = {};
+
+        CHECK(cipher.seal(header, plaintext_size, plaintext, sealed) ==
+              btp::AeadError::Ok);
+        CHECK(cipher.open(header, static_cast<std::uint16_t>(sizeof(sealed)),
+                          sealed, recovered) == btp::AeadError::Ok);
+        CHECK(std::memcmp(plaintext, recovered, sizeof(plaintext)) == 0);
+    }
+}
+
+void test_aead_cipher_chacha20poly1305_round_trip_reuses_key() {
+    const std::uint8_t key_bytes[btp::kChaCha20Poly1305KeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    btp::AeadCipher cipher;
+    CHECK(cipher.reset(btp::CipherId::ChaCha20Poly1305, key));
+
+    for (std::uint32_t sequence = 1U; sequence <= 5U; ++sequence) {
+        btp::Header header = make_chacha20poly1305_header();
+        header.sequence = sequence;
+
+        const std::uint8_t plaintext[] = "same key, five different nonces";
+        const std::uint16_t plaintext_size =
+            static_cast<std::uint16_t>(sizeof(plaintext));
+        std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+        std::uint8_t recovered[sizeof(plaintext)] = {};
+
+        CHECK(cipher.seal(header, plaintext_size, plaintext, sealed) ==
+              btp::AeadError::Ok);
+        CHECK(cipher.open(header, static_cast<std::uint16_t>(sizeof(sealed)),
+                          sealed, recovered) == btp::AeadError::Ok);
+        CHECK(std::memcmp(plaintext, recovered, sizeof(plaintext)) == 0);
+    }
+}
+
+// AeadCipher must be byte-for-byte interchangeable with the stateless
+// functions -- a peer built against one has to interoperate with a peer built
+// against the other, the same promise the two backends already make each
+// other (aead.hpp's own top comment).
+void test_aead_cipher_matches_stateless_functions() {
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+    const btp::Header header = make_aes_gcm_header();
+    const std::uint8_t plaintext[] = "one key, two call styles, one ciphertext";
+    const std::uint16_t plaintext_size = static_cast<std::uint16_t>(sizeof(plaintext));
+
+    std::uint8_t sealed_stateless[sizeof(plaintext) + 16U] = {};
+    CHECK(btp::aead_seal_aes_gcm(key, header, plaintext_size, plaintext,
+                                 sealed_stateless) == btp::AeadError::Ok);
+
+    btp::AeadCipher cipher;
+    CHECK(cipher.reset(btp::CipherId::AesGcm, key));
+    std::uint8_t sealed_cached[sizeof(plaintext) + 16U] = {};
+    CHECK(cipher.seal(header, plaintext_size, plaintext, sealed_cached) ==
+          btp::AeadError::Ok);
+
+    CHECK(std::memcmp(sealed_stateless, sealed_cached, sizeof(sealed_stateless)) == 0);
+
+    // Cross-open: AeadCipher opens what the stateless function sealed, and
+    // vice versa.
+    std::uint8_t opened_by_cipher[sizeof(plaintext)] = {};
+    CHECK(cipher.open(header, static_cast<std::uint16_t>(sizeof(sealed_stateless)),
+                      sealed_stateless, opened_by_cipher) == btp::AeadError::Ok);
+    CHECK(std::memcmp(plaintext, opened_by_cipher, sizeof(plaintext)) == 0);
+
+    std::uint8_t opened_by_stateless[sizeof(plaintext)] = {};
+    CHECK(btp::aead_open_aes_gcm(
+              key, header, static_cast<std::uint16_t>(sizeof(sealed_cached)),
+              sealed_cached, opened_by_stateless) == btp::AeadError::Ok);
+    CHECK(std::memcmp(plaintext, opened_by_stateless, sizeof(plaintext)) == 0);
+}
+
+void test_aead_cipher_tag_corruption_is_rejected() {
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+    const btp::Header header = make_aes_gcm_header();
+    const std::uint8_t plaintext[] = "tamper the tag, not the data";
+    const std::uint16_t plaintext_size = static_cast<std::uint16_t>(sizeof(plaintext));
+
+    btp::AeadCipher cipher;
+    CHECK(cipher.reset(btp::CipherId::AesGcm, key));
+    std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+    CHECK(cipher.seal(header, plaintext_size, plaintext, sealed) == btp::AeadError::Ok);
+
+    sealed[sizeof(sealed) - 1U] ^= 0x01U;
+    std::uint8_t recovered[sizeof(plaintext)] = {};
+    CHECK(cipher.open(header, static_cast<std::uint16_t>(sizeof(sealed)), sealed,
+                      recovered) == btp::AeadError::TagMismatch);
+}
+
+// header claims CIPHER_ID == ChaCha20-Poly1305 against a cipher reset() bound
+// to AES-GCM -- a caller mistake this must not silently seal/open as AES-GCM
+// anyway (the wire flags would then disagree with what actually ran).
+void test_aead_cipher_rejects_cipher_mismatch() {
+    const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const btp::AeadKey key = {key_bytes, sizeof(key_bytes)};
+
+    btp::AeadCipher cipher;
+    CHECK(cipher.reset(btp::CipherId::AesGcm, key));
+
+    const btp::Header mismatched_header = make_chacha20poly1305_header();
+    const std::uint8_t plaintext[8] = {};
+    std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+    CHECK(cipher.seal(mismatched_header, sizeof(plaintext), plaintext, sealed) ==
+          btp::AeadError::InvalidCipherId);
+}
+
+// A wrong key size leaves the object exactly as unusable as before reset()
+// was ever called -- not holding a half-imported key.
+void test_aead_cipher_wrong_key_size_leaves_invalid() {
+    const std::uint8_t key_bytes[btp::kChaCha20Poly1305KeySize] = {};
+    const btp::AeadKey wrong_size_key = {key_bytes, sizeof(key_bytes)};
+
+    btp::AeadCipher cipher;
+    CHECK(!cipher.reset(btp::CipherId::AesGcm, wrong_size_key));
+    CHECK(!cipher.valid());
+
+    const btp::Header header = make_aes_gcm_header();
+    const std::uint8_t plaintext[8] = {};
+    std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+    CHECK(cipher.seal(header, sizeof(plaintext), plaintext, sealed) ==
+          btp::AeadError::InvalidArgument);
+}
+
+// reset() on an object that already holds a key must free that key before
+// importing the new one -- not leak it. AES-GCM then ChaCha20-Poly1305 also
+// exercises the classic backend switching which context TYPE lives in
+// storage_ (mbedtls_gcm_context -> mbedtls_chachapoly_context) and, on PSA,
+// that the first psa_destroy_key() actually ran (a leaked key id would
+// exhaust PSA's fixed-size keystore well before this loop finishes on a
+// build small enough for that table to matter).
+void test_aead_cipher_reset_does_not_leak() {
+    const std::uint8_t aes_key_bytes[btp::kAesGcmKeySize] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const std::uint8_t chacha_key_bytes[btp::kChaCha20Poly1305KeySize] = {
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+        0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f};
+    const btp::AeadKey aes_key = {aes_key_bytes, sizeof(aes_key_bytes)};
+    const btp::AeadKey chacha_key = {chacha_key_bytes, sizeof(chacha_key_bytes)};
+
+    btp::AeadCipher cipher;
+    for (int i = 0; i < 64; ++i) {
+        CHECK(cipher.reset(btp::CipherId::AesGcm, aes_key));
+        CHECK(cipher.reset(btp::CipherId::ChaCha20Poly1305, chacha_key));
+    }
+    CHECK(cipher.valid());
+    CHECK(cipher.cipher() == btp::CipherId::ChaCha20Poly1305);
+
+    // Still fully usable after 128 resets, on whichever cipher it landed on.
+    const btp::Header header = make_chacha20poly1305_header();
+    const std::uint8_t plaintext[] = "still good after many resets";
+    const std::uint16_t plaintext_size = static_cast<std::uint16_t>(sizeof(plaintext));
+    std::uint8_t sealed[sizeof(plaintext) + 16U] = {};
+    std::uint8_t recovered[sizeof(plaintext)] = {};
+    CHECK(cipher.seal(header, plaintext_size, plaintext, sealed) == btp::AeadError::Ok);
+    CHECK(cipher.open(header, static_cast<std::uint16_t>(sizeof(sealed)), sealed,
+                      recovered) == btp::AeadError::Ok);
+    CHECK(std::memcmp(plaintext, recovered, sizeof(plaintext)) == 0);
+}
+
 // The rest of the library rejects a null pointer rather than handing it to
 // something that will dereference it; the AEAD entry points used to check only
 // key.data and would have passed a null plaintext straight into mbedtls.
@@ -551,6 +747,13 @@ int main() {
     test_dispatch_rejects_reserved_cipher_id();
     test_aad_ignores_fragmentation_fields();
     test_sealed_message_survives_fragmentation_and_reassembly();
+    test_aead_cipher_aes_gcm_round_trip_reuses_key();
+    test_aead_cipher_chacha20poly1305_round_trip_reuses_key();
+    test_aead_cipher_matches_stateless_functions();
+    test_aead_cipher_tag_corruption_is_rejected();
+    test_aead_cipher_rejects_cipher_mismatch();
+    test_aead_cipher_wrong_key_size_leaves_invalid();
+    test_aead_cipher_reset_does_not_leak();
     test_null_pointers_are_rejected();
 
     if (failures != 0) {

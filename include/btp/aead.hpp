@@ -86,6 +86,92 @@ AeadError aead_open(const AeadKey& key, const Header& header,
                     const std::uint8_t* ciphertext_and_tag,
                     std::uint8_t* out_plaintext) noexcept;
 
+// ---------------------------------------------------------------------------
+// AeadCipher -- one imported key, reused across many seal() / open() calls
+// ---------------------------------------------------------------------------
+//
+// Every aead_seal_*() / aead_open_*() call above re-derives the cipher from
+// raw key bytes from scratch: the classic backend re-runs the AES key
+// schedule and rebuilds GCM's GHASH multiplication table (or re-runs
+// ChaCha20-Poly1305's key setup); the PSA backend re-imports the key into the
+// keystore. That is the right cost model for a key used once or rarely --
+// a HELLO handshake reply, say -- where importing it is not worth
+// remembering. It is wasted work for a node that seals every outgoing
+// TELEMETRY frame, or opens every inbound one, under the SAME key for the
+// life of a session: the key never changes between calls, only the header
+// (nonce) and the payload do.
+//
+// AeadCipher is that key import, done once by reset(), reused by every
+// later seal() / open() against it -- the classic backend's key schedule /
+// GHASH table or the PSA key handle stays live in this object until the next
+// reset() or the destructor. Same guarantees as the rest of the library: no
+// heap (the backend context lives in storage_ below, sized generously and
+// checked by a static_assert in aead.cpp against the real backend struct
+// sizes, so a future backend upgrade that outgrows it fails the build rather
+// than corrupting memory), noexcept, no global state. The stateless
+// aead_seal_*() / aead_open_*() functions above are unaffected and remain
+// the right choice for a key that is not worth caching.
+//
+// Unlike PsaKey (aead.cpp, internal), a key imported here is usable for BOTH
+// directions -- reset() grants encrypt AND decrypt -- because the whole point
+// of this class is a node that seals its own traffic and opens its peer's
+// under the one symmetric key, not two separately-scoped one-way imports.
+//
+//   btp::AeadCipher channel_b;
+//   if (!channel_b.reset(btp::CipherId::AesGcm, key)) { ... }
+//   ...
+//   // every frame on this key, from here on:
+//   channel_b.seal(header, payload_size, plaintext, out);
+//   channel_b.open(header, ciphertext_size, ciphertext_and_tag, out_plaintext);
+//
+// NOT internally synchronised -- seal() / open() mutate backend working
+// state the same way a raw mbedtls_gcm_context / mbedtls_chachapoly_context
+// already does, so one AeadCipher belongs to one caller (or its own critical
+// section), not several tasks sharing it unlocked.
+static const std::size_t kAeadCipherStorageSize = 512U;
+
+class AeadCipher {
+public:
+    AeadCipher() noexcept;
+    ~AeadCipher() noexcept;
+    AeadCipher(const AeadCipher&) = delete;
+    AeadCipher& operator=(const AeadCipher&) = delete;
+
+    // Imports `key` for `cipher` -- kAesGcmKeySize octets for CipherId::AesGcm,
+    // kChaCha20Poly1305KeySize for CipherId::ChaCha20Poly1305 -- discarding
+    // whatever this object held before (including on failure: a partial
+    // reset() never leaves the old key live). Every later seal() / open()
+    // reuses this import until the next reset(). False on a wrong key size or
+    // a backend failure -- valid() is then false and seal() / open() fail
+    // closed with AeadError::InvalidArgument.
+    bool reset(CipherId cipher, const AeadKey& key) noexcept;
+    bool valid() const noexcept { return valid_; }
+    CipherId cipher() const noexcept { return cipher_; }
+
+    // Same wire contract as aead_seal_aes_gcm() / aead_seal_chacha20poly1305()
+    // -- out_ciphertext_and_tag needs room for payload_size + 16 octets --
+    // against whichever cipher reset() bound. header's CIPHER_ID sub-field
+    // must name that same cipher (AeadError::InvalidCipherId otherwise); the
+    // header still supplies this message's own nonce and AAD (source_id /
+    // boot_id / sequence, the canonical logical header), reset() only ever
+    // fixes the key. AeadError::InvalidArgument without a key imported yet.
+    AeadError seal(const Header& header, std::uint16_t payload_size,
+                   const std::uint8_t* plaintext,
+                   std::uint8_t* out_ciphertext_and_tag) noexcept;
+
+    // Same wire contract as aead_open_aes_gcm() / aead_open_chacha20poly1305()
+    // -- ciphertext_size already includes the trailing 16-octet tag,
+    // out_plaintext needs room for ciphertext_size - 16 octets.
+    AeadError open(const Header& header, std::uint16_t ciphertext_size,
+                  const std::uint8_t* ciphertext_and_tag,
+                  std::uint8_t* out_plaintext) noexcept;
+
+private:
+    alignas(8) unsigned char storage_[kAeadCipherStorageSize];
+    CipherId cipher_;
+    bool valid_;
+};
+
 }  // namespace btp
 
 #endif  // BTP_AEAD_HPP
