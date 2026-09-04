@@ -115,6 +115,51 @@ void test_add_and_query() {
                         bad, 2U) == MessageError::InvalidArgument);
 }
 
+// A body-only topic (docs/commands.md section 3.3: OpaqueBytes/Utf8/
+// JsonUtf8/CsvUtf8 carry a raw document, not field-structured samples) has
+// field_count == 0 by definition -- add_topic() accepts that, and
+// write_topics() serialises a valid, empty field list for it. This is the
+// case that used to be hand-encoded around the Catalog entirely (a fieldless
+// topic could describe itself on the wire but never entered a Catalog); see
+// library 2.39.0.
+void test_body_only_topic() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0003U, 1U, TelemetryEncoding::Utf8, /*subscribable=*/true,
+                        0U, "system.monitor", nullptr, 0U) == MessageError::Ok);
+    CHECK(cat.topic_count() == 1U);
+
+    const CatalogTopic* t = cat.topic(0x0003U);
+    CHECK(t != nullptr);
+    CHECK(t->field_count == 0U);
+    CHECK(t->encoding == static_cast<std::uint8_t>(TelemetryEncoding::Utf8));
+    CHECK(std::strcmp(t->name, "system.monitor") == 0);
+
+    // A second, field-bearing topic still adds normally alongside it.
+    CHECK(cat.add_topic(0x0101U, 3U, "drive_status", kDriveStatus) ==
+          MessageError::Ok);
+    CHECK(cat.topic_count() == 2U);
+
+    // Round-trips through a real MANIFEST_DATA: the body-only topic's record
+    // carries field_count 0 and no field rows, the other topic is unaffected.
+    std::uint8_t wire[1024];
+    const std::size_t n = serialise(cat, wire, sizeof(wire));
+    CHECK(n != 0U);
+
+    btp::StaticCatalog<> consumer;
+    CHECK(consumer.ingest(wire, n) == MessageError::Ok);
+    CHECK(consumer.topic_count() == 2U);
+    const CatalogTopic* rt = consumer.topic(0x0003U);
+    CHECK(rt != nullptr);
+    CHECK(rt->field_count == 0U);
+    CHECK(consumer.topic(0x0101U) != nullptr);
+    CHECK(consumer.topic(0x0101U)->field_count == 4U);
+
+    // fields==nullptr is only rejected when field_count says otherwise.
+    btp::StaticCatalog<> rejects;
+    CHECK(rejects.add_topic(0x0202U, 1U, TelemetryEncoding::PackedLe, false, 0U,
+                            "bad", nullptr, 1U) == MessageError::InvalidArgument);
+}
+
 void test_schema_helpers() {
     // f32 / u16 / nullable produce FieldRecords with field_id/order 0 -- the
     // Catalog assigns them from the array position.
@@ -481,6 +526,7 @@ void test_source_info_round_trips() {
 
 int main() {
     test_add_and_query();
+    test_body_only_topic();
     test_schema_helpers();
     test_manifest_roundtrip();
     test_field_unit_and_description();

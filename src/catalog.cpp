@@ -134,7 +134,11 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
                                 std::uint32_t max_rate_millihz, const char* name,
                                 const FieldRecord* fields,
                                 std::size_t field_count) noexcept {
-    if (!valid_ || fields == nullptr || field_count == 0U ||
+    // A null `fields` is only invalid when it would actually be read (some
+    // field_count > 0); field_count == 0 alone describes a legitimate
+    // body-only topic (OpaqueBytes/Utf8/JsonUtf8/CsvUtf8) and is accepted --
+    // see this method's own doc comment.
+    if (!valid_ || (field_count != 0U && fields == nullptr) ||
         has_topic(topic_id)) {
         return MessageError::InvalidArgument;
     }

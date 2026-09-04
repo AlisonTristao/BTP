@@ -126,10 +126,16 @@ public:
     // once the caller passes a non-empty one, whether built by hand, by
     // btp::f32(name, unit) and friends, or by TopicBuilder (which only ever
     // sets unit, never description -- see its own comment).
+    //
+    // field_count MAY be 0 -- a body-only topic (TelemetryEncoding::OpaqueBytes
+    // / Utf8 / JsonUtf8 / CsvUtf8: a raw document, not field-structured
+    // samples) has no fields by definition, and write_topics() already handles
+    // an empty field loop correctly. Pass `fields = nullptr` for one of these;
+    // a non-null `fields` with field_count 0 is accepted too (just unused).
     //   Ok                 -- stored.
     //   BufferTooSmall     -- a pool is full.
-    //   InvalidArgument    -- a null pointer, field_count 0, a duplicate
-    //                         topic_id, or field orders not 0,1,2,... .
+    //   InvalidArgument    -- `fields` null while field_count is non-zero, a
+    //                         duplicate topic_id, or field orders not 0,1,2,... .
     MessageError add_topic(std::uint16_t topic_id, std::uint16_t schema_version,
                            TelemetryEncoding encoding, bool subscribable,
                            std::uint32_t max_rate_millihz, const char* name,
