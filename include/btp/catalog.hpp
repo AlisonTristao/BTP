@@ -18,11 +18,16 @@
 //
 // v1 covers TELEMETRY topics and their fields -- field_id, order, type, scale,
 // offset, element counts, nullability, the topic + field NAMES, and (v1.1)
-// each field's UNIT and DESCRIPTION. NOT yet: a topic's own description, enum
-// labels, action (command) records, the format-2 source_info block. A
-// round-tripped manifest keeps what the sample codec needs, the names, and
-// what a field-level UI label needs (unit/description); a topic-level one
-// still does not round-trip.
+// each field's UNIT and DESCRIPTION. (v1.2) also the format-2 source_info
+// block -- the informational key/label/value rows a MANIFEST_DATA carries
+// ahead of the topics (fw version, chip, partition; docs/commands.md section
+// 3.12), producer-set with add_source_info() and consumer-read back with
+// source_info_at() after ingest(); it needs its own small pool
+// (StaticCatalog's SourceInfoEntries template argument). NOT yet: a topic's
+// own description, enum labels, action (command) records. A round-tripped
+// manifest keeps what the sample codec needs, the names, the field-level UI
+// labels (unit/description) and the source_info rows; a topic-level
+// description still does not round-trip.
 
 #include "btp/messages.hpp"   // ManifestReader/Writer, FieldRecord, TelemetryEncoding, MessageError
 #include "btp/telemetry.hpp"  // FieldSpec, SampleWriter, SampleLayout, the f32/u16/... helpers
@@ -83,7 +88,9 @@ public:
             const char** unit_ptr_pool = nullptr,
             std::size_t unit_ptr_capacity = 0U,
             const char** description_ptr_pool = nullptr,
-            std::size_t description_ptr_capacity = 0U) noexcept;
+            std::size_t description_ptr_capacity = 0U,
+            SourceInfoEntry* source_info_pool = nullptr,
+            std::size_t source_info_capacity = 0U) noexcept;
 
     // True when the topic slots and the field pool are non-null and non-empty.
     // Check once after construction.
@@ -151,6 +158,35 @@ public:
                        bool subscribable = true,
                        std::uint32_t max_rate_millihz = 0U) noexcept;
 
+    // ----- producer: the format-2 source_info block ------------------------
+    // Informational key/label/value rows (docs/commands.md section 3.12) --
+    // fw version, chip id, running partition, ... -- copied into the string
+    // pool and emitted ahead of the topic records by write_source_info()
+    // (btp::Node's MANIFEST_DATA path calls that for you). An entry whose
+    // `value` is empty is skipped (Ok, no row added); `label` may be empty.
+    //   Ok               -- stored, or skipped because `value` was empty.
+    //   InvalidArgument  -- no source_info pool (see the ctor / StaticCatalog).
+    //   BufferTooSmall   -- the source_info pool or the string pool is full.
+    // Call the whole set once; a second run appends and does not reclaim the
+    // first run's interned bytes. clear() / a fresh ingest() drop them.
+    MessageError add_source_info(const char* key, const char* label,
+                                const char* value) noexcept;
+    void clear_source_info() noexcept;
+    std::size_t source_info_count() const noexcept { return source_info_count_; }
+    bool has_source_info() const noexcept { return source_info_count_ != 0U; }
+    // nullptr when index is out of range; otherwise a SourceInfoEntry whose
+    // key/label/value ByteViews point into this Catalog's string pool (valid
+    // until the next clear() / ingest()).
+    const SourceInfoEntry* source_info_at(std::size_t index) const noexcept;
+
+    // Serialise the stored source_info rows into an open ManifestWriter --
+    // called by btp::Node between begin(header) and write_topics(). Adds every
+    // row that still fits and STOPS (returning Ok) before one that would not:
+    // source_info is informational and the topic records that follow it win
+    // the remaining space. A real writer error (WrongOrder for a format-1
+    // header, a framing fault) is returned as-is.
+    MessageError write_source_info(ManifestWriter* writer) const noexcept;
+
     // ----- consumer: learn from a MANIFEST_DATA payload ---------------------
     // Walks `payload` (a whole logical MANIFEST_DATA, post-reassembly) and
     // REPLACES the catalogue with the topics it describes. Also copies the
@@ -174,6 +210,9 @@ private:
     // there is no pool / no room.
     const char* intern(const char* s) noexcept;
     const char* intern(const std::uint8_t* data, std::size_t len) noexcept;
+    // intern(), as a ByteView -- {interned bytes, len}, or {"", 0} when the
+    // input was empty or the pool had no room.
+    ByteView intern_view(const std::uint8_t* data, std::size_t len) noexcept;
     bool has_topic(std::uint16_t topic_id) const noexcept;
 
     CatalogTopic* topics_;
@@ -199,6 +238,10 @@ private:
     char* string_pool_;
     std::size_t string_pool_capacity_;
     std::size_t string_pool_used_;
+
+    SourceInfoEntry* source_info_pool_;
+    std::size_t source_info_capacity_;
+    std::size_t source_info_count_;
 
     std::uint32_t config_revision_;
     bool valid_;
@@ -458,7 +501,8 @@ private:
 
 namespace detail {
 
-template <std::size_t Topics, std::size_t Fields, std::size_t StringBytes>
+template <std::size_t Topics, std::size_t Fields, std::size_t StringBytes,
+          std::size_t SourceInfoEntries = 0>
 struct CatalogStorage {
     CatalogTopic topics[Topics];
     FieldSpec field_pool[Fields];
@@ -466,18 +510,31 @@ struct CatalogStorage {
     const char* unit_ptr_pool[Fields];
     const char* description_ptr_pool[Fields];
     char string_pool[StringBytes];
+    // A zero-length array is not standard C++; hold one slot when the feature
+    // is off and hand back nullptr for the pointer so Catalog treats it as
+    // "no source_info pool" exactly as {nullptr, 0} would.
+    SourceInfoEntry source_info_storage[SourceInfoEntries ? SourceInfoEntries : 1];
+    SourceInfoEntry* source_info_pool() noexcept {
+        return SourceInfoEntries != 0U ? source_info_storage : nullptr;
+    }
 };
 
 }  // namespace detail
 
 // Defaults: 8 topics, 64 field specs across them, 1.5 KiB of name/unit/
 // description text (up from 1 KiB pre-v1.1 -- units and descriptions now
-// share this same pool, so the same field count needs more of it).
+// share this same pool, so the same field count needs more of it), and NO
+// source_info pool -- a producer that emits the format-2 block passes a
+// non-zero SourceInfoEntries (and usually a bigger StringBytes, since the
+// key/label/value bytes intern into the same pool).
 template <std::size_t Topics = 8, std::size_t Fields = 64,
-          std::size_t StringBytes = 1536>
-class StaticCatalog : private detail::CatalogStorage<Topics, Fields, StringBytes>,
-                      public Catalog {
-    using Storage = detail::CatalogStorage<Topics, Fields, StringBytes>;
+          std::size_t StringBytes = 1536, std::size_t SourceInfoEntries = 0>
+class StaticCatalog
+    : private detail::CatalogStorage<Topics, Fields, StringBytes,
+                                     SourceInfoEntries>,
+      public Catalog {
+    using Storage = detail::CatalogStorage<Topics, Fields, StringBytes,
+                                           SourceInfoEntries>;
 
 public:
     StaticCatalog() noexcept
@@ -485,7 +542,8 @@ public:
           Catalog(Storage::topics, Topics, Storage::field_pool, Fields,
                   Storage::name_ptr_pool, Fields, Storage::string_pool,
                   StringBytes, Storage::unit_ptr_pool, Fields,
-                  Storage::description_ptr_pool, Fields) {}
+                  Storage::description_ptr_pool, Fields,
+                  Storage::source_info_pool(), SourceInfoEntries) {}
 };
 
 }  // namespace btp

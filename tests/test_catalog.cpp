@@ -396,6 +396,87 @@ void test_named_sample_writer_rejects_the_wrong_field_name() {
     CHECK(w.finish(&written) != MessageError::Ok);  // incomplete: never sent
 }
 
+// add_source_info() -> write_source_info() -> the wire -> ingest() ->
+// source_info_at(), plus the format-2 header bump and the empty-value skip.
+void test_source_info_round_trips() {
+    btp::StaticCatalog<4, 32, 1024, /*SourceInfoEntries=*/4> producer;
+    CHECK(producer.add_topic(0x0101U, 3U, "drive_status", kDriveStatus) ==
+          MessageError::Ok);
+    CHECK(producer.source_info_count() == 0U);
+    CHECK(!producer.has_source_info());
+
+    CHECK(producer.add_source_info("fw_version", "Firmware", "2") ==
+          MessageError::Ok);
+    CHECK(producer.add_source_info("chip", "", "ESP32-S3") == MessageError::Ok);
+    // An empty value carries no row -- not an error.
+    CHECK(producer.add_source_info("build", "Build", "") == MessageError::Ok);
+    CHECK(producer.source_info_count() == 2U);
+    CHECK(producer.has_source_info());
+
+    const btp::SourceInfoEntry* first = producer.source_info_at(0U);
+    CHECK(first != nullptr);
+    CHECK(first->key.size == 10U &&
+          std::memcmp(first->key.data, "fw_version", 10U) == 0);
+    CHECK(first->label.size == 8U);
+    CHECK(producer.source_info_at(2U) == nullptr);
+
+    // Serialise a format-2 manifest by hand: header, source_info block, topics.
+    std::uint8_t wire[512];
+    btp::ManifestHeader header = {};
+    header.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    header.manifest_format_version = 2U;
+    header.config_revision = 7U;
+    header.described_source_id = 0x00CAFE01U;
+    header.described_boot_id = 0x0000B001U;
+    header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+    header.source_flags = btp::kSourceOnline;
+    header.catalog_count = 1U;
+    header.topic_count = 1U;
+    header.source_name = text("robot");
+    producer.set_config_revision(7U);
+
+    btp::ManifestWriter w(wire, sizeof(wire));
+    CHECK(w.begin(header) == MessageError::Ok);
+    CHECK(producer.write_source_info(&w) == MessageError::Ok);
+    CHECK(producer.write_topics(&w) == MessageError::Ok);
+    std::size_t n = 0U;
+    CHECK(w.finish(&n) == MessageError::Ok && n != 0U);
+
+    // The reader sees format 2 and the two rows.
+    btp::ManifestReader r(wire, n);
+    btp::ManifestHeader parsed = {};
+    CHECK(r.header(&parsed) == MessageError::Ok);
+    CHECK(parsed.manifest_format_version == 2U);
+    btp::SourceInfoEntry si = {};
+    CHECK(r.next_source_info(&si) == btp::ManifestStep::Item);
+    CHECK(si.value.size == 1U && si.value.data[0] == '2');
+    CHECK(r.next_source_info(&si) == btp::ManifestStep::Item);
+    CHECK(si.key.size == 4U && std::memcmp(si.key.data, "chip", 4U) == 0);
+    CHECK(si.label.size == 0U);
+    CHECK(r.next_source_info(&si) == btp::ManifestStep::End);
+
+    // A consumer with its own source_info pool learns the rows through ingest.
+    btp::StaticCatalog<4, 32, 1024, 4> consumer;
+    CHECK(consumer.ingest(wire, n) == MessageError::Ok);
+    CHECK(consumer.config_revision() == 7U);
+    CHECK(consumer.topic_count() == 1U);
+    CHECK(consumer.source_info_count() == 2U);
+    const btp::SourceInfoEntry* c0 = consumer.source_info_at(0U);
+    CHECK(c0 != nullptr && c0->value.size == 1U && c0->value.data[0] == '2');
+    CHECK(std::memcmp(consumer.source_info_at(1U)->key.data, "chip", 4U) == 0);
+
+    // A consumer WITHOUT a source_info pool still ingests the topics fine --
+    // next_topic() steps over the block it cannot keep.
+    btp::StaticCatalog<4, 32, 1024> plain_consumer;
+    CHECK(plain_consumer.ingest(wire, n) == MessageError::Ok);
+    CHECK(plain_consumer.topic_count() == 1U);
+    CHECK(plain_consumer.source_info_count() == 0U);
+
+    // No pool on the producer side -> add_source_info is InvalidArgument.
+    btp::StaticCatalog<> no_pool;
+    CHECK(no_pool.add_source_info("k", "l", "v") == MessageError::InvalidArgument);
+}
+
 }  // namespace
 
 int main() {
@@ -412,6 +493,7 @@ int main() {
     test_topic_builder_caps_fields_per_declaration();
     test_named_sample_writer_round_trips_by_name();
     test_named_sample_writer_rejects_the_wrong_field_name();
+    test_source_info_round_trips();
 
     if (failures == 0) {
         std::cout << "test_catalog: all checks passed\n";

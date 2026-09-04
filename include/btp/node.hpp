@@ -1036,14 +1036,20 @@ template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
           std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
           std::size_t CatalogStringBytes = 1536,
           std::size_t MaxSubscriptions = 8, std::size_t MaxCommands = 4,
-          std::size_t CommandBytes = 128>
+          std::size_t CommandBytes = 128, std::size_t CatalogSourceInfo = 0>
 class StaticNode
     : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
       public Node {
     using Storage =
         detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>;
 
-    StaticCatalog<CatalogTopics, CatalogFields, CatalogStringBytes> catalog_;
+    // CatalogSourceInfo last (after every other capacity) so an existing
+    // StaticNode<...> spelled out to CommandBytes still compiles -- it is only
+    // non-zero for a producer that emits the format-2 source_info block
+    // (fw version / chip / partition ahead of the topics in MANIFEST_DATA).
+    StaticCatalog<CatalogTopics, CatalogFields, CatalogStringBytes,
+                  CatalogSourceInfo>
+        catalog_;
 
     // Backs on_publish()/publish_subscribed_topics() -- sized by CatalogTopics
     // (the node's own catalogue is the only source of topic_ids worth

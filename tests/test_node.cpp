@@ -219,7 +219,10 @@ TestConfig base_config(std::uint32_t source_id, std::uint32_t boot_id,
 using TestNode = btp::StaticNode<4, 700, 1024>;
 
 // Deliver every frame `sink` collected to `dst`, returning the last outcome.
-NodeRx deliver(TestNode& dst, Sink& sink, std::uint64_t now_ms,
+// Takes btp::Node& (not TestNode&) so a test using a differently-sized
+// StaticNode<> -- a bigger scratch for a source_info manifest, say -- can
+// still reuse it.
+NodeRx deliver(btp::Node& dst, Sink& sink, std::uint64_t now_ms,
                ReceivedMessage* msg) {
     NodeRx last = NodeRx::Pending;
     for (std::size_t i = 0; i < sink.frames.size(); ++i) {
@@ -681,6 +684,74 @@ void test_catalog_serve_and_publish() {
     latecomer.begin();
     CHECK(deliver(latecomer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
     CHECK(late.topic(0x0101U) != nullptr);
+}
+
+// A served catalogue with a format-2 source_info block: the producer answers a
+// MANIFEST_REQUEST with format 2 + the rows, and a consumer that kept its own
+// source_info pool reads them back off learn_catalog().
+void test_serve_catalog_with_source_info() {
+    // Bigger scratch so the header + source_info + topic all fit.
+    using InfoNode = btp::StaticNode<4, 700, 1024, 900>;
+    const std::uint8_t uuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
+                                   9, 10, 11, 12, 13, 14, 15, 16};
+
+    Sink prod_tx;
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    InfoNode producer(producer_cfg);
+    btp::StaticCatalog<4, 32, 1024, /*SourceInfoEntries=*/4> served;
+    served.set_config_revision(4U);
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    CHECK(served.add_source_info("fw_version", "Firmware", "9") ==
+          btp::MessageError::Ok);
+    CHECK(served.add_source_info("chip", "", "ESP32-S3") ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           uuid, "example-robot");
+    producer.begin();
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    InfoNode consumer(consumer_cfg);
+    btp::StaticCatalog<4, 32, 1024, 4> learned;
+    consumer.learn_catalog(&learned);
+    consumer.begin();
+
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+
+    CHECK(learned.topic(0x0101U) != nullptr);
+    CHECK(learned.source_info_count() == 2U);
+    const btp::SourceInfoEntry* fw = learned.source_info_at(0U);
+    CHECK(fw != nullptr);
+    CHECK(fw->key.size == 10U &&
+          std::memcmp(fw->key.data, "fw_version", 10U) == 0);
+    CHECK(fw->value.size == 1U && fw->value.data[0] == '9');
+    CHECK(learned.source_info_at(1U)->label.size == 0U);
+
+    // NOT_MODIFIED still carries the source_info block (commands.md 3.3), but
+    // the consumer keeps whatever it already learned rather than re-interning.
+    prod_tx.clear();
+    cons_tx.clear();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 4U));
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(prod_tx.count() == 1U);
+    {
+        btp::DecodedFrame f{};
+        CHECK(btp::decode(prod_tx.frames[0].data(), prod_tx.frames[0].size(),
+                          btp::kEspNowTransport, &f) == btp::Error::Ok);
+        btp::ManifestReader r(f.payload.data, f.payload.size);
+        btp::ManifestHeader h{};
+        CHECK(r.header(&h) == btp::MessageError::Ok);
+        CHECK(h.manifest_format_version == 2U);
+        CHECK((h.flags & btp::kManifestNotModified) != 0U);
+        btp::SourceInfoEntry si{};
+        CHECK(r.next_source_info(&si) == btp::ManifestStep::Item);
+    }
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(learned.source_info_count() == 2U);
 }
 
 // --- consumer sends MANIFEST_REQUEST ---------------------------------------
@@ -1881,6 +1952,7 @@ int main() {
     test_stats();
     test_catalog_discovery();
     test_catalog_serve_and_publish();
+    test_serve_catalog_with_source_info();
     test_request_manifest();
 
     test_connect_handshake_and_effective_limits();

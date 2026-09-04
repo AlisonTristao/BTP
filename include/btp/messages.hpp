@@ -889,6 +889,12 @@ public:
     // failure it stops advancing, like every other call.
     std::size_t size() const noexcept { return cursor_; }
 
+    // The output buffer's total capacity -- size() plus what is still free.
+    // Fixed for the writer's lifetime. Lets a caller (btp::Catalog::
+    // write_source_info) decide an entry would not fit BEFORE add_source_info()
+    // hits a sticky BufferTooSmall that would then also fail the topic records.
+    std::size_t capacity() const noexcept { return capacity_; }
+
 private:
     void close_source_info() noexcept;   // backpatch info_count
     void close_field() noexcept;         // backpatch the open field record_size, check enum count

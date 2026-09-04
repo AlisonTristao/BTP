@@ -19,7 +19,9 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
                  char* string_pool, std::size_t string_pool_capacity,
                  const char** unit_ptr_pool, std::size_t unit_ptr_capacity,
                  const char** description_ptr_pool,
-                 std::size_t description_ptr_capacity) noexcept
+                 std::size_t description_ptr_capacity,
+                 SourceInfoEntry* source_info_pool,
+                 std::size_t source_info_capacity) noexcept
     : topics_(topics),
       topic_capacity_(topic_capacity),
       topic_count_(0U),
@@ -38,6 +40,9 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
       string_pool_(string_pool),
       string_pool_capacity_(string_pool_capacity),
       string_pool_used_(0U),
+      source_info_pool_(source_info_pool),
+      source_info_capacity_(source_info_capacity),
+      source_info_count_(0U),
       config_revision_(0U),
       valid_(topics != nullptr && topic_capacity != 0U &&
              field_pool != nullptr && field_pool_capacity != 0U) {}
@@ -49,7 +54,12 @@ void Catalog::clear() noexcept {
     unit_ptr_used_ = 0U;
     description_ptr_used_ = 0U;
     string_pool_used_ = 0U;
+    // source_info interns into the same string pool this just reset -- dropping
+    // the count is what keeps its ByteViews from dangling into reused bytes.
+    source_info_count_ = 0U;
 }
+
+void Catalog::clear_source_info() noexcept { source_info_count_ = 0U; }
 
 bool Catalog::has_topic(std::uint16_t topic_id) const noexcept {
     for (std::size_t i = 0U; i < topic_count_; ++i) {
@@ -82,6 +92,16 @@ const char* Catalog::intern(const std::uint8_t* data, std::size_t len) noexcept 
     dst[len] = '\0';
     string_pool_used_ += len + 1U;
     return dst;
+}
+
+ByteView Catalog::intern_view(const std::uint8_t* data,
+                              std::size_t len) noexcept {
+    const char* s = intern(data, len);
+    // intern() returns the static "" both for an empty input and for a pool
+    // that had no room -- either way the ByteView is {"", 0}, so a consumer
+    // reading it back never dereferences past a zero length.
+    const std::size_t n = (s == kEmptyName) ? 0U : len;
+    return ByteView{reinterpret_cast<const std::uint8_t*>(s), n};
 }
 
 const char* Catalog::field_name(const CatalogTopic& t,
@@ -206,6 +226,31 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
 
     clear();
     config_revision_ = header.config_revision;
+
+    // The format-2 source_info block comes before the topics; walk it into our
+    // own pool when the caller kept one. Skipping this call is fine too --
+    // next_topic() steps over any source_info left un-iterated.
+    if (source_info_pool_ != nullptr) {
+        SourceInfoEntry si = {};
+        while (reader.next_source_info(&si) == ManifestStep::Item) {
+            if (source_info_count_ >= source_info_capacity_) {
+                clear();
+                return MessageError::BufferTooSmall;
+            }
+            source_info_pool_[source_info_count_].key =
+                intern_view(si.key.data, si.key.size);
+            source_info_pool_[source_info_count_].label =
+                intern_view(si.label.data, si.label.size);
+            source_info_pool_[source_info_count_].value =
+                intern_view(si.value.data, si.value.size);
+            ++source_info_count_;
+        }
+        if (reader.error() != MessageError::Ok) {
+            const MessageError se = reader.error();
+            clear();
+            return se;
+        }
+    }
 
     const bool keep_names = name_ptr_pool_ != nullptr;
     const bool keep_units = unit_ptr_pool_ != nullptr;
@@ -345,6 +390,58 @@ MessageError Catalog::write_topics(ManifestWriter* writer) const noexcept {
 
         const MessageError ee = writer->end_topic();
         if (ee != MessageError::Ok) return ee;
+    }
+    return MessageError::Ok;
+}
+
+// ---------------------------------------------------------------------------
+// Producer / consumer: the format-2 source_info block
+// ---------------------------------------------------------------------------
+
+MessageError Catalog::add_source_info(const char* key, const char* label,
+                                     const char* value) noexcept {
+    // An unset value carries no row (commands.md 3.12: informational, and the
+    // consumer side already drops empties) -- not an error, just nothing to do.
+    if (value == nullptr || value[0] == '\0') return MessageError::Ok;
+    if (source_info_pool_ == nullptr) return MessageError::InvalidArgument;
+    if (source_info_count_ >= source_info_capacity_) {
+        return MessageError::BufferTooSmall;
+    }
+
+    const ByteView k = intern_view(reinterpret_cast<const std::uint8_t*>(key),
+                                   key != nullptr ? std::strlen(key) : 0U);
+    const ByteView l = intern_view(reinterpret_cast<const std::uint8_t*>(label),
+                                   label != nullptr ? std::strlen(label) : 0U);
+    const ByteView v = intern_view(reinterpret_cast<const std::uint8_t*>(value),
+                                   std::strlen(value));
+    // key / value were non-empty but interned to "" -> the string pool is full.
+    if ((key != nullptr && key[0] != '\0' && k.size == 0U) || v.size == 0U) {
+        return MessageError::BufferTooSmall;
+    }
+
+    source_info_pool_[source_info_count_].key = k;
+    source_info_pool_[source_info_count_].label = l;
+    source_info_pool_[source_info_count_].value = v;
+    ++source_info_count_;
+    return MessageError::Ok;
+}
+
+const SourceInfoEntry* Catalog::source_info_at(std::size_t index) const noexcept {
+    return index < source_info_count_ ? &source_info_pool_[index] : nullptr;
+}
+
+MessageError Catalog::write_source_info(ManifestWriter* writer) const noexcept {
+    if (writer == nullptr) return MessageError::InvalidArgument;
+    for (std::size_t i = 0U; i < source_info_count_; ++i) {
+        const SourceInfoEntry& e = source_info_pool_[i];
+        // key/label/value each get a u16 length prefix on the wire (6 octets).
+        const std::size_t entry_size =
+            6U + e.key.size + e.label.size + e.value.size;
+        if (writer->size() + entry_size > writer->capacity()) {
+            break;  // no room left -- the topic records that follow win it
+        }
+        const MessageError we = writer->add_source_info(e);
+        if (we != MessageError::Ok) return we;
     }
     return MessageError::Ok;
 }

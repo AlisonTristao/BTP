@@ -2921,16 +2921,35 @@ the manifest and `btp::telemetry` decodes the sample — the piece between,
 ([§11.2](#112-the-manifest-catalogue-is-not-stored)), is `btp::Catalog`
 (`btp/catalog.hpp`, target `btp::catalog`), with the storage still the caller's.
 
-`btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes>`, which owns
-the pools) holds one topic per entry — `topic_id`, `schema_version`, encoding,
-`max_rate_millihz`, subscribable, a `FieldSpec[]`, the topic + field names, and
-(since 2.28.0) each field's unit and description, read back with
-`field_unit()`/`field_description()` next to `field_name()` — `""` when that
-pool was not kept or the field is out of range, never `nullptr`. A topic's own
-description does not round-trip yet. `add_topic()` fills it from `FieldRecord`s
-(a producer's own schema); `ingest(payload, size)` fills it by walking a
-`MANIFEST_DATA`; `write_topics(ManifestWriter*)` serialises it back. Same
-guarantees as the rest of the library.
+`btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes,
+SourceInfoEntries>`, which owns the pools) holds one topic per entry —
+`topic_id`, `schema_version`, encoding, `max_rate_millihz`, subscribable, a
+`FieldSpec[]`, the topic + field names, and (since 2.28.0) each field's unit and
+description, read back with `field_unit()`/`field_description()` next to
+`field_name()` — `""` when that pool was not kept or the field is out of range,
+never `nullptr`. A topic's own description does not round-trip yet.
+`add_topic()` fills it from `FieldRecord`s (a producer's own schema);
+`ingest(payload, size)` fills it by walking a `MANIFEST_DATA`;
+`write_topics(ManifestWriter*)` serialises it back. Same guarantees as the rest
+of the library.
+
+Since 2.35.0 it also carries the **format-2 `source_info` block** — the
+informational `key` / `label` / `value` rows a `MANIFEST_DATA` puts ahead of
+the topics (`fw_version`, chip id, running partition; [Commands and discovery
+§3.12](commands.md#312-source-info)). A producer adds them one at a time with
+`add_source_info(key, label, value)` (an empty `value` is skipped, not an
+error) and `node.serve_catalog()` emits them for you — `write_source_info()` is
+called between `begin(header)` and `write_topics()`, the header goes out as
+format 2 on every SUCCESS reply (a full response and a `NOT_MODIFIED` one
+alike, [commands.md §3.3](commands.md#33-not_modified)), and a row that would
+not fit is dropped so the topic records keep their space. A `REJECTED` reply
+(stale boot, unknown source) describes nothing and stays format 1. On the
+consumer, `ingest()` walks the block into the catalogue's own
+`SourceInfoEntries` pool (when one was sized) and `source_info_at(i)` /
+`source_info_count()` read it back — the `ByteView`s point into the string
+pool, valid until the next `ingest()`; a `NOT_MODIFIED` response keeps whatever
+was already learned. A consumer with no such pool still ingests the topics; the
+block is simply skipped.
 
 **On the consumer**, `node.learn_catalog(&catalog)` hands it to the node:
 

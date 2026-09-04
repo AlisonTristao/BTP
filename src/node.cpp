@@ -737,12 +737,21 @@ void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
         return;
     }
 
+    // Format 2 whenever there is a source_info block to carry on a SUCCESS
+    // reply -- a full response AND a NOT_MODIFIED one (commands.md 3.3:
+    // source_info is not covered by config_revision, so it still follows
+    // source_name in a NOT_MODIFIED response). A REJECTED reply
+    // (STALE_TARGET_BOOT / NOT_FOUND) describes no source and stays format 1.
+    const bool with_source_info =
+        serve_catalog_->has_source_info() &&
+        status == static_cast<std::uint8_t>(ResultStatus::Success);
+
     ManifestHeader header = {};
     header.request = reply_to;
     header.status = status;
     header.flags = flags;
     header.error_code = error_code;
-    header.manifest_format_version = 1U;
+    header.manifest_format_version = with_source_info ? 2U : 1U;
     header.config_revision = serve_catalog_->config_revision();
     std::memcpy(header.source_uuid, serve_uuid_, sizeof(header.source_uuid));
     header.described_source_id = cfg_.source_id;
@@ -764,6 +773,10 @@ void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
 
     ManifestWriter writer(scratch_buffer_, scratch_capacity_);
     if (writer.begin(header) != MessageError::Ok) return;
+    if (with_source_info &&
+        serve_catalog_->write_source_info(&writer) != MessageError::Ok) {
+        return;
+    }
     if (with_topics && serve_catalog_->write_topics(&writer) != MessageError::Ok) {
         return;
     }
