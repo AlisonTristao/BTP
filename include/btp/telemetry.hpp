@@ -309,6 +309,29 @@ private:
     std::uint16_t nullable_count_;
     std::uint16_t fields_seen_;
     std::uint16_t nullable_seen_;  // how many nullable fields passed so far
+
+    // TLV_LE only. tlv_present_ is set bit-per-schema-index (index = a
+    // FieldSpec's position in fields_, same indexing prime()'s structural
+    // pass already computes when it matches a wire entry to *that* FieldSpec)
+    // during the single structural pass over the body, so the presence check
+    // for non-nullable fields right after does not have to re-walk the body
+    // a second time to answer a question the first pass already knew the
+    // answer to. Sized to kMaxFieldsPerSide regardless of field_count_ --
+    // the same fixed-bound-bitmap tradeoff Reassembler::ReassemblySlot's own
+    // received_[32] already makes for the analogous problem in
+    // fragmentation.cpp.
+    std::uint8_t tlv_present_[(kMaxFieldsPerSide + 7U) / 8U];
+    // Where next_tlv()'s search starts: right after the entry the PREVIOUS
+    // next_tlv() call found (or body_start_ initially / after a miss). A
+    // schema walked in `order` -- the only order next_tlv() is called in --
+    // asks for wire entries in the same ascending sequence they appear in
+    // whenever field_id tracks order (Catalog::add_topic()'s default), so
+    // resuming from here instead of body_start_ turns that common case from
+    // an O(fields x entries) rescan per sample into one O(entries) pass
+    // total; a field whose id genuinely comes before the cursor still gets
+    // found (next_tlv() wraps once, back to body_start_) at the same cost the
+    // unconditional full rescan always paid.
+    std::size_t tlv_scan_pos_;
 };
 
 // ---------------------------------------------------------------------------

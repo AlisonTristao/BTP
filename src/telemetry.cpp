@@ -220,7 +220,9 @@ SampleReader::SampleReader(const std::uint8_t* payload, std::size_t size,
       bitmap_bytes_(0U),
       nullable_count_(0U),
       fields_seen_(0U),
-      nullable_seen_(0U) {
+      nullable_seen_(0U),
+      tlv_present_(),
+      tlv_scan_pos_(0U) {
     if (payload == nullptr || (fields == nullptr && field_count != 0U)) {
         error_ = MessageError::InvalidArgument;
         return;
@@ -285,7 +287,13 @@ void SampleReader::prime() noexcept {
         // One structural pass over the whole body: entries ascending by
         // field_id, no repeat, value_size within bounds, no unknown field_id,
         // exact consumption. Presence of every non-nullable field is checked
-        // after.
+        // right after, from tlv_present_ rather than a second walk of the
+        // body -- this loop already visits every entry and already matches
+        // each one to its FieldSpec, so it marks that FieldSpec's bit
+        // (indexed by its position in fields_, i.e. its `order`, the same
+        // index next_tlv() consumes fields_ in) the moment it finds `match`,
+        // instead of the presence check re-deriving the same answer with its
+        // own full rescan afterwards.
         std::size_t pos = body_start_;
         std::uint32_t previous_id = 0U;
         bool have_previous = false;
@@ -307,17 +315,20 @@ void SampleReader::prime() noexcept {
                 error_ = MessageError::LengthOverflow;
                 return;
             }
-            const FieldSpec* match = nullptr;
+            std::size_t match_index = field_count_;
             for (std::size_t index = 0U; index < field_count_; ++index) {
                 if (fields_[index].field_id == field_id) {
-                    match = &fields_[index];
+                    match_index = index;
                     break;
                 }
             }
-            if (match == nullptr) {
+            if (match_index == field_count_) {
                 error_ = MessageError::InvalidValue;  // unknown field -> reject (section 11)
                 return;
             }
+            tlv_present_[match_index / 8U] = static_cast<std::uint8_t>(
+                tlv_present_[match_index / 8U] |
+                static_cast<std::uint8_t>(1U << (match_index % 8U)));
             pos += 4U + value_size;
         }
         if (pos != size_) {
@@ -328,23 +339,14 @@ void SampleReader::prime() noexcept {
             if ((fields_[index].flags & kFieldNullable) != 0U) {
                 continue;
             }
-            bool present = false;
-            std::size_t scan = body_start_;
-            while (scan < size_) {
-                const std::uint16_t id = static_cast<std::uint16_t>(read_le(payload_ + scan, 2U));
-                const std::uint16_t vs =
-                    static_cast<std::uint16_t>(read_le(payload_ + scan + 2U, 2U));
-                if (id == fields_[index].field_id) {
-                    present = true;
-                    break;
-                }
-                scan += 4U + vs;
-            }
+            const bool present = (tlv_present_[index / 8U] &
+                                  static_cast<std::uint8_t>(1U << (index % 8U))) != 0U;
             if (!present) {
                 error_ = MessageError::CountMismatch;  // missing non-nullable field
                 return;
             }
         }
+        tlv_scan_pos_ = body_start_;
         return;
     }
     // A text / opaque encoding: nothing to walk. next() returns End; the
@@ -485,19 +487,54 @@ SampleReader::Step SampleReader::next_tlv(SampleValue* out) noexcept {
     }
     const FieldSpec& field = fields_[fields_seen_++];
 
-    // Find this field's entry in the (already validated) TLV body.
-    std::size_t pos = body_start_;
+    // Find this field's entry in the (already validated) TLV body, starting
+    // from tlv_scan_pos_ -- right after wherever the last call left off --
+    // rather than body_start_ every time. A caller walks fields_ in `order`,
+    // the only order next() is ever called in, and whenever a schema's
+    // field_id tracks `order` (Catalog::add_topic()'s default: field_id =
+    // order + 1 unless the caller overrides it) the wire entries -- always
+    // ascending by field_id -- are encountered in that exact same sequence,
+    // so resuming here finds each one in O(1) instead of rescanning entries
+    // this call has already ruled out. A field whose id sorts BEFORE the
+    // cursor (an explicit, reordered field_id -- schema evolution) still gets
+    // found: reaching the end without a match wraps once, back to
+    // body_start_, up to the cursor -- the same entries the unconditional
+    // full rescan this replaces would have looked at, just split in two.
     const std::uint8_t* value = nullptr;
     std::uint16_t value_size = 0U;
+    std::size_t found_pos = 0U;
+    std::size_t pos = tlv_scan_pos_;
     while (pos < size_) {
         const std::uint16_t id = static_cast<std::uint16_t>(read_le(payload_ + pos, 2U));
         const std::uint16_t vs = static_cast<std::uint16_t>(read_le(payload_ + pos + 2U, 2U));
         if (id == field.field_id) {
             value = payload_ + pos + 4U;
             value_size = vs;
+            found_pos = pos;
             break;
         }
         pos += 4U + vs;
+    }
+    if (value == nullptr) {
+        pos = body_start_;
+        const std::size_t wrap_limit = tlv_scan_pos_;
+        while (pos < wrap_limit) {
+            const std::uint16_t id = static_cast<std::uint16_t>(read_le(payload_ + pos, 2U));
+            const std::uint16_t vs = static_cast<std::uint16_t>(read_le(payload_ + pos + 2U, 2U));
+            if (id == field.field_id) {
+                value = payload_ + pos + 4U;
+                value_size = vs;
+                found_pos = pos;
+                break;
+            }
+            pos += 4U + vs;
+        }
+    }
+    if (value != nullptr) {
+        // Resume right after this entry -- the natural continuation point
+        // for the next field, in either the fast (in-sequence) or the
+        // wrapped case.
+        tlv_scan_pos_ = found_pos + 4U + value_size;
     }
     if (value == nullptr) {
         fill_null(out, field);  // omitted -> null (prime validated it is nullable)

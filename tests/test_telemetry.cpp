@@ -354,6 +354,39 @@ void test_tlv_sparse() {
     CHECK(r.finish() == MessageError::Ok);
 }
 
+// next_tlv() resumes its search from where the previous call left off rather
+// than rescanning the body from the start every time (see tlv_scan_pos_'s own
+// comment in telemetry.hpp) -- correct only if a field whose wire entry sorts
+// BEFORE the resume point still gets found by wrapping back to body_start_.
+// A schema whose field_id does NOT track `order` (explicit ids, schema
+// evolution) is exactly the case that exercises the wrap: `order` asks for
+// field_id 30, then 10, then 20, while the wire -- always ascending by
+// field_id -- holds them 10, 20, 30.
+void test_tlv_reordered_field_ids() {
+    const FieldSpec fields[] = {
+        spec(30, 0, WireType::Uint8),
+        spec(10, 1, WireType::Uint8),
+        spec(20, 2, WireType::Uint8),
+    };
+    const std::vector<std::uint8_t> b = {
+        0x01U, 0x00U,
+        0x0AU, 0x00U, 0x01U, 0x00U, 0x0BU,  // id 10, size 1, value 11
+        0x14U, 0x00U, 0x01U, 0x00U, 0x14U,  // id 20, size 1, value 20
+        0x1EU, 0x00U, 0x01U, 0x00U, 0xAAU,  // id 30, size 1, value 170
+    };
+    SampleReader r(b.data(), b.size(), fields, 3U, btp::kEncodingTlvLe);
+    SampleValue v = {};
+    // order 0 -> id 30: forward scan runs off the end of the body first.
+    CHECK(r.next(&v) == SampleStep::Item);  CHECK(v.field->field_id == 30 && v.u64(0) == 170U);
+    // order 1 -> id 10: the resume cursor is now past every entry, so this
+    // one is found only by wrapping back to body_start_.
+    CHECK(r.next(&v) == SampleStep::Item);  CHECK(v.field->field_id == 10 && v.u64(0) == 11U);
+    // order 2 -> id 20: back to a plain forward find from the new cursor.
+    CHECK(r.next(&v) == SampleStep::Item);  CHECK(v.field->field_id == 20 && v.u64(0) == 20U);
+    CHECK(r.next(&v) == SampleStep::End);
+    CHECK(r.finish() == MessageError::Ok);
+}
+
 void test_tlv_errors() {
     const FieldSpec fields[] = {
         spec(1, 0, WireType::Uint8),
@@ -509,6 +542,7 @@ int main() {
     test_value_policy();
     test_writer_type_guards();
     test_tlv_sparse();
+    test_tlv_reordered_field_ids();
     test_tlv_errors();
     test_body_only_layout();
     test_body_accessor();
