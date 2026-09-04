@@ -49,8 +49,10 @@
 //   * manifest storage, the subscription aggregator, the priority scheduler,
 //     telemetry schema storage -- state the library keeps above the wire.
 //   * key derivation / selection -- the body of your seal / open callbacks.
-//   * SERIAL byte-stream framing (COBS) and Serial frames larger than one
-//     ESP-NOW payload -- not in this first cut (see send() / receive() below).
+//   * LINK framing -- COBS, HID-report de-padding, a serial byte stream. A
+//     caller that owns its framing decodes one whole frame itself (e.g. via
+//     btp::SerialDecoder) and hands it to receive(const DecodedFrame&, ...);
+//     Serial frames larger than one ESP-NOW payload are still a later cut.
 //
 // This is library 2.11.0 territory.
 
@@ -504,6 +506,20 @@ public:
     NodeRx receive(const std::uint8_t* datagram, std::size_t size,
                    std::uint64_t now_ms, ReceivedMessage* out) noexcept;
 
+    // Same, for a frame something ELSE already decoded -- a caller that owns
+    // the link framing itself (COBS / a serial byte stream fed through
+    // btp::SerialDecoder, a HID report de-padder) and wants btp::Node for the
+    // session / reassembly / discovery wiring above one whole BTP frame. Skips
+    // btp::decode() (`frame` came from a decoder that already validated the
+    // envelope and CRC); everything past that -- the initiator, the responder
+    // session, reassembly, open(), and every discovery / subscription /
+    // command / terminal outcome -- is identical to the datagram overloads.
+    // stats().session_path_dropped_* are not touched here (that decoder counts
+    // its own).
+    NodeRx receive(const DecodedFrame& frame, ReceivedMessage* out) noexcept;
+    NodeRx receive(const DecodedFrame& frame, std::uint64_t now_ms,
+                   ReceivedMessage* out) noexcept;
+
     // ---- session responder (opt-in) -------------------------------------
     // `local` is this peer's HELLO advertisement (role, versions, limits,
     // peer_uuid, config_revision). `hello_deadline_ms` bounds the wait for the
@@ -842,6 +858,12 @@ public:
 
 private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
+    // The shared tail of every receive() overload: feed one already-decoded
+    // frame to the initiator, then the responder session, then reassembly, and
+    // finish() the outcome. The datagram overloads btp::decode() into a
+    // DecodedFrame first; the DecodedFrame overloads skip straight here.
+    NodeRx route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
+                         ReceivedMessage* out) noexcept;
     NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out,
                  std::uint64_t now_ms) noexcept;
     // cfg_.reply_seal()'s pick, or cfg_.has_seal()/cfg_.seal() when it

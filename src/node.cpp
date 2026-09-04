@@ -195,6 +195,25 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
         return NodeRx::DroppedFrame;
     }
 
+    return route_decoded(decoded, now_ms, out);
+}
+
+NodeRx Node::receive(const DecodedFrame& frame, ReceivedMessage* out) noexcept {
+    return receive(frame, resolve_now(0U), out);
+}
+
+NodeRx Node::receive(const DecodedFrame& frame, std::uint64_t now_ms,
+                     ReceivedMessage* out) noexcept {
+    last_session_event_ = SessionEvent::None;
+    last_initiator_event_ = InitiatorEvent::None;
+    if (out == nullptr) return NodeRx::DroppedFrame;
+    return route_decoded(frame, now_ms, out);
+}
+
+NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
+                           ReceivedMessage* out) noexcept {
+    const bool initiator_live = initiator_.state() != InitiatorState::Idle;
+
     if (initiator_live) {
         const InitiatorOutcome io = initiator_.on_frame(decoded, now_ms);
         last_initiator_event_ = io.event;

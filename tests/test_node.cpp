@@ -316,6 +316,101 @@ void test_cleartext_roundtrip() {
     CHECK(std::memcmp(msg.payload.data, payload.data(), payload.size()) == 0);
 }
 
+// receive(DecodedFrame) -- the entry a caller that owns its own link framing
+// (COBS / HID de-pad) uses. Same outcomes as the datagram overload, minus the
+// btp::decode() it skips.
+void test_receive_decoded_frame() {
+    Sink tx;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
+    Sink rx_out;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode receiver(receiver_cfg);
+    CHECK(sender.begin());
+    CHECK(receiver.begin());
+
+    // Single frame.
+    const std::vector<std::uint8_t> small = make_payload(30, 0x21);
+    CHECK(sender.send(MessageType::Telemetry, 0x0102U, small.data(), small.size(),
+                      5ULL));
+    btp::DecodedFrame df{};
+    CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
+                      btp::kEspNowTransport, &df) == btp::Error::Ok);
+    ReceivedMessage msg{};
+    CHECK(receiver.receive(df, 0U, &msg) == NodeRx::Complete);
+    CHECK(msg.header.object_id == 0x0102U);
+    CHECK(msg.payload.size == small.size());
+    CHECK(std::memcmp(msg.payload.data, small.data(), small.size()) == 0);
+
+    // Fragmented -- reassembly runs the same way off decoded frames.
+    tx.clear();
+    const std::vector<std::uint8_t> big = make_payload(480, 0x5A);
+    CHECK(sender.send(MessageType::Command, 0x0003U, big.data(), big.size(),
+                      9ULL));
+    CHECK(tx.count() >= 2U);
+    NodeRx last = NodeRx::Pending;
+    for (std::size_t i = 0; i < tx.frames.size(); ++i) {
+        btp::DecodedFrame f{};
+        CHECK(btp::decode(tx.frames[i].data(), tx.frames[i].size(),
+                          btp::kEspNowTransport, &f) == btp::Error::Ok);
+        last = receiver.receive(f, 0U, &msg);
+    }
+    CHECK(last == NodeRx::Complete);
+    CHECK(msg.reassembled);
+    CHECK(msg.payload.size == big.size());
+    CHECK(std::memcmp(msg.payload.data, big.data(), big.size()) == 0);
+}
+
+// A session responder driven entirely off receive(DecodedFrame): the HELLO
+// handshake and a following application frame both land the same as they do on
+// the datagram path.
+void test_receive_decoded_frame_drives_the_session() {
+    Sink initiator_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &initiator_tx);
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+
+    Sink responder_tx;
+    TestConfig responder_cfg = base_config(kSenderId, kSenderBoot, &responder_tx);
+    TestNode responder(responder_cfg);
+    const std::uint8_t uuid[16] = {9};
+    responder.enable_session(
+        btp::HelloBuilder(btp::Role::Producer, uuid).build(), 2000U);
+    CHECK(responder.begin(/*arm_and_announce=*/true));
+
+    // initiator -> HELLO
+    CHECK(initiator.connect(btp::HelloBuilder(btp::Role::Consumer, uuid).build(),
+                            0U, 2000U));
+    CHECK(initiator_tx.count() == 1U);
+
+    auto decode_one = [](Sink& s, std::size_t i) {
+        btp::DecodedFrame f{};
+        (void)btp::decode(s.frames[i].data(), s.frames[i].size(),
+                          btp::kEspNowTransport, &f);
+        return f;
+    };
+
+    ReceivedMessage msg{};
+    // responder answers HELLO via the decoded-frame path
+    CHECK(responder.receive(decode_one(initiator_tx, 0), 0U, &msg) ==
+          NodeRx::SessionHandled);
+    CHECK(responder.session_event() == btp::SessionEvent::HelloAccepted);
+    CHECK(responder_tx.count() == 1U);  // HELLO_RESULT
+
+    // initiator consumes HELLO_RESULT (datagram path is fine here)
+    CHECK(deliver(initiator, responder_tx, 0U, &msg) == NodeRx::InitiatorHandled);
+    CHECK(initiator.connected());
+
+    // a normal application frame from the initiator, decoded-frame path again
+    initiator_tx.clear();
+    const std::vector<std::uint8_t> p = make_payload(20, 0x77);
+    CHECK(initiator.send(MessageType::Telemetry, 0x0400U, p.data(), p.size(),
+                         1ULL));
+    CHECK(responder.receive(decode_one(initiator_tx, 0), 0U, &msg) ==
+          NodeRx::Complete);
+    CHECK(msg.header.object_id == 0x0400U);
+}
+
 void test_fragmented_roundtrip() {
     Sink tx;
     TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
@@ -1945,6 +2040,8 @@ int main() {
     test_begin();
     test_reconfigure_before_begin();
     test_cleartext_roundtrip();
+    test_receive_decoded_frame();
+    test_receive_decoded_frame_drives_the_session();
     test_fragmented_roundtrip();
     test_sealed_roundtrip();
     test_session_handshake();

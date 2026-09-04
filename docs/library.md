@@ -2825,8 +2825,11 @@ own doc comment in `node.hpp`. The default (falling through to
 `receive()` sweeps stale partials, decodes, checks CRC and reassembles; with a
 session enabled it also runs the `HELLO` handshake, renews the watchdog and
 answers `SESSION_CLOSE` (framing the reply and sending it through `cfg.send()`)
-*before* a frame is routed. It returns a `NodeRx` — the outcomes collapsed
-from `btp::ReceiveOutcome` and `btp::SessionEvent`:
+*before* a frame is routed. `receive(const DecodedFrame&, …)` (2.35.0) is the
+same, minus the `btp::decode()` — for a caller that owns its link framing and
+has already turned a COBS block / HID report into one whole BTP frame. It
+returns a `NodeRx` — the outcomes collapsed from `btp::ReceiveOutcome` and
+`btp::SessionEvent`:
 
 | `NodeRx` | meaning |
 | --- | --- |
@@ -3273,11 +3276,14 @@ piece; a hub layers its aggregation on top via `Node::subscriptions()`), the
 priority scheduler, and **key derivation** (the body of your `seal` / `open`).
 §16.3's `connect()` is only the `HELLO` → `HELLO_RESULT` handshake -- a
 subscription and a command are still the caller's to make, once `connected()`
-is true. Plus, in this first cut: **serial byte-stream framing** — a `Node`
-speaks packet transports (`receive()` wants one whole datagram), and a single
-encoded frame must fit the ESP-NOW ceiling, so native COBS and large-Serial
-frames are a later addition; and **STATUS v2** (§16.8) -- no per-topic record
-list yet.
+is true. Plus: **link framing** — a `Node` does not own COBS / HID-report
+de-padding / a serial byte stream. `receive(datagram, size)` wants one whole
+BTP frame; a caller that owns its own framing (feeds bytes through
+`btp::SerialDecoder`, de-pads a HID report) hands the decoded frame to
+`receive(const DecodedFrame&, …)` (2.35.0) instead, and gets the identical
+session / reassembly / discovery path. A single encoded frame must still fit
+the ESP-NOW ceiling — large-Serial TX is a later addition. And **STATUS v2**
+(§16.8) -- no per-topic record list yet.
 
 ---
 
