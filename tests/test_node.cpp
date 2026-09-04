@@ -1679,6 +1679,61 @@ void test_subscribe_renews_before_the_lease_runs_out() {
     CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);  // still alive
 }
 
+// btp::SizedNode<NodeSize::Medium> must cost exactly what btp::StaticNode<>
+// itself costs -- the whole point of Medium mirroring StaticNode<>'s own
+// bare defaults is that neither is more or less "the real one".
+void test_sized_node_medium_matches_static_node_defaults() {
+    static_assert(sizeof(btp::SizedNode<btp::NodeSize::Medium>) ==
+                      sizeof(btp::StaticNode<>),
+                  "NodeSize::Medium must match StaticNode<>'s own defaults");
+}
+
+// Each tier actually builds and runs the same producer shape end to end --
+// not just "it compiles", the smallest (Low) topic/subscribe/publish round
+// trip too, since that is the tier most likely to be sized too tight for
+// something this test would otherwise miss silently.
+void test_sized_node_low_round_trips_a_topic() {
+    Sink prod_tx;
+    btp::SizedNode<btp::NodeSize::Low> producer(
+        base_config(kSenderId, kSenderBoot, &prod_tx));
+    CHECK(producer.topic(0x0101U, 1U, "x", &fill_drive_by_name)
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    btp::SizedNode<btp::NodeSize::Low> consumer(
+        base_config(kPeerId, kPeerBoot, &cons_tx));
+    CHECK(consumer.begin());
+    consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
+    ReceivedMessage msg{};
+    // deliver() is typed for TestNode specifically -- inline the same
+    // one-frame delivery here rather than templating it for one test.
+    NodeRx outcome = NodeRx::Pending;
+    for (std::size_t i = 0; i < cons_tx.frames.size(); ++i) {
+        outcome = producer.receive(cons_tx.frames[i].data(),
+                                   cons_tx.frames[i].size(), 0U, &msg);
+    }
+    CHECK(outcome == NodeRx::SubscriptionServed);
+
+    prod_tx.clear();  // drop the SUBSCRIBE_RESULT reply just sent above
+    CHECK(producer.publish_subscribed_topics(0U) == 1U);
+    CHECK(prod_tx.count() == 1U);
+}
+
+// High just needs to actually build and begin() -- its whole point is
+// capacity headroom (many topics, many subscribers), not a different
+// code path from the other two tiers.
+void test_sized_node_high_begins() {
+    Sink tx;
+    btp::SizedNode<btp::NodeSize::High> node(
+        base_config(kSenderId, kSenderBoot, &tx));
+    CHECK(node.begin());
+}
+
 }  // namespace
 
 int main() {
@@ -1728,6 +1783,10 @@ int main() {
     test_routine_publishes_and_ticks();
     test_routine_with_datagram_decodes_and_still_runs_housekeeping();
     test_routine_without_out_param_behaves_the_same();
+
+    test_sized_node_medium_matches_static_node_defaults();
+    test_sized_node_low_round_trips_a_topic();
+    test_sized_node_high_begins();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

@@ -1088,6 +1088,107 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// SizedNode -- StaticNode<> pre-sized to one of three memory tiers
+// ---------------------------------------------------------------------------
+//
+// StaticNode<>'s ten template parameters size ten genuinely different things
+// (concurrent reassemblies, the seal/manifest scratch, the catalogue, the
+// subscription and command tables) -- reasoning about all ten by hand for
+// "does this fit my budget" is exactly the kind of thing worth naming once.
+// Pick a tier and every parameter scales together:
+//
+//   btp::SizedNode<btp::NodeSize::Low>    node(cfg);   // sizeof() == 7,248
+//   btp::SizedNode<btp::NodeSize::Medium> node(cfg);   // sizeof() == 17,448 -- StaticNode<>'s own defaults
+//   btp::SizedNode<btp::NodeSize::High>   node(cfg);   // sizeof() == 67,720
+//
+// (measured, not estimated -- test_sized_node_medium_matches_static_node_
+// defaults() in tests/test_node.cpp pins Medium to StaticNode<>'s own
+// sizeof(), so the two can never silently drift apart). Slots costs more
+// than SlotBytes alone suggests: each ReassemblySlot (fragmentation.hpp)
+// carries a FIXED 255-entry fragment_sizes_ array -- fragment_count is an
+// 8-bit wire field, so a slot has to be ready to track the worst case
+// regardless of Slots -- plus a few hundred more octets of fixed metadata,
+// on top of the SlotBytes storage region and the shared rx_buffer /
+// open_buffer (each one SlotBytes, not per-slot). Raising Slots is
+// therefore the single most expensive knob to turn per unit; raising
+// SlotBytes on its own is comparatively cheap. StaticNode<...> with your
+// own arguments stays the escape hatch for a node that needs one dimension
+// off this curve -- a desktop hub with a huge catalogue but few concurrent
+// reassemblies, say.
+enum class NodeSize : std::uint8_t { Low, Medium, High };
+
+namespace detail {
+
+template <NodeSize Size>
+struct NodeSizeTraits;
+
+// A robot with ONE small topic and little else -- a battery-powered sensor,
+// or a memory-starved corner of a bigger deployment. Room for a handful of
+// small fragmented commands, a small catalogue, few subscribers.
+template <>
+struct NodeSizeTraits<NodeSize::Low> {
+    static const std::size_t Slots = 2U;
+    static const std::size_t SlotBytes = 400U;
+    static const std::size_t SealBytes = 512U;
+    static const std::size_t ScratchBytes = 256U;
+    static const std::size_t CatalogTopics = 4U;
+    static const std::size_t CatalogFields = 16U;
+    static const std::size_t CatalogStringBytes = 512U;
+    static const std::size_t MaxSubscriptions = 4U;
+    static const std::size_t MaxCommands = 2U;
+    static const std::size_t CommandBytes = 64U;
+};
+
+// The ESP32-class robot this library was sized for in the first place --
+// identical to StaticNode<>'s own bare defaults, so btp::SizedNode<
+// NodeSize::Medium> and btp::StaticNode<> cost exactly the same.
+template <>
+struct NodeSizeTraits<NodeSize::Medium> {
+    static const std::size_t Slots = 4U;
+    static const std::size_t SlotBytes = 600U;
+    static const std::size_t SealBytes = 2048U;
+    static const std::size_t ScratchBytes = 512U;
+    static const std::size_t CatalogTopics = 8U;
+    static const std::size_t CatalogFields = 64U;
+    static const std::size_t CatalogStringBytes = 1536U;
+    static const std::size_t MaxSubscriptions = 8U;
+    static const std::size_t MaxCommands = 4U;
+    static const std::size_t CommandBytes = 128U;
+};
+
+// A hub or desktop aggregator -- many topics, many subscribers, bigger
+// commands, several concurrent large reassemblies. Not meant for a
+// memory-constrained MCU.
+template <>
+struct NodeSizeTraits<NodeSize::High> {
+    static const std::size_t Slots = 8U;
+    static const std::size_t SlotBytes = 2048U;
+    static const std::size_t SealBytes = 4096U;
+    static const std::size_t ScratchBytes = 2048U;
+    static const std::size_t CatalogTopics = 32U;
+    static const std::size_t CatalogFields = 256U;
+    static const std::size_t CatalogStringBytes = 4096U;
+    static const std::size_t MaxSubscriptions = 32U;
+    static const std::size_t MaxCommands = 16U;
+    static const std::size_t CommandBytes = 512U;
+};
+
+}  // namespace detail
+
+template <NodeSize Size>
+using SizedNode =
+    StaticNode<detail::NodeSizeTraits<Size>::Slots,
+              detail::NodeSizeTraits<Size>::SlotBytes,
+              detail::NodeSizeTraits<Size>::SealBytes,
+              detail::NodeSizeTraits<Size>::ScratchBytes,
+              detail::NodeSizeTraits<Size>::CatalogTopics,
+              detail::NodeSizeTraits<Size>::CatalogFields,
+              detail::NodeSizeTraits<Size>::CatalogStringBytes,
+              detail::NodeSizeTraits<Size>::MaxSubscriptions,
+              detail::NodeSizeTraits<Size>::MaxCommands,
+              detail::NodeSizeTraits<Size>::CommandBytes>;
+
 }  // namespace btp
 
 #endif  // BTP_NODE_HPP
