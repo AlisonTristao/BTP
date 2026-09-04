@@ -4,7 +4,9 @@
 // writes nothing about topic 0x0101 -- it learns everything from the wire.
 // It is also the INITIATOR: it connects OUT to the producer and asks to be
 // subscribed, instead of waiting for whatever the producer feels like
-// sending:
+// sending. Every callback btp::Node calls out to (send/seal/open/terminal)
+// is ConsumerLink, in node_config.hpp -- this file is the loop, not the
+// wiring:
 //
 //   node.begin(hello, deadline_ms)              -> HELLO -> HELLO_RESULT;
 //                                                once connected(), every
@@ -22,21 +24,21 @@
 //                                                correlated result comes
 //                                                back as NodeRx::CommandHandled
 //                                                (command_outcome())
-//   cfg.terminal = &handle_terminal_out          -> calls it directly for
+//   ConsumerLink::terminal()                     -> called directly for
 //                                                TERMINAL_OUT (NodeRx::
 //                                                TerminalDelivered); a
 //                                                node.send(kTerminalIn, ...)
 //                                                below is what prompted it
-//   cfg.seal / cfg.open = AES-128-GCM (btp/aead.hpp), kDemoAeadKey below --
-//                                                every one of the above,
+//   ConsumerLink::seal()/open() = AES-128-GCM   -> every one of the above,
 //                                                sealed / opened the same
 //                                                way -- SAME key as
-//                                                sender.cpp, AEAD is symmetric
+//                                                sender.cpp/ProducerLink,
+//                                                AEAD is symmetric
 //
-// sender.cpp is the other end. The link here is faked -- send_frame() just
-// drops the bytes and link_poll() always delivers nothing, so receive()
-// never actually decodes anything below; a real node hands frames to
-// ESP-NOW / a UART / USB-HID and reads them back from there. This file is
+// sender.cpp is the other end. The link here is faked -- ConsumerLink::send()
+// just drops the bytes and link_poll() below always delivers nothing, so
+// receive() never actually decodes anything below; a real node hands frames
+// to ESP-NOW / a UART / USB-HID and reads them back from there. This file is
 // the logic, not a runnable demo. by_hand_receiver.cpp is the runnable
 // wire-level walkthrough.
 //
@@ -48,38 +50,20 @@
 // consumer does that on its own schedule, whether or not a frame happened
 // to land that same instant.
 
-#include <btp/aead.hpp>
-#include <btp/node.hpp>
+#include "node_config.hpp"
 
 namespace {
-    // Must be the SAME 16 bytes as sender.cpp's kDemoAeadKey -- AEAD is
-    // symmetric, both peers seal/open with one shared key. A real
-    // deployment provisions each pair's key out of band, never like this.
-    const std::uint8_t kDemoAeadKey[btp::kAesGcmKeySize] = {
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-    };
-    // Built once and handed to node.begin() below -- this peer's side of
-    // the handshake: who it is, what it can take, how long it waits before
-    // giving up on a quiet peer.
-    btp::Hello make_hello(btp::Role role) {
-        btp::Hello h = {};
-        h.role                      = static_cast<std::uint8_t>(role);  // Consumer here -- the other end answers as Producer
-        h.version_count             = 1U;                               // how many entries versions[] below actually holds
-        h.versions[0]               = 1U;                               // the one protocol version this peer speaks
-        h.max_logical_payload       = 2048U;                            // largest reassembled message this peer accepts
-        h.max_inflight_reassemblies = 4U;                               // concurrent fragmented messages it can track at once
-        h.max_subscriptions         = 8U;                               // subscription slots it can grant
-        h.max_dedup_entries         = 32U;                              // command-request dedup cache size
-        h.session_timeout_ms        = 30000U;                           // inactivity watchdog: this long without a frame ends the session
-        for (int i = 0; i < 16; ++i)
-            h.peer_uuid[i] = static_cast<std::uint8_t>(i + 1);          // opaque per-boot identity -- any stable 16 bytes work
-        return h;
-    }
+    // Opaque per-boot identity -- any stable 16 bytes work; a real
+    // deployment derives or provisions its own. Handed to btp::HelloBuilder
+    // below, which needs it as a constructor argument (it has no safe
+    // default -- all-zero is invalid on the wire).
+    const std::uint8_t kDemoPeerUuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
+                                            9, 10, 11, 12, 13, 14, 15, 16};
 
     // The node calls this for each TELEMETRY sample of a topic it has
     // learned. `reader` yields the values in schema order, raw * scale +
-    // offset already applied.
+    // offset already applied. Unrelated to NodeConfig -- learn_catalog()'s
+    // own callback, a raw function pointer independent of send/seal/open/...
     void on_drive_status(void* /*ctx*/, const btp::CatalogTopic& topic,
                          btp::SampleReader& reader) {
         btp::SampleValue v = {};
@@ -100,39 +84,6 @@ namespace {
         }  // else TimedOut -- nothing arrived in time
     }
 
-    // node.on_terminal() below is what gets this called for a TERMINAL_OUT
-    // frame at all -- see sender.cpp's handle_terminal_in() for the other
-    // direction. A real shell would render `payload` to the console instead.
-    void handle_terminal_out(void* /*ctx*/, btp::Node& /*node*/,
-                             const btp::Header& /*header*/,
-                             btp::ByteView /*payload*/, std::uint64_t /*now_ms*/) {}
-
-    // EndpointSealFn / NodeOpenFn -- see sender.cpp's seal_message() /
-    // open_message() for the full comment; identical here, same key.
-    bool seal_message(void* context, const btp::Header& header,
-                      std::uint16_t payload_size, const std::uint8_t* plaintext,
-                      std::uint8_t* out) {
-        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
-                               btp::kAesGcmKeySize};
-        return btp::aead_seal(key, header, payload_size, plaintext, out) ==
-               btp::AeadError::Ok;
-    }
-
-    bool open_message(void* context, const btp::Header& header,
-                      std::uint16_t sealed_size, const std::uint8_t* sealed,
-                      std::uint8_t* out_plaintext) {
-        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
-                               btp::kAesGcmKeySize};
-        return btp::aead_open(key, header, sealed_size, sealed,
-                              out_plaintext) == btp::AeadError::Ok;
-    }
-
-    // The node hands every finished frame here. Fake: a real node transmits it.
-    // Needed now that this node also connect()s / subscribe()s out.
-    bool send_frame(void* /*ctx*/, const std::uint8_t* /*frame*/, std::size_t /*n*/) {
-        return true;
-    }
-
     // Fake link. A real one hands you each datagram as it arrives; this delivers
     // nothing, so the loop below only shows the wiring.
     std::size_t link_poll(std::uint8_t* /*out*/, std::size_t /*cap*/) { return 0U; }
@@ -140,16 +91,13 @@ namespace {
 }  // namespace
 
 int main() {
-    btp::NodeConfig cfg = {};
+    // `cfg` is held by REFERENCE (NodeConfig's own comment on lifetime) --
+    // it outlives `node` below simply because it is declared first in the
+    // same scope.
+    example::ConsumerLink cfg;
     cfg.source_id = 0x00B0B0FEU;   // this device  (non-zero)
     cfg.boot_id   = 0x0000C0DEU;   // new each boot (non-zero)
     cfg.transport = btp::TransportLimits{250U, true};  // max_frame_size, allow_encrypted -- must match sender.cpp's
-    cfg.send      = &send_frame;
-    cfg.terminal  = &handle_terminal_out;
-    cfg.seal      = &seal_message;
-    cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);  // void* ctx never modifies it
-    cfg.open      = &open_message;
-    cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);
 
     // NodeSize::Low -- learns one small catalogue, holds one subscription
     // and one outstanding command. sizeof() == 7,248 (node.hpp's own
@@ -157,7 +105,12 @@ int main() {
     btp::SizedNode<btp::NodeSize::Low> node(cfg);
     node.learn_catalog(&on_drive_status);  // this node's own catalogue, learned from the wire
 
-    if (!node.begin(make_hello(btp::Role::Consumer), /*connect_deadline_ms=*/2000U)) {
+    // Every other Hello field takes btp::HelloBuilder's own default (see its
+    // comment, messages.hpp) -- override one with e.g. .max_subscriptions(1U)
+    // if this consumer only ever holds one.
+    const btp::Hello hello =
+        btp::HelloBuilder(btp::Role::Consumer, kDemoPeerUuid).build();
+    if (!node.begin(hello, /*connect_deadline_ms=*/2000U)) {
         return 1;
     }
 
@@ -177,7 +130,7 @@ int main() {
     const std::uint32_t command_id = node.command(
         /*peer_source_id=*/ 0x00CAFE01U,   // must match sender.cpp's cfg.source_id
         /*peer_boot_id=*/   0x0000B001U,   // must match sender.cpp's cfg.boot_id
-        /*action_id=*/      0x0001U,       // "stop" -- see sender.cpp's handle_command()
+        /*action_id=*/      0x0001U,       // "stop" -- see sender.cpp's ProducerLink::command()
         /*action_version=*/ 1U,
         /*parameters=*/     nullptr, 0U);
 
@@ -185,8 +138,8 @@ int main() {
     std::uint64_t now_ms = 0U;
 
     // Simulate a user typing something into this node's shell -- see
-    // sender.cpp's handle_terminal_in() for what answers it (TERMINAL_OUT,
-    // which on_terminal() above hands straight to handle_terminal_out()).
+    // sender.cpp's ProducerLink::terminal() for what answers it (TERMINAL_OUT,
+    // which ConsumerLink::terminal() (node_config.hpp) receives).
     const std::uint8_t keystrokes[] = "status\n";
     node.send(btp::MessageType::Terminal, btp::object_id::kTerminalIn,
              keystrokes, sizeof(keystrokes) - 1, now_ms * 1000ULL);
@@ -197,8 +150,9 @@ int main() {
 
         // datagram (if any) -> receive(); either way, connection watchdog +
         // subscription renewal. TERMINAL_OUT is handled inside routine()
-        // itself now -- handle_terminal_out() above already ran; only
-        // CommandHandled still needs a check here, to read command_outcome().
+        // itself now -- ConsumerLink::terminal() (node_config.hpp) already
+        // ran; only CommandHandled still needs a check here, to read
+        // command_outcome().
         if (node.routine(datagram, n, now_ms) == btp::NodeRx::CommandHandled) {
             handle_command_outcome(node.command_outcome());
         }

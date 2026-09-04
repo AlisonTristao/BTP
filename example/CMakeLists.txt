@@ -24,8 +24,9 @@ project(btp_examples LANGUAGES CXX)
 set(BTP_ENABLE_AEAD ON CACHE BOOL "" FORCE)
 add_subdirectory(.. "${CMAKE_CURRENT_BINARY_DIR}/btp")
 
-# The btp::Node pair -- the friendly facade.
-foreach(example sender receiver)
+# The btp::Node pair -- the friendly facade -- plus hybrid.cpp, one node
+# that is both a producer and a consumer at once (see its own header comment).
+foreach(example sender receiver hybrid)
     add_executable(${example} ${example}.cpp)
     target_link_libraries(${example} PRIVATE btp::node btp::telemetry btp::aead)
     target_compile_features(${example} PRIVATE cxx_std_11)
