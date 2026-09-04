@@ -425,7 +425,9 @@ public:
     // source_id/boot_id/transport fields (a plain assignment, no Node method
     // involved) any time before begin() -- no placeholder-then-reconfigure
     // dance needed.
-    Node(NodeConfig& cfg, ReassemblySlot* slots,
+    // slot_array, not slots: see Reassembler's own constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    Node(NodeConfig& cfg, ReassemblySlot* slot_array,
          const ReassemblyStorage* storage, std::size_t slot_count,
          std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
          std::size_t rx_capacity, std::uint8_t* seal_scratch,
@@ -793,7 +795,7 @@ public:
     // your behalf). nullptr / 0 detaches -- on_publish() then fails closed and
     // publish_subscribed_topics() is a no-op, same "opt-in, safe when unset"
     // rule as subscriptions_ / commands_.
-    void enable_publish_registry(PublishRegistration* slots,
+    void enable_publish_registry(PublishRegistration* slot_array,
                                  std::size_t slot_count) noexcept;
 
     // Registers `fill` as the callback that fills a sample of `topic_id` for
@@ -1008,7 +1010,11 @@ namespace detail {
 template <std::size_t Slots, std::size_t SlotBytes, std::size_t SealBytes,
           std::size_t ScratchBytes>
 struct NodeStorage {
-    ReassemblySlot slots[Slots];
+    // slot_array, not slots -- see Reassembler's constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision; this one is
+    // a MEMBER, not just a parameter, so getting it wrong would silently drop
+    // the field from a Qt-macro-active build entirely, not just rename it.
+    ReassemblySlot slot_array[Slots];
     std::uint8_t storage_bytes[Slots][SlotBytes];
     ReassemblyStorage storage[Slots];
     std::uint8_t rx_buffer[SlotBytes];
@@ -1140,7 +1146,7 @@ public:
         std::uint64_t reassembly_timeout_ms =
             kNodeDefaultReassemblyTimeoutMs) noexcept
         : Storage(),
-          Node(cfg, Storage::slots, Storage::storage, Slots,
+          Node(cfg, Storage::slot_array, Storage::storage, Slots,
                reassembly_timeout_ms, Storage::rx_buffer, SlotBytes,
                Storage::seal_scratch, SealBytes, Storage::open_buffer, SlotBytes,
                Storage::scratch_buffer, ScratchBytes),

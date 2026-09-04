@@ -169,12 +169,12 @@ private:
 // DedupCache
 // ---------------------------------------------------------------------------
 //
-//   btp::DedupSlot slots[16];
+//   btp::DedupSlot slot_array[16];  // NOT "slots" -- Qt's <QObject> macro eats it
 //   std::uint8_t bytes[16][768];
 //   btp::DedupStorage storage[16];
 //   for (std::size_t i = 0; i < 16; ++i) storage[i] = {bytes[i], sizeof(bytes[i])};
 //   btp::DedupRequester requesters[4];
-//   btp::DedupCache cache(slots, storage, 16, requesters, 4);
+//   btp::DedupCache cache(slot_array, storage, 16, requesters, 4);
 //
 //   // on a COMMAND_REQUEST:
 //   btp::DedupKey key{h.source_id, h.boot_id, h.sequence};
@@ -201,7 +201,9 @@ private:
 
 class DedupCache {
 public:
-    DedupCache(DedupSlot* slots, const DedupStorage* storage,
+    // slot_array, not slots -- see Reassembler's constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    DedupCache(DedupSlot* slot_array, const DedupStorage* storage,
                std::size_t slot_count, DedupRequester* requesters,
                std::size_t requester_count) noexcept;
 
@@ -726,7 +728,9 @@ private:
 
 class CommandClient {
 public:
-    CommandClient(ClientCommand* slots, std::size_t slot_count) noexcept;
+    // slot_array, not slots -- see Reassembler's constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    CommandClient(ClientCommand* slot_array, std::size_t slot_count) noexcept;
 
     bool valid() const noexcept { return slots_ != nullptr && slot_count_ != 0U; }
     std::size_t slot_count() const noexcept { return slot_count_; }

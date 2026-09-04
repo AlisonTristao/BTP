@@ -69,7 +69,12 @@ private:
 // the consumer until release() or timeout, so its returned ByteView is stable.
 class Reassembler {
 public:
-    Reassembler(ReassemblySlot* slots,
+    // Named slot_array, not slots: Qt's <QObject> (unless QT_NO_KEYWORDS)
+    // #defines slots to nothing, and this header is included from Qt-using
+    // consumers (TraceView) -- a parameter or member actually named `slots`
+    // would silently vanish there. Every BTP header follows this naming for
+    // the same reason; see docs/library.md's own note on it.
+    Reassembler(ReassemblySlot* slot_array,
                 const ReassemblyStorage* storage,
                 std::size_t slot_count,
                 std::uint64_t timeout_ms) noexcept;

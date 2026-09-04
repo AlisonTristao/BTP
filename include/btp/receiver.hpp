@@ -115,11 +115,11 @@ struct ReceivedMessage {
 // Receiver
 // ---------------------------------------------------------------------------
 //
-//   btp::ReassemblySlot slots[4];
+//   btp::ReassemblySlot slot_array[4];  // NOT "slots" -- Qt's <QObject> macro eats it
 //   std::uint8_t storage_bytes[4][kMaxPayload];
 //   btp::ReassemblyStorage storage[4];
 //   for (std::size_t i = 0; i < 4; ++i) storage[i] = {storage_bytes[i], kMaxPayload};
-//   btp::Receiver receiver(slots, storage, 4, 4000, btp::kEspNowTransport);
+//   btp::Receiver receiver(slot_array, storage, 4, 4000, btp::kEspNowTransport);
 //
 //   std::uint8_t out[kMaxPayload];
 //   btp::ReceivedMessage msg{};
@@ -136,7 +136,9 @@ public:
     // to the Reassembler this object holds. transport is the TransportLimits
     // btp::decode() applies (kEspNowTransport on firmware; kSerialTransport is
     // the widest ceiling of the three presets).
-    Receiver(ReassemblySlot* slots, const ReassemblyStorage* storage,
+    // slot_array, not slots -- see Reassembler's own constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    Receiver(ReassemblySlot* slot_array, const ReassemblyStorage* storage,
              std::size_t slot_count, std::uint64_t timeout_ms,
              const TransportLimits& transport) noexcept;
 

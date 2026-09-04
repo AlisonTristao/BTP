@@ -501,6 +501,20 @@ if(BTP_BUILD_TESTS)
     btp_strict_warnings(btp_node_tests)
     add_test(NAME btp_node_tests COMMAND btp_node_tests)
 
+    # Compile-only: simulates Qt's <QObject> macro environment (unless a
+    # consumer builds with QT_NO_KEYWORDS, #define slots / signals / emit are
+    # active in every TU that included it, including this one's -- a BTP
+    # public header with a parameter or member actually named `slots` (etc.)
+    # would silently lose it there and fail to compile, exactly what happened
+    # the first time a real Qt consumer (TraceView) included btp/node.hpp; see
+    # each affected constructor's own "slot_array, not slots" comment. No
+    # assertions, no Qt dependency -- this only has to compile.
+    add_executable(btp_qt_macro_safety_tests tests/test_qt_macro_safety.cpp)
+    target_link_libraries(btp_qt_macro_safety_tests PRIVATE btp::node)
+    target_compile_features(btp_qt_macro_safety_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_qt_macro_safety_tests)
+    add_test(NAME btp_qt_macro_safety_tests COMMAND btp_qt_macro_safety_tests)
+
     target_compile_definitions(
         btp_conformance_tests
         PRIVATE BTP_VECTOR_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test-vectors/v1"

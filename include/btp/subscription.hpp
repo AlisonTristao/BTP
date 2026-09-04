@@ -43,8 +43,8 @@ namespace btp {
 // SubscriptionTable -- the RESPONDER: subscriptions granted on MY topics
 // ===========================================================================
 //
-//   btp::SubscriptionRecord slots[8];
-//   btp::SubscriptionTable table(slots, 8);
+//   btp::SubscriptionRecord slot_array[8];  // NOT "slots" -- Qt's <QObject> macro eats it
+//   btp::SubscriptionTable table(slot_array, 8);
 //   node.enable_subscriptions(&table);
 //
 //   // per decoded SUBSCRIBE (Node does this once enable_subscriptions() is set):
@@ -79,7 +79,9 @@ private:
 
 class SubscriptionTable {
 public:
-    SubscriptionTable(SubscriptionRecord* slots, std::size_t slot_count) noexcept;
+    // slot_array, not slots -- see Reassembler's constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    SubscriptionTable(SubscriptionRecord* slot_array, std::size_t slot_count) noexcept;
 
     bool valid() const noexcept { return slots_ != nullptr && slot_count_ != 0U; }
     std::size_t slot_count() const noexcept { return slot_count_; }
@@ -139,8 +141,8 @@ private:
 // SubscriptionClient -- the INITIATOR: subscriptions I hold on a peer
 // ===========================================================================
 //
-//   btp::ClientSubscription slots[4];
-//   btp::SubscriptionClient client(slots, 4);
+//   btp::ClientSubscription slot_array[4];  // NOT "slots" -- Qt's <QObject> macro eats it
+//   btp::SubscriptionClient client(slot_array, 4);
 //   node.enable_subscription_client(&client);
 //
 //   const std::uint32_t id = node.subscribe(robot_source_id, robot_boot_id,
@@ -215,7 +217,9 @@ private:
 
 class SubscriptionClient {
 public:
-    SubscriptionClient(ClientSubscription* slots, std::size_t slot_count) noexcept;
+    // slot_array, not slots -- see Reassembler's constructor comment
+    // (btp/fragmentation.hpp) on the Qt <QObject> macro collision.
+    SubscriptionClient(ClientSubscription* slot_array, std::size_t slot_count) noexcept;
 
     bool valid() const noexcept { return slots_ != nullptr && slot_count_ != 0U; }
     std::size_t slot_count() const noexcept { return slot_count_; }
