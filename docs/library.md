@@ -724,7 +724,7 @@ It does not transmit the memory representation of `btp::Header`.
 
 ### 4.2 Transport limits
 
-`TransportLimits` (a plain `{max_frame_size, max_payload_size, allow_encrypted}`, not a fixed enum of named profiles) selects the frame-size restrictions -- and whether an ENCRYPTED frame is allowed at all -- that apply to the operation.
+`TransportLimits` (a plain `{max_frame_size, allow_encrypted}`, not a fixed enum of named profiles) selects the frame-size restriction -- and whether an ENCRYPTED frame is allowed at all -- that applies to the operation. There is no `max_payload_size` field: `btp::max_payload_size(transport)` always derives it as `max_frame_size` minus the 40-octet header+CRC floor, the same relationship every real transport already has, so there is nothing to set independently and no way for the two to disagree.
 
 The codec uses it to validate whether the frame can be represented on that transport.
 
@@ -733,12 +733,12 @@ It does not perform transport I/O.
 Three presets cover the transports section 4 below documents:
 
 ```cpp
-btp::kEspNowTransport   // 250 / 210, encryption allowed
-btp::kSerialTransport   // 4096 / 4056, encryption allowed
-btp::kUsbHidTransport   // 62 / 22, encryption NOT allowed
+btp::kEspNowTransport   // max_frame_size 250 (-> payload 210), encryption allowed
+btp::kSerialTransport   // max_frame_size 4096 (-> payload 4056), encryption allowed
+btp::kUsbHidTransport   // max_frame_size 62 (-> payload 22), encryption NOT allowed
 ```
 
-A caller with a different link builds its own `btp::TransportLimits{max_frame_size, max_payload_size, allow_encrypted}` -- there is no enum to extend.
+A caller with a different link builds its own `btp::TransportLimits{max_frame_size, allow_encrypted}` -- there is no enum to extend.
 
 For example:
 
@@ -798,16 +798,13 @@ encoded_size()
 exact frame size
 ```
 
-For transport-wide limits, the library also provides:
+For transport-wide limits: the maximum physical frame size is `transport.max_frame_size` itself (a plain field, no function needed); the maximum payload size is derived, via
 
 ```text
-max_frame_size()
-max_payload_size()
+max_payload_size(transport)
 ```
 
-These describe the maximum physical frame and payload sizes associated with a transport profile.
-
-They are useful for:
+These are useful for:
 
 * receive-buffer sizing;
 * checking whether fragmentation is required;

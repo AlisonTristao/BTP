@@ -214,7 +214,7 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
             btp::Error::Ok) {
             return false;
         }
-        const std::size_t limit = transport.max_payload_size;
+        const std::size_t limit = max_payload_size(transport);
         for (std::uint8_t index = 0U; index < count; ++index) {
             const std::size_t offset = static_cast<std::size_t>(index) * limit;
             const std::size_t remaining = message.payload.size - offset;

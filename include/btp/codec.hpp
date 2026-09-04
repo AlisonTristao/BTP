@@ -12,11 +12,19 @@ static const std::size_t kV1HeaderSize = 36U;
 static const std::size_t kV1CrcSize = 4U;
 static const std::size_t kV1MinimumFrameSize = kV1HeaderSize + kV1CrcSize;
 static const std::size_t kEspNowMaxFrameSize = 250U;
-static const std::size_t kEspNowMaxPayloadSize = 210U;
 static const std::size_t kSerialMaxFrameSize = 4096U;
-static const std::size_t kSerialMaxPayloadSize = 4056U;
 static const std::size_t kUsbHidMaxFrameSize = 62U;
-static const std::size_t kUsbHidMaxPayloadSize = 22U;
+// The payload ceiling is never independent of the frame ceiling -- it is
+// always exactly the 40-octet header+CRC floor (kV1MinimumFrameSize) less,
+// derived here rather than hand-typed so the two can never drift apart.
+// max_payload_size(TransportLimits) below does the same subtraction for a
+// caller's own transport.
+static const std::size_t kEspNowMaxPayloadSize =
+    kEspNowMaxFrameSize - kV1MinimumFrameSize;
+static const std::size_t kSerialMaxPayloadSize =
+    kSerialMaxFrameSize - kV1MinimumFrameSize;
+static const std::size_t kUsbHidMaxPayloadSize =
+    kUsbHidMaxFrameSize - kV1MinimumFrameSize;
 
 static const std::uint8_t kV1Version = 1U;
 static const std::uint8_t kV2Version = 2U;
@@ -41,28 +49,35 @@ enum class MessageType : std::uint8_t {
 };
 
 // Describes a transport generically -- not a fixed list of named profiles.
-// A caller with a link this library has never heard of just fills in its
-// two ceilings and whether it can carry an ENCRYPTED frame at all (the
+// A caller with a link this library has never heard of fills in just its
+// frame ceiling and whether it can carry an ENCRYPTED frame at all -- no
+// payload ceiling to set: max_payload_size() below always derives it as
+// max_frame_size minus the 40-octet header+CRC floor, the same relationship
+// every real transport already has (EspNow 250->210, Serial 4096->4056,
+// UsbHid 62->22, each exactly kV1MinimumFrameSize apart), so there is
+// nothing to set independently and no way for the two to disagree.
+// allow_encrypted is its own field, not derivable from either size (the
 // UsbHid case below: a 16-octet AEAD tag over a 22-octet payload is 73%
 // overhead, so docs/encryption.md section 9 forbids it there outright --
-// that is a POLICY choice about a transport, not something derivable from
-// its size, hence its own field rather than a size threshold encode()/
-// decode() would have to guess at).
+// that is a POLICY choice about a transport, not a size threshold encode()/
+// decode() could infer on their own).
 struct TransportLimits {
     std::size_t max_frame_size;
-    std::size_t max_payload_size;
     bool allow_encrypted;
 };
 
 // Presets for the three transports docs/fragmentation-and-transports.md
 // documents -- construct your own TransportLimits for anything else; there
 // is no enum to extend.
-static const TransportLimits kEspNowTransport{kEspNowMaxFrameSize,
-                                              kEspNowMaxPayloadSize, true};
-static const TransportLimits kSerialTransport{kSerialMaxFrameSize,
-                                              kSerialMaxPayloadSize, true};
-static const TransportLimits kUsbHidTransport{kUsbHidMaxFrameSize,
-                                              kUsbHidMaxPayloadSize, false};
+static const TransportLimits kEspNowTransport{kEspNowMaxFrameSize, true};
+static const TransportLimits kSerialTransport{kSerialMaxFrameSize, true};
+static const TransportLimits kUsbHidTransport{kUsbHidMaxFrameSize, false};
+
+// transport.max_frame_size minus the 40-octet header+CRC floor
+// (kV1MinimumFrameSize) -- 0 if max_frame_size does not even reach that
+// floor (not a transport a frame could fit on; detail::valid_transport()
+// rejects it internally rather than underflowing here).
+std::size_t max_payload_size(const TransportLimits& transport) noexcept;
 
 // Values assigned to the CIPHER_ID sub-field of flags (docs/encryption.md section 3). Only AesGcm (0) and ChaCha20Poly1305 (1) are assigned; the raw
 // values 2 and 3 are reserved for future ciphers. cipher_id() below is a

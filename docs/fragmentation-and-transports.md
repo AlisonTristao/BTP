@@ -2,19 +2,19 @@
 
 BTP separates a logical message from the transport used to carry it.
 
-The BTP frame format remains unchanged between transports. A transport is described to the codec as `btp::TransportLimits` -- not a fixed, closed list of named profiles, but two sizes and one policy bit:
+The BTP frame format remains unchanged between transports. A transport is described to the codec as `btp::TransportLimits` -- not a fixed, closed list of named profiles, and not two independent sizes either, just the frame ceiling and one policy bit:
 
 ```cpp
 struct TransportLimits {
     std::size_t max_frame_size;
-    std::size_t max_payload_size;
     bool allow_encrypted;
 };
 ```
 
 * `max_frame_size` -- the maximum frame size;
-* `max_payload_size` -- the maximum payload carried by one frame;
-* `allow_encrypted` -- whether this transport may carry an ENCRYPTED frame at all (section 7.3 below is why this exists as its own field, not something derived from the sizes).
+* `allow_encrypted` -- whether this transport may carry an ENCRYPTED frame at all (section 7.3 below is why this exists as its own field, not something derived from the size).
+
+There is no `max_payload_size` field to set. The maximum payload carried by one frame is always `max_frame_size` minus the 40-octet header+CRC floor -- every real transport already has exactly that relationship (250->210, 4096->4056, 62->22 below), so a caller has nothing to keep in sync, and `btp::max_payload_size(transport)` computes it on demand.
 
 How BTP frames are delimited or encapsulated on the link (section 6.1's COBS framing, section 7's HID report) is NOT part of `TransportLimits` -- it is caller code around the bytes the codec produces/consumes, described per transport below.
 

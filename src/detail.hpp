@@ -18,14 +18,12 @@ namespace btp {
 namespace detail {
 
 // No fixed list of named profiles to check membership against any more
-// (TransportLimits is caller-constructed, not an enum) -- just that the
-// numbers describe a transport a frame could actually fit on: enough room
-// for the 40-octet header+CRC floor, and a payload ceiling that does not
-// exceed what the frame ceiling leaves for it.
+// (TransportLimits is caller-constructed, not an enum) -- just that there is
+// enough room for the 40-octet header+CRC floor. There is no independent
+// payload ceiling to cross-check any more (max_payload_size() derives it),
+// so this is the one thing left that can be wrong.
 inline bool valid_transport(const TransportLimits& transport) noexcept {
-    return transport.max_frame_size >= kV1MinimumFrameSize &&
-           transport.max_payload_size <=
-               transport.max_frame_size - kV1MinimumFrameSize;
+    return transport.max_frame_size >= kV1MinimumFrameSize;
 }
 
 // docs/encryption.md section 3: with ENCRYPTED clear there is no cipher in

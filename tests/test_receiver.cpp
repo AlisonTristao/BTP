@@ -109,7 +109,7 @@ void test_valid() {
     btp::ReassemblySlot slots[1];
     std::uint8_t bytes[1][64];
     btp::ReassemblyStorage storage[1] = {{bytes[0], sizeof(bytes[0])}};
-    Receiver bad(slots, storage, 1, 4000, btp::TransportLimits{0U, 0U, false});
+    Receiver bad(slots, storage, 1, 4000, btp::TransportLimits{0U, false});
     CHECK(!bad.valid());
 
     // null slots

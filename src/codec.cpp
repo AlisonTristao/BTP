@@ -123,13 +123,19 @@ Error validate_header(const Header& header) noexcept {
 
 }  // namespace
 
+std::size_t max_payload_size(const TransportLimits& transport) noexcept {
+    return transport.max_frame_size >= kV1MinimumFrameSize
+              ? transport.max_frame_size - kV1MinimumFrameSize
+              : 0U;
+}
+
 Error encoded_size(std::size_t payload_size,
                    const TransportLimits& transport,
                    std::size_t* size_out) noexcept {
     if (size_out == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
     }
-    if (payload_size > transport.max_payload_size || payload_size > 0xFFFFU) {
+    if (payload_size > max_payload_size(transport) || payload_size > 0xFFFFU) {
         return Error::PayloadTooLarge;
     }
     *size_out = kV1MinimumFrameSize + payload_size;
@@ -230,7 +236,7 @@ Error decode(const std::uint8_t* input,
     }
 
     const std::size_t payload_size = read_u16_le(input + 10U);
-    if (payload_size > transport.max_payload_size) {
+    if (payload_size > max_payload_size(transport)) {
         return Error::PayloadTooLarge;
     }
     const std::size_t expected_size = kV1MinimumFrameSize + payload_size;
