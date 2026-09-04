@@ -48,7 +48,7 @@
 // This is library 2.11.0 territory.
 
 #include "btp/catalog.hpp"    // Catalog, CatalogTopic (brings btp/telemetry.hpp, btp/messages.hpp)
-#include "btp/codec.hpp"      // Header, ByteView, MessageType, TransportProfile, kFlagEncrypted
+#include "btp/codec.hpp"      // Header, ByteView, MessageType, TransportLimits, kFlagEncrypted
 #include "btp/endpoint.hpp"   // Endpoint, EndpointSealFn, LogicalMessage, kEndpointAeadTagSize
 #include "btp/fragmentation.hpp"  // ReassemblySlot, ReassemblyStorage
 #include "btp/receiver.hpp"   // Receiver, ReceivedMessage, ReceiveOutcome
@@ -183,11 +183,13 @@ struct NodeConfig {
     std::uint32_t source_id;
     std::uint32_t boot_id;
 
-    // NOT "which transport" -- the node never touches your link. It is only the
-    // frame-size class the fragmenter targets (EspNow 250/210, Serial
-    // 4096/4056, UsbHid 62/22) plus one rule (no ENCRYPTED on UsbHid). Pick the
-    // one that fits your link's MTU.
-    TransportProfile transport;
+    // NOT "which transport" -- the node never touches your link. It is only
+    // the frame/payload size ceiling the fragmenter targets, plus one policy
+    // bit (allow_encrypted). Use one of the presets (kEspNowTransport 250/210,
+    // kSerialTransport 4096/4056, kUsbHidTransport 62/22, the last with
+    // allow_encrypted false) if your link is one of those three, or build
+    // your own TransportLimits to fit any other link's MTU.
+    TransportLimits transport;
 
     EndpointSendFn send;      // one encoded frame -> the wire. Needed to send()
     void* send_ctx;           // or run a session; a receive-only node may omit it.
@@ -271,7 +273,7 @@ const char* node_rx_string(NodeRx rx) noexcept;
 // Node
 // ---------------------------------------------------------------------------
 //
-//   btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
+//   btp::StaticNode<> node({source_id, boot_id, btp::kEspNowTransport,
 //                           &radio_send, nullptr,   // send
 //                           &clock_ms,   nullptr,   // clock
 //                           &seal_c,     nullptr,   // seal  (the key lives here)

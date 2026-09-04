@@ -84,7 +84,7 @@ bool Endpoint::try_reserve_sequence(std::uint32_t* sequence_out) noexcept {
 }
 
 bool Endpoint::encode_fragment(const LogicalMessage& message,
-                               TransportProfile transport,
+                               const TransportLimits& transport,
                                std::uint32_t sequence,
                                std::uint8_t fragment_index,
                                std::uint8_t fragment_count, std::uint8_t* output,
@@ -142,7 +142,7 @@ bool Endpoint::encode_fragment(const LogicalMessage& message,
 }
 
 bool Endpoint::send_fragment(const LogicalMessage& message,
-                             TransportProfile transport, std::uint32_t sequence,
+                             const TransportLimits& transport, std::uint32_t sequence,
                              std::uint8_t fragment_index,
                              std::uint8_t fragment_count, EndpointSendFn send,
                              void* send_context, EndpointSealFn seal,
@@ -159,18 +159,18 @@ bool Endpoint::send_fragment(const LogicalMessage& message,
 }
 
 bool Endpoint::send_encoded(const std::uint8_t* frame, std::size_t frame_size,
-                            TransportProfile transport, EndpointSendFn send,
+                            const TransportLimits& transport, EndpointSendFn send,
                             void* send_context) const noexcept {
     if (frame == nullptr || send == nullptr ||
         frame_size < btp::kV1MinimumFrameSize ||
-        frame_size > btp::max_frame_size(transport)) {
+        frame_size > transport.max_frame_size) {
         return false;
     }
     return send(send_context, frame, frame_size);
 }
 
 bool Endpoint::send_logical(const LogicalMessage& message,
-                            TransportProfile transport, EndpointSendFn send,
+                            const TransportLimits& transport, EndpointSendFn send,
                             void* send_context, std::uint8_t* seal_scratch,
                             std::size_t seal_scratch_capacity,
                             EndpointSealFn seal, void* seal_context) noexcept {
@@ -183,7 +183,7 @@ bool Endpoint::send_logical(const LogicalMessage& message,
 
 bool Endpoint::send_logical_reserved(std::uint32_t sequence,
                                      const LogicalMessage& message,
-                                     TransportProfile transport,
+                                     const TransportLimits& transport,
                                      EndpointSendFn send, void* send_context,
                                      std::uint8_t* seal_scratch,
                                      std::size_t seal_scratch_capacity,
@@ -197,7 +197,7 @@ bool Endpoint::send_logical_reserved(std::uint32_t sequence,
 
 bool Endpoint::send_logical_impl(std::uint32_t sequence,
                                  const LogicalMessage& message,
-                                 TransportProfile transport, EndpointSendFn send,
+                                 const TransportLimits& transport, EndpointSendFn send,
                                  void* send_context, std::uint8_t* seal_scratch,
                                  std::size_t seal_scratch_capacity,
                                  EndpointSealFn seal,
@@ -214,7 +214,7 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
             btp::Error::Ok) {
             return false;
         }
-        const std::size_t limit = btp::max_payload_size(transport);
+        const std::size_t limit = transport.max_payload_size;
         for (std::uint8_t index = 0U; index < count; ++index) {
             const std::size_t offset = static_cast<std::size_t>(index) * limit;
             const std::size_t remaining = message.payload.size - offset;

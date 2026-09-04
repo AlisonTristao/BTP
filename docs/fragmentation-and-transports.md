@@ -1,13 +1,24 @@
-# Fragmentation and transport profiles
+# Fragmentation and transports
 
 BTP separates a logical message from the transport used to carry it.
 
-The BTP frame format remains unchanged between transport profiles. A transport profile defines:
+The BTP frame format remains unchanged between transports. A transport is described to the codec as `btp::TransportLimits` -- not a fixed, closed list of named profiles, but two sizes and one policy bit:
 
-* the maximum frame size;
-* the maximum payload carried by one frame;
-* how BTP frames are delimited or encapsulated on the link;
-* transport-specific restrictions.
+```cpp
+struct TransportLimits {
+    std::size_t max_frame_size;
+    std::size_t max_payload_size;
+    bool allow_encrypted;
+};
+```
+
+* `max_frame_size` -- the maximum frame size;
+* `max_payload_size` -- the maximum payload carried by one frame;
+* `allow_encrypted` -- whether this transport may carry an ENCRYPTED frame at all (section 7.3 below is why this exists as its own field, not something derived from the sizes).
+
+How BTP frames are delimited or encapsulated on the link (section 6.1's COBS framing, section 7's HID report) is NOT part of `TransportLimits` -- it is caller code around the bytes the codec produces/consumes, described per transport below.
+
+Three ready-made presets cover the transports this document describes -- `btp::kEspNowTransport`, `btp::kSerialTransport`, `btp::kUsbHidTransport` -- and a caller with a different link builds its own `TransportLimits` for it; there is no enum to extend.
 
 When a logical message exceeds the payload capacity of the selected transport, BTP divides it into multiple frames.
 
@@ -337,19 +348,22 @@ The caller controls the time source used by the library.
 
 ---
 
-## 4. Transport profiles
+## 4. Transport presets
 
-BTP currently defines three transport profiles:
+The reference library ships three ready-made `TransportLimits`:
 
 | Property                               |      ESP-NOW |             Serial |             USB HID |
 | -------------------------------------- | -----------: | -----------------: | ------------------: |
+| Preset                                 | `kEspNowTransport` | `kSerialTransport` | `kUsbHidTransport` |
 | Maximum BTP frame                      |          250 |               4096 |                  62 |
 | Maximum BTP payload                    |          210 |               4056 |                  22 |
 | Link representation                    | One datagram | COBS-framed stream | 64-octet HID report |
 | Message boundary provided by transport |          Yes |                 No |                 Yes |
 | Authenticated encryption               |    Supported |          Supported |       Not supported |
 
-The transport profile affects how a BTP frame reaches the peer.
+Nothing about these three is privileged over a `TransportLimits` a caller builds for its own link -- they exist because these three are the ones this document (and the reference examples) describe.
+
+The transport affects how a BTP frame reaches the peer.
 
 It does not change:
 

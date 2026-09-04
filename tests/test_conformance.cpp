@@ -28,14 +28,14 @@ int failures = 0;
 
 struct ValidVector {
     const char* file;
-    btp::TransportProfile transport;
+    btp::TransportLimits transport;
     btp::Header header;
     std::vector<std::uint8_t> payload;
 };
 
 struct InvalidVector {
     const char* file;
-    btp::TransportProfile transport;
+    btp::TransportLimits transport;
     btp::Error error;
 };
 
@@ -138,48 +138,48 @@ std::vector<ValidVector> valid_vectors() {
 
     std::vector<ValidVector> result;
     result.push_back({
-        "valid/hello.bin", btp::TransportProfile::Serial,
+        "valid/hello.bin", btp::kSerialTransport,
         header(btp::MessageType::Control, 0U, 0x0C0D0E0FU, 0x10203040U,
                1U, 1000U, 1U, 0U, 1U),
         std::vector<std::uint8_t>(hello, hello + sizeof(hello))});
     result.push_back({
-        "valid/log_utf8.bin", btp::TransportProfile::EspNow,
+        "valid/log_utf8.bin", btp::kEspNowTransport,
         header(btp::MessageType::Log, 0U, 0x11223344U, 0xA1B2C3D4U,
                2U, 1000000U, 2U, 0U, 1U),
         std::vector<std::uint8_t>(log_utf8, log_utf8 + sizeof(log_utf8))});
     result.push_back({
-        "valid/telemetry_packed_le.bin", btp::TransportProfile::EspNow,
+        "valid/telemetry_packed_le.bin", btp::kEspNowTransport,
         header(btp::MessageType::Telemetry, 0U, 0x11223344U, 0xA1B2C3D4U,
                3U, 1001000U, 0x0201U, 0U, 1U),
         std::vector<std::uint8_t>(telemetry,
                                   telemetry + sizeof(telemetry))});
     result.push_back({
-        "valid/command_request.bin", btp::TransportProfile::Serial,
+        "valid/command_request.bin", btp::kSerialTransport,
         header(btp::MessageType::Command, 0U, 0x0C0D0E0FU, 0x10203040U,
                2U, 2000U, 1U, 0U, 1U),
         std::vector<std::uint8_t>(command, command + sizeof(command))});
     result.push_back({
-        "valid/fragment_source_a_0.bin", btp::TransportProfile::EspNow,
+        "valid/fragment_source_a_0.bin", btp::kEspNowTransport,
         header(btp::MessageType::Telemetry, btp::kFlagFragmented,
                0xAAA00001U, 0xAAA10001U, 0x10U, 100000U, 0x0301U, 0U, 2U),
         std::vector<std::uint8_t>(a0, a0 + sizeof(a0))});
     result.push_back({
-        "valid/fragment_source_a_1.bin", btp::TransportProfile::EspNow,
+        "valid/fragment_source_a_1.bin", btp::kEspNowTransport,
         header(btp::MessageType::Telemetry, btp::kFlagFragmented,
                0xAAA00001U, 0xAAA10001U, 0x10U, 100000U, 0x0301U, 1U, 2U),
         std::vector<std::uint8_t>(a1, a1 + sizeof(a1))});
     result.push_back({
-        "valid/fragment_source_b_0.bin", btp::TransportProfile::EspNow,
+        "valid/fragment_source_b_0.bin", btp::kEspNowTransport,
         header(btp::MessageType::Terminal, btp::kFlagFragmented,
                0xBBB00002U, 0xBBB10002U, 0x20U, 200000U, 2U, 0U, 2U),
         std::vector<std::uint8_t>(b0, b0 + sizeof(b0))});
     result.push_back({
-        "valid/fragment_source_b_1.bin", btp::TransportProfile::EspNow,
+        "valid/fragment_source_b_1.bin", btp::kEspNowTransport,
         header(btp::MessageType::Terminal, btp::kFlagFragmented,
                0xBBB00002U, 0xBBB10002U, 0x20U, 200000U, 2U, 1U, 2U),
         std::vector<std::uint8_t>(b1, b1 + sizeof(b1))});
     result.push_back({
-        "valid/usb_hid_telemetry.bin", btp::TransportProfile::UsbHid,
+        "valid/usb_hid_telemetry.bin", btp::kUsbHidTransport,
         header(btp::MessageType::Telemetry, 0U, 0x22334455U, 0xB2C3D4E5U,
                1U, 0x112233U, 0x0301U, 0U, 1U),
         std::vector<std::uint8_t>(usb_hid_telemetry,
@@ -228,21 +228,21 @@ void test_valid_vectors_encode_and_decode() {
 
 void test_invalid_vectors_fail_for_documented_reason() {
     const InvalidVector vectors[] = {
-        {"invalid/crc.bin", btp::TransportProfile::EspNow,
+        {"invalid/crc.bin", btp::kEspNowTransport,
          btp::Error::CrcMismatch},
-        {"invalid/magic.bin", btp::TransportProfile::Serial,
+        {"invalid/magic.bin", btp::kSerialTransport,
          btp::Error::InvalidMagic},
-        {"invalid/version.bin", btp::TransportProfile::Serial,
+        {"invalid/version.bin", btp::kSerialTransport,
          btp::Error::UnsupportedVersion},
-        {"invalid/header_size.bin", btp::TransportProfile::Serial,
+        {"invalid/header_size.bin", btp::kSerialTransport,
          btp::Error::InvalidHeaderSize},
-        {"invalid/payload_size.bin", btp::TransportProfile::EspNow,
+        {"invalid/payload_size.bin", btp::kEspNowTransport,
          btp::Error::SizeMismatch},
-        {"invalid/fragment_index.bin", btp::TransportProfile::EspNow,
+        {"invalid/fragment_index.bin", btp::kEspNowTransport,
          btp::Error::InvalidFragmentation},
-        {"invalid/fragment_count.bin", btp::TransportProfile::EspNow,
+        {"invalid/fragment_count.bin", btp::kEspNowTransport,
          btp::Error::InvalidFragmentation},
-        {"invalid/usb_hid_payload_size.bin", btp::TransportProfile::UsbHid,
+        {"invalid/usb_hid_payload_size.bin", btp::kUsbHidTransport,
          btp::Error::PayloadTooLarge}
     };
     for (std::size_t index = 0U; index < sizeof(vectors) / sizeof(vectors[0]);
@@ -272,7 +272,7 @@ void test_two_sources_interleaved_out_of_order() {
             return;
         }
         CHECK(btp::decode(bytes[index].data(), bytes[index].size(),
-                          btp::TransportProfile::EspNow,
+                          btp::kEspNowTransport,
                           &frames[index]) == btp::Error::Ok);
     }
 

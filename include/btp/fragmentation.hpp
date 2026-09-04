@@ -11,14 +11,14 @@ namespace btp {
 // Computes the number of frames needed for a logical payload. Messages are
 // limited by the one-byte fragment_count field (255 fragments).
 Error fragment_count(std::size_t logical_payload_size,
-                     TransportProfile transport,
+                     const TransportLimits& transport,
                      std::uint8_t* count_out) noexcept;
 
 // Creates one zero-copy view over logical_payload. Fragmentation fields are
 // normalized; all other header fields are preserved.
 Error make_fragment(const Header& logical_header,
                     ByteView logical_payload,
-                    TransportProfile transport,
+                    const TransportLimits& transport,
                     std::uint8_t fragment_index,
                     Frame* fragment_out) noexcept;
 

@@ -720,11 +720,11 @@ void test_session_round_trips_a_real_encoded_hello() {
 
     std::uint8_t wire[128];
     std::size_t wire_size = 0U;
-    CHECK(btp::encode(frame, btp::TransportProfile::Serial, wire, sizeof(wire),
+    CHECK(btp::encode(frame, btp::kSerialTransport, wire, sizeof(wire),
                       &wire_size) == btp::Error::Ok);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(wire, wire_size, btp::TransportProfile::Serial, &decoded) ==
+    CHECK(btp::decode(wire, wire_size, btp::kSerialTransport, &decoded) ==
           btp::Error::Ok);
 
     Session session(make_local(2048U, 30000U), 2000U);

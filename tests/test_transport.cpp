@@ -35,11 +35,11 @@ btp::Header header(std::uint32_t source,
 
 std::vector<std::uint8_t> encode_frame(const btp::Frame& frame) {
     std::size_t size = 0U;
-    CHECK(btp::encoded_size(frame.payload.size, btp::TransportProfile::Serial,
+    CHECK(btp::encoded_size(frame.payload.size, btp::kSerialTransport,
                             &size) == btp::Error::Ok);
     std::vector<std::uint8_t> output(size);
     std::size_t written = 0U;
-    CHECK(btp::encode(frame, btp::TransportProfile::Serial, output.data(),
+    CHECK(btp::encode(frame, btp::kSerialTransport, output.data(),
                       output.size(), &written) == btp::Error::Ok);
     CHECK(written == output.size());
     return output;
@@ -233,7 +233,7 @@ void test_fragmenter() {
         payload[index] = static_cast<std::uint8_t>(index);
     }
     std::uint8_t count = 0U;
-    CHECK(btp::fragment_count(payload.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::fragment_count(payload.size(), btp::kEspNowTransport,
                               &count) == btp::Error::Ok);
     CHECK(count == 3U);
 
@@ -242,7 +242,7 @@ void test_fragmenter() {
         btp::Frame fragment = {};
         CHECK(btp::make_fragment(logical_header,
                                  {payload.data(), payload.size()},
-                                 btp::TransportProfile::EspNow, index,
+                                 btp::kEspNowTransport, index,
                                  &fragment) == btp::Error::Ok);
         CHECK(fragment.header.source_id == logical_header.source_id);
         CHECK(fragment.header.boot_id == logical_header.boot_id);
@@ -254,7 +254,7 @@ void test_fragmenter() {
     }
 
     CHECK(btp::fragment_count(btp::kEspNowMaxPayloadSize * 255U + 1U,
-                              btp::TransportProfile::EspNow, &count) ==
+                              btp::kEspNowTransport, &count) ==
           btp::Error::PayloadTooLarge);
 }
 
@@ -269,25 +269,25 @@ void test_usb_hid_transport() {
     const btp::Frame maximum_frame = {
         header(7U), {maximum_payload.data(), maximum_payload.size()}};
     std::size_t size = 0U;
-    CHECK(btp::encoded_size(maximum_payload.size(), btp::TransportProfile::UsbHid,
+    CHECK(btp::encoded_size(maximum_payload.size(), btp::kUsbHidTransport,
                             &size) == btp::Error::Ok);
     CHECK(size == btp::kUsbHidMaxFrameSize);
     std::array<std::uint8_t, btp::kUsbHidMaxFrameSize> encoded;
     std::size_t written = 0U;
-    CHECK(btp::encode(maximum_frame, btp::TransportProfile::UsbHid,
+    CHECK(btp::encode(maximum_frame, btp::kUsbHidTransport,
                       encoded.data(), encoded.size(), &written) ==
           btp::Error::Ok);
     CHECK(written == btp::kUsbHidMaxFrameSize);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::UsbHid,
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::kUsbHidTransport,
                       &decoded) == btp::Error::Ok);
     CHECK(decoded.payload.size == btp::kUsbHidMaxPayloadSize);
 
     // One octet of payload beyond the report's usable capacity is rejected by
     // the encoder before it ever builds a buffer...
     CHECK(btp::encoded_size(btp::kUsbHidMaxPayloadSize + 1U,
-                            btp::TransportProfile::UsbHid, &size) ==
+                            btp::kUsbHidTransport, &size) ==
           btp::Error::PayloadTooLarge);
 
     // ...and a raw buffer one octet past the report ceiling is rejected by
@@ -295,7 +295,7 @@ void test_usb_hid_transport() {
     std::array<std::uint8_t, btp::kUsbHidMaxFrameSize + 1U> oversized = {};
     std::memcpy(oversized.data(), encoded.data(), encoded.size());
     CHECK(btp::decode(oversized.data(), oversized.size(),
-                      btp::TransportProfile::UsbHid, &decoded) ==
+                      btp::kUsbHidTransport, &decoded) ==
           btp::Error::FrameTooLarge);
 
     // A logical message that does not fit one report's 23 usable octets
@@ -306,7 +306,7 @@ void test_usb_hid_transport() {
         logical[index] = static_cast<std::uint8_t>(index);
     }
     std::uint8_t count = 0U;
-    CHECK(btp::fragment_count(logical.size(), btp::TransportProfile::UsbHid,
+    CHECK(btp::fragment_count(logical.size(), btp::kUsbHidTransport,
                               &count) == btp::Error::Ok);
     CHECK(count == 3U);  // 22 + 22 + 6
 
@@ -314,7 +314,7 @@ void test_usb_hid_transport() {
     for (std::uint8_t index = 0U; index < count; ++index) {
         btp::Frame fragment = {};
         CHECK(btp::make_fragment(logical_header, {logical.data(), logical.size()},
-                                 btp::TransportProfile::UsbHid, index,
+                                 btp::kUsbHidTransport, index,
                                  &fragment) == btp::Error::Ok);
         CHECK(fragment.header.fragment_index == index);
         CHECK(fragment.header.fragment_count == count);
@@ -324,11 +324,11 @@ void test_usb_hid_transport() {
     // The maximum logical message this profile can fragment: 255 reports of
     // 23 usable octets each.
     CHECK(btp::fragment_count(btp::kUsbHidMaxPayloadSize * 255U,
-                              btp::TransportProfile::UsbHid, &count) ==
+                              btp::kUsbHidTransport, &count) ==
           btp::Error::Ok);
     CHECK(count == 255U);
     CHECK(btp::fragment_count(btp::kUsbHidMaxPayloadSize * 255U + 1U,
-                              btp::TransportProfile::UsbHid, &count) ==
+                              btp::kUsbHidTransport, &count) ==
           btp::Error::PayloadTooLarge);
 }
 
@@ -338,7 +338,7 @@ btp::Frame fragment(const btp::Header& logical_header,
     btp::Frame result = {};
     CHECK(btp::make_fragment(logical_header,
                              {payload.data(), payload.size()},
-                             btp::TransportProfile::EspNow, index, &result) ==
+                             btp::kEspNowTransport, index, &result) ==
           btp::Error::Ok);
     return result;
 }
@@ -470,7 +470,7 @@ void test_reassembly_accepts_encrypted_fragments() {
         logical_header.flags = cases[index];
 
         std::uint8_t count = 0U;
-        CHECK(btp::fragment_count(logical.size(), btp::TransportProfile::EspNow,
+        CHECK(btp::fragment_count(logical.size(), btp::kEspNowTransport,
                                   &count) == btp::Error::Ok);
         CHECK(count == 2U);
 
@@ -487,7 +487,7 @@ void test_reassembly_accepts_encrypted_fragments() {
             btp::Frame fragment = {};
             CHECK(btp::make_fragment(logical_header,
                                      {logical.data(), logical.size()},
-                                     btp::TransportProfile::EspNow, part,
+                                     btp::kEspNowTransport, part,
                                      &fragment) == btp::Error::Ok);
             CHECK((fragment.header.flags & btp::kFlagFragmented) != 0U);
             CHECK((fragment.header.flags & btp::kFlagEncrypted) != 0U);

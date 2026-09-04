@@ -47,7 +47,7 @@ const btp::Frame frame = {header, {payload, payload_size}};
 
 std::uint8_t buffer[btp::kEspNowMaxFrameSize];
 std::size_t written = 0U;
-if (btp::encode(frame, btp::TransportProfile::EspNow,
+if (btp::encode(frame, btp::kEspNowTransport,
                 buffer, sizeof(buffer), &written) == btp::Error::Ok) {
     send(buffer, written);
 }

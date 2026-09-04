@@ -52,7 +52,7 @@
 //     (docs/session-and-terminal.md); btp::DedupCache is the one stateful piece
 //     the library runs, and it is receive-side.
 
-#include "btp/codec.hpp"  // Header, Frame, ByteView, TransportProfile, MessageType
+#include "btp/codec.hpp"  // Header, Frame, ByteView, TransportLimits, MessageType
 
 #include <atomic>
 #include <cstddef>
@@ -116,7 +116,7 @@ struct LogicalMessage {
 //   std::uint8_t scratch[kMaxLogicalPayload + btp::kEndpointAeadTagSize];
 //   btp::LogicalMessage msg{btp::MessageType::Control, kStatusObjectId, now_us,
 //                           {payload, payload_size}};
-//   endpoint.send_logical(msg, btp::TransportProfile::EspNow,
+//   endpoint.send_logical(msg, btp::kEspNowTransport,
 //                         &my_send, &radio, scratch, sizeof(scratch),
 //                         &RadioSeal::seal, &seal_ctx);
 //
@@ -156,7 +156,7 @@ public:
     // `seal` or `send`, an oversized payload, or an unconfigured endpoint sends
     // nothing further and returns false. Best-effort past the first frame:
     // there is no rollback of frames already sent.
-    bool send_logical(const LogicalMessage& message, TransportProfile transport,
+    bool send_logical(const LogicalMessage& message, const TransportLimits& transport,
                       EndpointSendFn send, void* send_context,
                       std::uint8_t* seal_scratch,
                       std::size_t seal_scratch_capacity,
@@ -168,7 +168,7 @@ public:
     // neighbours. const: it does not touch the counter.
     bool send_logical_reserved(std::uint32_t sequence,
                                const LogicalMessage& message,
-                               TransportProfile transport, EndpointSendFn send,
+                               const TransportLimits& transport, EndpointSendFn send,
                                void* send_context, std::uint8_t* seal_scratch,
                                std::size_t seal_scratch_capacity,
                                EndpointSealFn seal = nullptr,
@@ -183,7 +183,7 @@ public:
     // one ESP-NOW frame (`payload.size + kEndpointAeadTagSize <=
     // kEspNowMaxPayloadSize`).
     bool encode_fragment(const LogicalMessage& message,
-                         TransportProfile transport, std::uint32_t sequence,
+                         const TransportLimits& transport, std::uint32_t sequence,
                          std::uint8_t fragment_index,
                          std::uint8_t fragment_count, std::uint8_t* output,
                          std::size_t output_capacity, std::size_t* bytes_written,
@@ -191,7 +191,7 @@ public:
                          void* seal_context = nullptr) const noexcept;
 
     // encode_fragment() then hand the frame to `send`.
-    bool send_fragment(const LogicalMessage& message, TransportProfile transport,
+    bool send_fragment(const LogicalMessage& message, const TransportLimits& transport,
                        std::uint32_t sequence, std::uint8_t fragment_index,
                        std::uint8_t fragment_count, EndpointSendFn send,
                        void* send_context, EndpointSealFn seal = nullptr,
@@ -204,12 +204,12 @@ public:
     // be a frame at all (shorter than the minimum, longer than the transport's
     // frame ceiling); does not otherwise validate them.
     bool send_encoded(const std::uint8_t* frame, std::size_t frame_size,
-                      TransportProfile transport, EndpointSendFn send,
+                      const TransportLimits& transport, EndpointSendFn send,
                       void* send_context) const noexcept;
 
 private:
     bool send_logical_impl(std::uint32_t sequence, const LogicalMessage& message,
-                           TransportProfile transport, EndpointSendFn send,
+                           const TransportLimits& transport, EndpointSendFn send,
                            void* send_context, std::uint8_t* seal_scratch,
                            std::size_t seal_scratch_capacity, EndpointSealFn seal,
                            void* seal_context) const noexcept;

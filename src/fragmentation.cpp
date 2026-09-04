@@ -53,12 +53,12 @@ bool same_message_invariants(const Header& left,
 }  // namespace
 
 Error fragment_count(std::size_t logical_payload_size,
-                     TransportProfile transport,
+                     const TransportLimits& transport,
                      std::uint8_t* count_out) noexcept {
     if (!detail::valid_transport(transport) || count_out == nullptr) {
         return Error::InvalidArgument;
     }
-    const std::size_t limit = max_payload_size(transport);
+    const std::size_t limit = transport.max_payload_size;
     std::size_t count = logical_payload_size / limit;
     if (logical_payload_size % limit != 0U) {
         ++count;
@@ -75,7 +75,7 @@ Error fragment_count(std::size_t logical_payload_size,
 
 Error make_fragment(const Header& logical_header,
                     ByteView logical_payload,
-                    TransportProfile transport,
+                    const TransportLimits& transport,
                     std::uint8_t fragment_index,
                     Frame* fragment_out) noexcept {
     if (fragment_out == nullptr ||
@@ -108,7 +108,7 @@ Error make_fragment(const Header& logical_header,
         return Error::InvalidFragmentation;
     }
 
-    const std::size_t limit = max_payload_size(transport);
+    const std::size_t limit = transport.max_payload_size;
     const std::size_t offset = static_cast<std::size_t>(fragment_index) * limit;
     const std::size_t remaining = logical_payload.size - offset;
     const std::size_t payload_size = remaining < limit ? remaining : limit;

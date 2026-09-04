@@ -43,7 +43,7 @@
 //     wants one already-bounded frame candidate; the DecodedFrame submit()
 //     takes btp::SerialDecoder's output directly.
 
-#include "btp/codec.hpp"          // decode, Header, DecodedFrame, ByteView, TransportProfile
+#include "btp/codec.hpp"          // decode, Header, DecodedFrame, ByteView, TransportLimits
 #include "btp/fragmentation.hpp"  // Reassembler and its storage types
 
 #include <cstddef>
@@ -119,7 +119,7 @@ struct ReceivedMessage {
 //   std::uint8_t storage_bytes[4][kMaxPayload];
 //   btp::ReassemblyStorage storage[4];
 //   for (std::size_t i = 0; i < 4; ++i) storage[i] = {storage_bytes[i], kMaxPayload};
-//   btp::Receiver receiver(slots, storage, 4, 4000, btp::TransportProfile::EspNow);
+//   btp::Receiver receiver(slots, storage, 4, 4000, btp::kEspNowTransport);
 //
 //   std::uint8_t out[kMaxPayload];
 //   btp::ReceivedMessage msg{};
@@ -133,14 +133,15 @@ struct ReceivedMessage {
 class Receiver {
 public:
     // slots / storage / slot_count / timeout_ms are btp::Reassembler's, forwarded
-    // to the Reassembler this object holds. transport is the profile btp::decode()
-    // applies (ESP-NOW on firmware; Serial is the widest ceiling).
+    // to the Reassembler this object holds. transport is the TransportLimits
+    // btp::decode() applies (kEspNowTransport on firmware; kSerialTransport is
+    // the widest ceiling of the three presets).
     Receiver(ReassemblySlot* slots, const ReassemblyStorage* storage,
              std::size_t slot_count, std::uint64_t timeout_ms,
-             TransportProfile transport) noexcept;
+             const TransportLimits& transport) noexcept;
 
-    // True when the reassembler wiring is sound and the transport profile is
-    // recognised. Check once at boot.
+    // True when the reassembler wiring is sound and the transport limits are
+    // usable (detail::valid_transport()). Check once at boot.
     bool valid() const noexcept;
 
     std::size_t slot_count() const noexcept;
@@ -194,7 +195,7 @@ private:
                           ReceivedMessage* message_out) noexcept;
 
     Reassembler reassembler_;
-    TransportProfile transport_;
+    TransportLimits transport_;
     bool transport_valid_;
     Stats stats_;
 };

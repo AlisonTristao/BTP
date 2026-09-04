@@ -108,7 +108,7 @@ std::vector<std::uint8_t> reassemble(const Sink& sink, btp::Header* header_out) 
     for (const auto& frame : sink.frames) {
         btp::DecodedFrame decoded{};
         CHECK(btp::decode(frame.data(), frame.size(),
-                          btp::TransportProfile::EspNow, &decoded) ==
+                          btp::kEspNowTransport, &decoded) ==
               btp::Error::Ok);
         if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
             if (header_out != nullptr) *header_out = decoded.header;
@@ -178,7 +178,7 @@ void test_send_logical_cleartext_single_frame() {
 
     const auto payload = make_payload(40U, 0x10U);
     Sink sink;
-    CHECK(endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                 &Sink::send, &sink, nullptr, 0U));
     CHECK(sink.frames.size() == 1U);
 
@@ -202,7 +202,7 @@ void test_send_logical_cleartext_multi_fragment() {
     // 3 ESP-NOW fragments (210 payload ceiling).
     const auto payload = make_payload(500U, 0x01U);
     Sink sink;
-    CHECK(endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                 &Sink::send, &sink, nullptr, 0U));
     CHECK(sink.frames.size() == 3U);
 
@@ -220,7 +220,7 @@ void test_send_logical_sealed_single_frame() {
     Sink sink;
     FakeSeal seal;
     std::uint8_t scratch[64];
-    CHECK(endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                 &Sink::send, &sink, scratch, sizeof(scratch),
                                 &FakeSeal::seal, &seal));
 
@@ -251,7 +251,7 @@ void test_send_logical_sealed_grows_across_fragment_boundary() {
     Sink sink;
     FakeSeal seal;
     std::uint8_t scratch[256];
-    CHECK(endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                 &Sink::send, &sink, scratch, sizeof(scratch),
                                 &FakeSeal::seal, &seal));
     CHECK(seal.calls == 1U);
@@ -272,7 +272,7 @@ void test_send_logical_seal_refused_sends_nothing() {
     FakeSeal seal;
     seal.refuse = true;
     std::uint8_t scratch[64];
-    CHECK(!endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                  &Sink::send, &sink, scratch, sizeof(scratch),
                                  &FakeSeal::seal, &seal));
     CHECK(seal.calls == 1U);
@@ -288,7 +288,7 @@ void test_send_logical_sealed_scratch_too_small() {
     Sink sink;
     FakeSeal seal;
     std::uint8_t scratch[40];  // needs 30 + 16 = 46
-    CHECK(!endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                  &Sink::send, &sink, scratch, sizeof(scratch),
                                  &FakeSeal::seal, &seal));
     CHECK(seal.calls == 0U);
@@ -299,7 +299,7 @@ void test_send_logical_unconfigured() {
     Endpoint endpoint;
     const auto payload = make_payload(10U, 0x01U);
     Sink sink;
-    CHECK(!endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                  &Sink::send, &sink, nullptr, 0U));
     CHECK(sink.frames.empty());
 }
@@ -311,7 +311,7 @@ void test_send_stops_when_send_callback_fails() {
     const auto payload = make_payload(500U, 0x01U);  // 3 fragments
     Sink sink;
     sink.fail_at = 2U;  // second frame is rejected
-    CHECK(!endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                  &Sink::send, &sink, nullptr, 0U));
     CHECK(sink.calls == 2U);       // did not attempt the third
     CHECK(sink.frames.size() == 1U);
@@ -327,7 +327,7 @@ void test_send_logical_reserved_uses_given_sequence() {
     const auto payload = make_payload(20U, 0x01U);
     Sink sink;
     CHECK(endpoint.send_logical_reserved(99U, message(payload),
-                                         btp::TransportProfile::EspNow,
+                                         btp::kEspNowTransport,
                                          &Sink::send, &sink, nullptr, 0U));
     btp::Header header{};
     reassemble(sink, &header);
@@ -339,7 +339,7 @@ void test_send_logical_reserved_uses_given_sequence() {
     CHECK(next == 2U);
 
     CHECK(!endpoint.send_logical_reserved(0U, message(payload),
-                                          btp::TransportProfile::EspNow,
+                                          btp::kEspNowTransport,
                                           &Sink::send, &sink, nullptr, 0U));
 }
 
@@ -353,14 +353,14 @@ void test_encode_fragment_rejects_sealed_multifragment() {
     FakeSeal seal;
     // fragment_count 2 with a sealer -> refused (the tag covers a whole message)
     CHECK(!endpoint.encode_fragment(message(payload),
-                                    btp::TransportProfile::EspNow, 1U, 0U, 2U,
+                                    btp::kEspNowTransport, 1U, 0U, 2U,
                                     out, sizeof(out), &written, &FakeSeal::seal,
                                     &seal));
     CHECK(seal.calls == 0U);
 
     // fragment_count 1 is fine
     CHECK(endpoint.encode_fragment(message(payload),
-                                   btp::TransportProfile::EspNow, 1U, 0U, 1U, out,
+                                   btp::kEspNowTransport, 1U, 0U, 1U, out,
                                    sizeof(out), &written, &FakeSeal::seal,
                                    &seal));
     CHECK(written > 0U);
@@ -375,20 +375,20 @@ void test_encode_fragment_argument_checks() {
 
     // unconfigured
     CHECK(!endpoint.encode_fragment(message(payload),
-                                    btp::TransportProfile::EspNow, 1U, 0U, 1U,
+                                    btp::kEspNowTransport, 1U, 0U, 1U,
                                     out, sizeof(out), &written));
     CHECK(endpoint.configure(1U, 1U));
     // sequence 0
     CHECK(!endpoint.encode_fragment(message(payload),
-                                    btp::TransportProfile::EspNow, 0U, 0U, 1U,
+                                    btp::kEspNowTransport, 0U, 0U, 1U,
                                     out, sizeof(out), &written));
     // fragment_index >= fragment_count
     CHECK(!endpoint.encode_fragment(message(payload),
-                                    btp::TransportProfile::EspNow, 1U, 2U, 2U,
+                                    btp::kEspNowTransport, 1U, 2U, 2U,
                                     out, sizeof(out), &written));
     // output capacity too small
     CHECK(!endpoint.encode_fragment(message(payload),
-                                    btp::TransportProfile::EspNow, 1U, 0U, 1U,
+                                    btp::kEspNowTransport, 1U, 0U, 1U,
                                     out, 4U, &written));
 }
 
@@ -401,11 +401,11 @@ void test_send_encoded_passthrough() {
     std::uint8_t frame[btp::kEspNowMaxFrameSize];
     std::size_t frame_size = 0U;
     CHECK(endpoint.encode_fragment(message(payload),
-                                   btp::TransportProfile::EspNow, 7U, 0U, 1U,
+                                   btp::kEspNowTransport, 7U, 0U, 1U,
                                    frame, sizeof(frame), &frame_size));
 
     Sink sink;
-    CHECK(endpoint.send_encoded(frame, frame_size, btp::TransportProfile::EspNow,
+    CHECK(endpoint.send_encoded(frame, frame_size, btp::kEspNowTransport,
                                 &Sink::send, &sink));
     CHECK(sink.frames.size() == 1U);
     CHECK(sink.frames[0].size() == frame_size);
@@ -414,10 +414,10 @@ void test_send_encoded_passthrough() {
     // too short / too long are rejected without a send
     Sink rejected;
     CHECK(!endpoint.send_encoded(frame, btp::kV1MinimumFrameSize - 1U,
-                                 btp::TransportProfile::EspNow, &Sink::send,
+                                 btp::kEspNowTransport, &Sink::send,
                                  &rejected));
     CHECK(!endpoint.send_encoded(frame, btp::kEspNowMaxFrameSize + 1U,
-                                 btp::TransportProfile::EspNow, &Sink::send,
+                                 btp::kEspNowTransport, &Sink::send,
                                  &rejected));
     CHECK(rejected.calls == 0U);
 }
@@ -426,13 +426,13 @@ void test_null_callbacks() {
     Endpoint endpoint;
     CHECK(endpoint.configure(1U, 1U));
     const auto payload = make_payload(10U, 0x01U);
-    CHECK(!endpoint.send_logical(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_logical(message(payload), btp::kEspNowTransport,
                                  nullptr, nullptr, nullptr, 0U));
-    CHECK(!endpoint.send_fragment(message(payload), btp::TransportProfile::EspNow,
+    CHECK(!endpoint.send_fragment(message(payload), btp::kEspNowTransport,
                                   1U, 0U, 1U, nullptr, nullptr));
     std::uint8_t frame[btp::kEspNowMaxFrameSize] = {0};
     CHECK(!endpoint.send_encoded(frame, btp::kV1MinimumFrameSize,
-                                 btp::TransportProfile::EspNow, nullptr,
+                                 btp::kEspNowTransport, nullptr,
                                  nullptr));
 }
 

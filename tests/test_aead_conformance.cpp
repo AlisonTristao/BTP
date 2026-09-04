@@ -79,7 +79,7 @@ void test_aes_gcm_vector_decrypts_real_ciphertext() {
     // re-deriving header bytes by hand: decode() gives back the real Header
     // and the ciphertext||tag payload view.
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(frame.data(), frame.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(frame.data(), frame.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
 
     const std::uint8_t key_bytes[btp::kAesGcmKeySize] = {
@@ -125,7 +125,7 @@ void test_aes_gcm_vector_tag_corruption_is_rejected() {
     }
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(frame.data(), frame.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(frame.data(), frame.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
     if (decoded.payload.size < 16U) {
         ++failures;
@@ -158,7 +158,7 @@ void test_chacha20poly1305_vector_decrypts_real_ciphertext() {
     }
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(frame.data(), frame.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(frame.data(), frame.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
 
     const std::uint8_t key_bytes[btp::kChaCha20Poly1305KeySize] = {
@@ -229,7 +229,7 @@ void test_aes_gcm_fragmented_vector_reassembles_and_decrypts() {
     for (std::size_t step = 0U; step < 2U; ++step) {
         btp::DecodedFrame decoded = {};
         CHECK(btp::decode(order[step]->data(), order[step]->size(),
-                          btp::TransportProfile::EspNow,
+                          btp::kEspNowTransport,
                           &decoded) == btp::Error::Ok);
         last = reassembler.push(decoded, 1U, &message);
     }

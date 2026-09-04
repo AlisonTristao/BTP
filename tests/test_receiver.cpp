@@ -48,7 +48,7 @@ struct Fixture {
     Receiver receiver;
 
     explicit Fixture(std::uint64_t timeout_ms = 4000,
-                     btp::TransportProfile transport = btp::TransportProfile::EspNow)
+                     const btp::TransportLimits& transport = btp::kEspNowTransport)
         : receiver(bind(), storage, kSlots, timeout_ms, transport) {}
 
     btp::ReassemblySlot* bind() noexcept {
@@ -84,7 +84,7 @@ std::vector<std::vector<std::uint8_t>> frames_for(std::uint32_t source_id,
     Sink sink;
     LogicalMessage msg{btp::MessageType::Telemetry, 0x0055U, 0x11223344U,
                        {payload.data(), payload.size()}};
-    const bool ok = endpoint.send_logical(msg, btp::TransportProfile::EspNow,
+    const bool ok = endpoint.send_logical(msg, btp::kEspNowTransport,
                                           &Sink::send, &sink, nullptr, 0U);
     if (!ok) return {};
     return sink.frames;
@@ -103,16 +103,17 @@ void test_valid() {
     CHECK(fx.receiver.valid());
     CHECK(fx.receiver.slot_count() == kSlots);
 
-    // bad transport
+    // bad transport -- frame_size below the 40-octet header+CRC floor,
+    // rejected by detail::valid_transport() the same way an unrecognised
+    // TransportProfile used to be
     btp::ReassemblySlot slots[1];
     std::uint8_t bytes[1][64];
     btp::ReassemblyStorage storage[1] = {{bytes[0], sizeof(bytes[0])}};
-    Receiver bad(slots, storage, 1, 4000,
-                 static_cast<btp::TransportProfile>(99));
+    Receiver bad(slots, storage, 1, 4000, btp::TransportLimits{0U, 0U, false});
     CHECK(!bad.valid());
 
     // null slots
-    Receiver bad2(nullptr, storage, 1, 4000, btp::TransportProfile::EspNow);
+    Receiver bad2(nullptr, storage, 1, 4000, btp::kEspNowTransport);
     CHECK(!bad2.valid());
 }
 
@@ -296,7 +297,7 @@ void test_submit_decoded_frame() {
     ReceiveOutcome last = ReceiveOutcome::InvalidArgument;
     for (const auto& fr : frames) {
         btp::DecodedFrame decoded{};
-        CHECK(btp::decode(fr.data(), fr.size(), btp::TransportProfile::EspNow,
+        CHECK(btp::decode(fr.data(), fr.size(), btp::kEspNowTransport,
                           &decoded) == btp::Error::Ok);
         last = fx.receiver.submit(decoded, 1U, fx.out, sizeof(fx.out), &msg);
     }

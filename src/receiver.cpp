@@ -1,26 +1,17 @@
 #include "btp/receiver.hpp"
 
+#include "detail.hpp"
+
 #include <cstring>
 
 namespace btp {
-namespace {
-
-// Mirror of the transport check btp::decode() does; used so valid() can report
-// a bad profile at boot instead of every submit() silently dropping.
-bool transport_recognised(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial ||
-           transport == TransportProfile::UsbHid;
-}
-
-}  // namespace
 
 Receiver::Receiver(ReassemblySlot* slots, const ReassemblyStorage* storage,
                    std::size_t slot_count, std::uint64_t timeout_ms,
-                   TransportProfile transport) noexcept
+                   const TransportLimits& transport) noexcept
     : reassembler_(slots, storage, slot_count, timeout_ms),
       transport_(transport),
-      transport_valid_(transport_recognised(transport)),
+      transport_valid_(detail::valid_transport(transport)),
       stats_() {}
 
 bool Receiver::valid() const noexcept {

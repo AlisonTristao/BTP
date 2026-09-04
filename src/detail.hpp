@@ -6,7 +6,7 @@
 // the public API and carries no compatibility promise.
 //
 // It exists because codec.cpp and fragmentation.cpp both have to answer the
-// same two questions -- "is this a transport profile I know" and "is this
+// same two questions -- "are these transport limits usable" and "is this
 // CIPHER_ID consistent with these flags" -- and two copies of a validation
 // rule are two places for it to drift.
 
@@ -17,10 +17,15 @@
 namespace btp {
 namespace detail {
 
-inline bool valid_transport(TransportProfile transport) noexcept {
-    return transport == TransportProfile::EspNow ||
-           transport == TransportProfile::Serial ||
-           transport == TransportProfile::UsbHid;
+// No fixed list of named profiles to check membership against any more
+// (TransportLimits is caller-constructed, not an enum) -- just that the
+// numbers describe a transport a frame could actually fit on: enough room
+// for the 40-octet header+CRC floor, and a payload ceiling that does not
+// exceed what the frame ceiling leaves for it.
+inline bool valid_transport(const TransportLimits& transport) noexcept {
+    return transport.max_frame_size >= kV1MinimumFrameSize &&
+           transport.max_payload_size <=
+               transport.max_frame_size - kV1MinimumFrameSize;
 }
 
 // docs/encryption.md section 3: with ENCRYPTED clear there is no cipher in

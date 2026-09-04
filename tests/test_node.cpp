@@ -38,8 +38,8 @@ using btp::NodeConfig;
 using btp::NodeRx;
 using btp::ReceivedMessage;
 using btp::Role;
+using btp::kEspNowTransport;
 using btp::SessionEvent;
-using btp::TransportProfile;
 
 constexpr std::uint32_t kSenderId = 0x00CAFE01U;
 constexpr std::uint32_t kSenderBoot = 0x0000B001U;
@@ -144,7 +144,7 @@ NodeConfig base_config(std::uint32_t source_id, std::uint32_t boot_id,
     NodeConfig cfg{};
     cfg.source_id = source_id;
     cfg.boot_id = boot_id;
-    cfg.transport = TransportProfile::EspNow;
+    cfg.transport = kEspNowTransport;
     cfg.send = &Sink::send;
     cfg.send_ctx = sink;
     cfg.clock = nullptr;
@@ -202,7 +202,7 @@ void test_begin() {
 void test_reconfigure_before_begin() {
     Sink placeholder_sink;
     NodeConfig placeholder{};
-    placeholder.transport = TransportProfile::EspNow;
+    placeholder.transport = kEspNowTransport;
     placeholder.send = &Sink::send;
     placeholder.send_ctx = &placeholder_sink;
     TestNode node(placeholder);
@@ -324,7 +324,7 @@ void test_session_handshake() {
     const btp::LogicalMessage hello_msg{MessageType::Control,
                                         btp::object_id::kHello, 1ULL,
                                         {hello_body, hello_n}};
-    CHECK(initiator.send_logical(hello_msg, TransportProfile::EspNow,
+    CHECK(initiator.send_logical(hello_msg, kEspNowTransport,
                                  &Sink::send, &initiator_tx, nullptr, 0U));
     CHECK(initiator_tx.count() == 1U);
 
@@ -339,7 +339,7 @@ void test_session_handshake() {
     CHECK(peer_tx.count() == 1U);
     btp::DecodedFrame reply{};
     CHECK(btp::decode(peer_tx.frames[0].data(), peer_tx.frames[0].size(),
-                      TransportProfile::EspNow, &reply) == btp::Error::Ok);
+                      kEspNowTransport, &reply) == btp::Error::Ok);
     CHECK(reply.header.type == MessageType::Control);
     CHECK(reply.header.object_id == btp::object_id::kHelloResult);
     btp::HelloResult hr{};
@@ -610,7 +610,7 @@ void test_request_manifest() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.type == MessageType::Control);
     CHECK(frame.header.object_id == btp::object_id::kManifestRequest);
     btp::ManifestRequest req{};
@@ -713,7 +713,7 @@ void test_disconnect_sends_session_close() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(init_tx.frames[0].data(), init_tx.frames[0].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.object_id == btp::object_id::kSessionClose);
 }
 
@@ -740,7 +740,7 @@ void test_static_node_owns_its_catalog() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.object_id == btp::object_id::kManifestData);
 
     // The consumer side of the same sugar: learn_catalog() with no argument.
@@ -1114,7 +1114,7 @@ void test_begin_can_arm_session_and_announce_catalog() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(tx2.frames[0].data(), tx2.frames[0].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.object_id == btp::object_id::kManifestData);
 }
 
@@ -1313,7 +1313,7 @@ void test_static_node_begin_folds_catalog_and_session_setup() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.object_id == btp::object_id::kManifestData);
 }
 
@@ -1628,7 +1628,7 @@ void test_status_sends_after_the_period_and_counts_frames_tx() {
 
     btp::DecodedFrame frame{};
     CHECK(btp::decode(tx.frames[1].data(), tx.frames[1].size(),
-                      TransportProfile::EspNow, &frame) == btp::Error::Ok);
+                      kEspNowTransport, &frame) == btp::Error::Ok);
     CHECK(frame.header.type == MessageType::Control);
     CHECK(frame.header.object_id == btp::object_id::kStatus);
 

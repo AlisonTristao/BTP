@@ -26,14 +26,14 @@ int failures = 0;
 
 struct ValidVector {
     const char* file;
-    btp::TransportProfile transport;
+    btp::TransportLimits transport;
     btp::Header header;
     std::vector<std::uint8_t> payload;
 };
 
 struct InvalidVector {
     const char* file;
-    btp::TransportProfile transport;
+    btp::TransportLimits transport;
     btp::Error error;
 };
 
@@ -154,18 +154,18 @@ std::vector<ValidVector> valid_vectors() {
 
     std::vector<ValidVector> result;
     result.push_back({
-        "valid/hello.bin", btp::TransportProfile::Serial,
+        "valid/hello.bin", btp::kSerialTransport,
         header(btp::MessageType::Control, 0U, 0x0C0D0E0FU, 0x10203040U,
                1U, 1000U, 1U, 0U, 1U),
         std::vector<std::uint8_t>(hello, hello + sizeof(hello))});
     result.push_back({
-        "valid/manifest_data.bin", btp::TransportProfile::Serial,
+        "valid/manifest_data.bin", btp::kSerialTransport,
         header(btp::MessageType::Control, 0U, 0x0C0D0E0FU, 0x10203040U,
                2U, 1000U, 0x0004U, 0U, 1U),
         std::vector<std::uint8_t>(manifest_data,
                                   manifest_data + sizeof(manifest_data))});
     result.push_back({
-        "valid/aead_telemetry_gcm.bin", btp::TransportProfile::EspNow,
+        "valid/aead_telemetry_gcm.bin", btp::kEspNowTransport,
         header(btp::MessageType::Telemetry, btp::kFlagEncrypted, 0x0C0D0E0FU,
                0x10203040U, 7U, 10000U, 1U, 0U, 1U),
         std::vector<std::uint8_t>(aead_ciphertext_and_tag,
@@ -249,15 +249,15 @@ void test_valid_vectors_encode_and_decode() {
 
 void test_invalid_vectors_fail_for_documented_reason() {
     const InvalidVector vectors[] = {
-        {"invalid/encrypted_version_mismatch.bin", btp::TransportProfile::EspNow,
+        {"invalid/encrypted_version_mismatch.bin", btp::kEspNowTransport,
          btp::Error::EncryptedVersionMismatch},
-        {"invalid/crc_mismatch_encrypted.bin", btp::TransportProfile::EspNow,
+        {"invalid/crc_mismatch_encrypted.bin", btp::kEspNowTransport,
          btp::Error::CrcMismatch},
-        {"invalid/reserved_flag.bin", btp::TransportProfile::Serial,
+        {"invalid/reserved_flag.bin", btp::kSerialTransport,
          btp::Error::InvalidFlags},
-        {"invalid/cipher_id_reserved.bin", btp::TransportProfile::EspNow,
+        {"invalid/cipher_id_reserved.bin", btp::kEspNowTransport,
          btp::Error::InvalidCipherId},
-        {"invalid/cipher_id_requires_encrypted.bin", btp::TransportProfile::Serial,
+        {"invalid/cipher_id_requires_encrypted.bin", btp::kSerialTransport,
          btp::Error::InvalidCipherId}
     };
     for (std::size_t index = 0U; index < sizeof(vectors) / sizeof(vectors[0]);

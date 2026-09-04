@@ -29,13 +29,13 @@ void setup() {
 
     const btp::Frame source = {header, {payload, sizeof(payload)}};
     std::size_t written = 0U;
-    if (btp::encode(source, btp::TransportProfile::EspNow, frame_buffer,
+    if (btp::encode(source, btp::kEspNowTransport, frame_buffer,
                     sizeof(frame_buffer), &written) != btp::Error::Ok) {
         abort();
     }
 
     btp::DecodedFrame decoded = {};
-    if (btp::decode(frame_buffer, written, btp::TransportProfile::EspNow,
+    if (btp::decode(frame_buffer, written, btp::kEspNowTransport,
                     &decoded) != btp::Error::Ok ||
         decoded.payload.size != sizeof(payload)) {
         abort();
@@ -54,7 +54,7 @@ void setup() {
     }
 
     std::uint8_t fragments = 0U;
-    if (btp::fragment_count(sizeof(payload), btp::TransportProfile::EspNow,
+    if (btp::fragment_count(sizeof(payload), btp::kEspNowTransport,
                             &fragments) != btp::Error::Ok ||
         fragments != 1U) {
         abort();
@@ -201,9 +201,9 @@ void setup() {
     };
     const btp::LogicalMessage endpoint_message = {
         btp::MessageType::Telemetry, 1U, 0U, {payload, sizeof(payload)}};
-    (void)endpoint.send_logical(endpoint_message, btp::TransportProfile::EspNow,
+    (void)endpoint.send_logical(endpoint_message, btp::kEspNowTransport,
                                 &EndpointSink::send, nullptr, nullptr, 0U);
-    (void)endpoint.send_fragment(endpoint_message, btp::TransportProfile::EspNow,
+    (void)endpoint.send_fragment(endpoint_message, btp::kEspNowTransport,
                                  endpoint_sequence, 0U, 1U, &EndpointSink::send,
                                  nullptr);
 
@@ -218,7 +218,7 @@ void setup() {
         {receiver_bytes[1], sizeof(receiver_bytes[1])},
     };
     static btp::Receiver receiver(receiver_slots, receiver_storage, 2U, 4000U,
-                                  btp::TransportProfile::EspNow);
+                                  btp::kEspNowTransport);
     static std::uint8_t receiver_out[btp::kEspNowMaxPayloadSize];
     btp::ReceivedMessage received = {};
     (void)receiver.submit(endpoint_last_frame, endpoint_last_frame_size, 1U,
@@ -240,7 +240,7 @@ void setup() {
     btp::NodeConfig node_config = {};
     node_config.source_id = 0x0A0B0C0DU;
     node_config.boot_id = 0x01020304U;
-    node_config.transport = btp::TransportProfile::EspNow;
+    node_config.transport = btp::kEspNowTransport;
     node_config.send = &NodeSink::send;
     static btp::StaticNode<2U, btp::kEspNowMaxPayloadSize, 256U> node(
         node_config);

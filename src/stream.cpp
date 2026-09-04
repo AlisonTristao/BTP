@@ -236,7 +236,7 @@ SerialDecodeResult SerialDecoder::push(std::uint8_t byte,
     }
 
     const Error frame_result = decode(decoded_buffer_, decoded_size_value,
-                                      TransportProfile::Serial, decoded_frame);
+                                      kSerialTransport, decoded_frame);
     if (frame_result != Error::Ok) {
         return serial_result(SerialDecodeEvent::FrameError, frame_result);
     }

@@ -78,16 +78,15 @@ void write_header(const Header& header,
     out_header[35] = header.fragment_count;
 }
 
-// A 16-octet AEAD tag over the UsbHid payload ceiling of 22 octets is 73%
-// overhead, against ~7.6% on EspNow and ~0.4% on Serial, so
-// docs/encryption.md section 9 forbids ENCRYPTED on a UsbHid frame outright.
-// The rule lived only in prose until now: an encoder that ignored it produced
-// frames every conforming decoder was supposed to refuse, and no decoder
-// actually refused them.
+// transport.allow_encrypted is the caller's policy call about ITS transport
+// (the UsbHid preset sets it false: a 16-octet AEAD tag over a 22-octet
+// payload ceiling is 73% overhead, against ~7.6% on EspNow and ~0.4% on
+// Serial, so docs/encryption.md section 9 forbids ENCRYPTED there outright).
+// An encoder that ignored this produced frames every conforming decoder was
+// supposed to refuse, so both directions check it, not just encode().
 Error validate_encryption_for_transport(std::uint16_t flags,
-                                        TransportProfile transport) noexcept {
-    if ((flags & kFlagEncrypted) != 0U &&
-        transport == TransportProfile::UsbHid) {
+                                        const TransportLimits& transport) noexcept {
+    if ((flags & kFlagEncrypted) != 0U && !transport.allow_encrypted) {
         return Error::EncryptedNotAllowedOnTransport;
     }
     return Error::Ok;
@@ -124,29 +123,13 @@ Error validate_header(const Header& header) noexcept {
 
 }  // namespace
 
-std::size_t max_frame_size(TransportProfile transport) noexcept {
-    switch (transport) {
-        case TransportProfile::EspNow: return kEspNowMaxFrameSize;
-        case TransportProfile::UsbHid: return kUsbHidMaxFrameSize;
-        case TransportProfile::Serial: default: return kSerialMaxFrameSize;
-    }
-}
-
-std::size_t max_payload_size(TransportProfile transport) noexcept {
-    switch (transport) {
-        case TransportProfile::EspNow: return kEspNowMaxPayloadSize;
-        case TransportProfile::UsbHid: return kUsbHidMaxPayloadSize;
-        case TransportProfile::Serial: default: return kSerialMaxPayloadSize;
-    }
-}
-
 Error encoded_size(std::size_t payload_size,
-                   TransportProfile transport,
+                   const TransportLimits& transport,
                    std::size_t* size_out) noexcept {
     if (size_out == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
     }
-    if (payload_size > max_payload_size(transport) || payload_size > 0xFFFFU) {
+    if (payload_size > transport.max_payload_size || payload_size > 0xFFFFU) {
         return Error::PayloadTooLarge;
     }
     *size_out = kV1MinimumFrameSize + payload_size;
@@ -171,7 +154,7 @@ std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept {
 }
 
 Error encode(const Frame& frame,
-             TransportProfile transport,
+             const TransportLimits& transport,
              std::uint8_t* output,
              std::size_t output_capacity,
              std::size_t* bytes_written) noexcept {
@@ -222,7 +205,7 @@ Error encode(const Frame& frame,
 
 Error decode(const std::uint8_t* input,
              std::size_t input_size,
-             TransportProfile transport,
+             const TransportLimits& transport,
              DecodedFrame* decoded) noexcept {
     if (input == nullptr || decoded == nullptr || !detail::valid_transport(transport)) {
         return Error::InvalidArgument;
@@ -230,7 +213,7 @@ Error decode(const std::uint8_t* input,
     if (input_size < kV1MinimumFrameSize) {
         return Error::FrameTooShort;
     }
-    if (input_size > max_frame_size(transport)) {
+    if (input_size > transport.max_frame_size) {
         return Error::FrameTooLarge;
     }
     for (std::size_t index = 0U; index < 4U; ++index) {
@@ -247,7 +230,7 @@ Error decode(const std::uint8_t* input,
     }
 
     const std::size_t payload_size = read_u16_le(input + 10U);
-    if (payload_size > max_payload_size(transport)) {
+    if (payload_size > transport.max_payload_size) {
         return Error::PayloadTooLarge;
     }
     const std::size_t expected_size = kV1MinimumFrameSize + payload_size;

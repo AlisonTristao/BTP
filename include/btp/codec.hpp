@@ -40,11 +40,29 @@ enum class MessageType : std::uint8_t {
     Control = 0x05U
 };
 
-enum class TransportProfile : std::uint8_t {
-    EspNow,
-    Serial,
-    UsbHid
+// Describes a transport generically -- not a fixed list of named profiles.
+// A caller with a link this library has never heard of just fills in its
+// two ceilings and whether it can carry an ENCRYPTED frame at all (the
+// UsbHid case below: a 16-octet AEAD tag over a 22-octet payload is 73%
+// overhead, so docs/encryption.md section 9 forbids it there outright --
+// that is a POLICY choice about a transport, not something derivable from
+// its size, hence its own field rather than a size threshold encode()/
+// decode() would have to guess at).
+struct TransportLimits {
+    std::size_t max_frame_size;
+    std::size_t max_payload_size;
+    bool allow_encrypted;
 };
+
+// Presets for the three transports docs/fragmentation-and-transports.md
+// documents -- construct your own TransportLimits for anything else; there
+// is no enum to extend.
+static const TransportLimits kEspNowTransport{kEspNowMaxFrameSize,
+                                              kEspNowMaxPayloadSize, true};
+static const TransportLimits kSerialTransport{kSerialMaxFrameSize,
+                                              kSerialMaxPayloadSize, true};
+static const TransportLimits kUsbHidTransport{kUsbHidMaxFrameSize,
+                                              kUsbHidMaxPayloadSize, false};
 
 // Values assigned to the CIPHER_ID sub-field of flags (docs/encryption.md section 3). Only AesGcm (0) and ChaCha20Poly1305 (1) are assigned; the raw
 // values 2 and 3 are reserved for future ciphers. cipher_id() below is a
@@ -106,22 +124,16 @@ struct DecodedFrame {
     std::uint32_t crc32;
 };
 
-// The frame and payload ceilings of a transport profile. A caller sizing a
-// receive buffer needs the first; a caller deciding whether to fragment needs
-// the second. Both return the Serial values for an unrecognized profile, since
-// every entry point validates the profile before asking.
-std::size_t max_frame_size(TransportProfile transport) noexcept;
-std::size_t max_payload_size(TransportProfile transport) noexcept;
-
-// Returns the exact wire size without writing. The transport limit is applied.
+// Returns the exact wire size without writing. transport.max_frame_size is
+// applied (FrameTooLarge past it).
 Error encoded_size(std::size_t payload_size,
-                   TransportProfile transport,
+                   const TransportLimits& transport,
                    std::size_t* size_out) noexcept;
 
 // Encodes into caller-owned memory. No output byte is written unless all
 // arguments, header invariants, limits and output capacity are valid.
 Error encode(const Frame& frame,
-             TransportProfile transport,
+             const TransportLimits& transport,
              std::uint8_t* output,
              std::size_t output_capacity,
              std::size_t* bytes_written) noexcept;
@@ -130,7 +142,7 @@ Error encode(const Frame& frame,
 // valid only as long as input remains valid. decoded is untouched on failure.
 Error decode(const std::uint8_t* input,
              std::size_t input_size,
-             TransportProfile transport,
+             const TransportLimits& transport,
              DecodedFrame* decoded) noexcept;
 
 // CRC-32/ISO-HDLC (CRC-32/IEEE), returned as a numeric host value.

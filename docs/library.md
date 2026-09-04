@@ -693,7 +693,7 @@ const btp::Frame frame = {
 btp::Error rc =
     btp::encode(
         frame,
-        btp::TransportProfile::EspNow,
+        btp::kEspNowTransport,
         buffer,
         sizeof(buffer),
         &written
@@ -722,18 +722,28 @@ It does not transmit the memory representation of `btp::Header`.
 
 ---
 
-### 4.2 Transport profile
+### 4.2 Transport limits
 
-`TransportProfile` selects the frame-size restrictions that apply to the operation.
+`TransportLimits` (a plain `{max_frame_size, max_payload_size, allow_encrypted}`, not a fixed enum of named profiles) selects the frame-size restrictions -- and whether an ENCRYPTED frame is allowed at all -- that apply to the operation.
 
-The codec uses the profile to validate whether the frame can be represented on that transport.
+The codec uses it to validate whether the frame can be represented on that transport.
 
 It does not perform transport I/O.
+
+Three presets cover the transports section 4 below documents:
+
+```cpp
+btp::kEspNowTransport   // 250 / 210, encryption allowed
+btp::kSerialTransport   // 4096 / 4056, encryption allowed
+btp::kUsbHidTransport   // 62 / 22, encryption NOT allowed
+```
+
+A caller with a different link builds its own `btp::TransportLimits{max_frame_size, max_payload_size, allow_encrypted}` -- there is no enum to extend.
 
 For example:
 
 ```cpp
-btp::TransportProfile::EspNow
+btp::kEspNowTransport
 ```
 
 means:
@@ -816,7 +826,7 @@ btp::Error rc =
     btp::decode(
         buffer,
         received_size,
-        btp::TransportProfile::EspNow,
+        btp::kEspNowTransport,
         &decoded
     );
 
@@ -2528,7 +2538,7 @@ endpoint.configure(source_id_from_mac(mac), boot_id);
 std::uint8_t scratch[kMaxLogicalPayload + btp::kEndpointAeadTagSize];
 btp::LogicalMessage msg{btp::MessageType::Control, kStatusObjectId, now_us,
                         {payload, payload_size}};
-endpoint.send_logical(msg, btp::TransportProfile::EspNow,
+endpoint.send_logical(msg, btp::kEspNowTransport,
                       &radio_send, &radio, scratch, sizeof(scratch),
                       &channel_c_seal, &seal_ctx);
 ```
@@ -2587,7 +2597,7 @@ btp::ReassemblySlot slots[4];
 std::uint8_t bytes[4][kMaxPayload];
 btp::ReassemblyStorage storage[4];
 for (std::size_t i = 0; i < 4; ++i) storage[i] = {bytes[i], kMaxPayload};
-btp::Receiver receiver(slots, storage, 4, 4000, btp::TransportProfile::EspNow);
+btp::Receiver receiver(slots, storage, 4, 4000, btp::kEspNowTransport);
 
 std::uint8_t out[kMaxPayload];
 btp::ReceivedMessage msg{};
@@ -2682,7 +2692,7 @@ ISR is fine.
 ### 16.2 Using it
 
 ```cpp
-btp::StaticNode<> node({source_id, boot_id, btp::TransportProfile::EspNow,
+btp::StaticNode<> node({source_id, boot_id, btp::kEspNowTransport,
                         &radio_send, nullptr,   // send  (required)
                         &clock_ms,   nullptr,   // clock
                         &seal_c,     nullptr,   // seal  (the key lives here)

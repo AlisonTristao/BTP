@@ -50,7 +50,7 @@ btp::Header empty_log_header() {
 }
 
 std::vector<std::uint8_t> encode_frame(const btp::Frame& frame,
-                                       btp::TransportProfile transport) {
+                                       const btp::TransportLimits& transport) {
     std::size_t required = 0U;
     CHECK(btp::encoded_size(frame.payload.size, transport, &required) ==
           btp::Error::Ok);
@@ -74,7 +74,7 @@ void write_crc(std::vector<std::uint8_t>* frame) {
 btp::Error decode_serial(const std::vector<std::uint8_t>& bytes) {
     btp::DecodedFrame decoded = {};
     return btp::decode(bytes.data(), bytes.size(),
-                       btp::TransportProfile::Serial, &decoded);
+                       btp::kSerialTransport, &decoded);
 }
 
 void test_crc_reference() {
@@ -89,7 +89,7 @@ void test_specification_vectors() {
         {nullptr, 0U}
     };
     const std::vector<std::uint8_t> encoded =
-        encode_frame(empty_log, btp::TransportProfile::EspNow);
+        encode_frame(empty_log, btp::kEspNowTransport);
     CHECK(encoded.size() == kEmptyLogVector.size());
     CHECK(std::memcmp(encoded.data(), kEmptyLogVector.data(), encoded.size()) == 0);
 
@@ -106,7 +106,7 @@ void test_specification_vectors() {
     header.fragment_count = 2U;
     const btp::Frame fragment = {header, {payload, sizeof(payload)}};
     const std::vector<std::uint8_t> encoded_fragment =
-        encode_frame(fragment, btp::TransportProfile::EspNow);
+        encode_frame(fragment, btp::kEspNowTransport);
     CHECK(encoded_fragment.size() == kFragmentVector.size());
     CHECK(std::memcmp(encoded_fragment.data(), kFragmentVector.data(),
                       encoded_fragment.size()) == 0);
@@ -125,11 +125,11 @@ void test_round_trip_and_boundaries() {
     header.object_id = 0xFFFFU;
     const btp::Frame original = {header, {payload.data(), payload.size()}};
     const std::vector<std::uint8_t> bytes =
-        encode_frame(original, btp::TransportProfile::Serial);
+        encode_frame(original, btp::kSerialTransport);
     CHECK(bytes.size() == btp::kSerialMaxFrameSize);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(bytes.data(), bytes.size(), btp::TransportProfile::Serial,
+    CHECK(btp::decode(bytes.data(), bytes.size(), btp::kSerialTransport,
                       &decoded) == btp::Error::Ok);
     CHECK(decoded.header.type == original.header.type);
     CHECK(decoded.header.flags == original.header.flags);
@@ -146,12 +146,12 @@ void test_round_trip_and_boundaries() {
 
     std::size_t size = 0U;
     CHECK(btp::encoded_size(btp::kEspNowMaxPayloadSize,
-                            btp::TransportProfile::EspNow, &size) == btp::Error::Ok);
+                            btp::kEspNowTransport, &size) == btp::Error::Ok);
     CHECK(size == btp::kEspNowMaxFrameSize);
     CHECK(btp::encoded_size(btp::kEspNowMaxPayloadSize + 1U,
-                            btp::TransportProfile::EspNow, &size) ==
+                            btp::kEspNowTransport, &size) ==
           btp::Error::PayloadTooLarge);
-    CHECK(btp::decode(bytes.data(), bytes.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(bytes.data(), bytes.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::FrameTooLarge);
 }
 
@@ -164,7 +164,7 @@ void test_encoder_rejections_are_atomic() {
 
     const auto expect = [&](btp::Error expected) {
         output.fill(0xA5U);
-        CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(),
+        CHECK(btp::encode(frame, btp::kEspNowTransport, output.data(),
                           output.size(), &written) == expected);
         for (std::size_t index = 0U; index < output.size(); ++index) {
             CHECK(output[index] == 0xA5U);
@@ -200,7 +200,7 @@ void test_encoder_rejections_are_atomic() {
     expect(btp::Error::InvalidArgument);
     frame.payload = {payload, sizeof(payload)};
     output.fill(0xA5U);
-    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(), 42U,
+    CHECK(btp::encode(frame, btp::kEspNowTransport, output.data(), 42U,
                       &written) == btp::Error::BufferTooSmall);
     for (std::size_t index = 0U; index < output.size(); ++index) {
         CHECK(output[index] == 0xA5U);
@@ -217,14 +217,14 @@ void test_encoder_supports_overlapping_payload() {
         {storage.data(), sizeof(expected)}
     };
     std::size_t written = 0U;
-    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, storage.data(),
+    CHECK(btp::encode(frame, btp::kEspNowTransport, storage.data(),
                       storage.size(), &written) == btp::Error::Ok);
     CHECK(written == btp::kV1MinimumFrameSize + sizeof(expected));
     CHECK(std::memcmp(storage.data() + btp::kV1HeaderSize, expected,
                       sizeof(expected)) == 0);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(storage.data(), written, btp::TransportProfile::EspNow,
+    CHECK(btp::decode(storage.data(), written, btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
 }
 
@@ -233,7 +233,7 @@ void test_decoder_structural_rejections() {
     btp::DecodedFrame decoded = {};
 
     for (std::size_t size = 0U; size < btp::kV1MinimumFrameSize; ++size) {
-        CHECK(btp::decode(valid.data(), size, btp::TransportProfile::Serial,
+        CHECK(btp::decode(valid.data(), size, btp::kSerialTransport,
                           &decoded) == btp::Error::FrameTooShort);
     }
 
@@ -261,7 +261,7 @@ void test_decoder_structural_rejections() {
 
     std::vector<std::uint8_t> oversized(btp::kEspNowMaxFrameSize + 1U, 0U);
     CHECK(btp::decode(oversized.data(), oversized.size(),
-                      btp::TransportProfile::EspNow, &decoded) ==
+                      btp::kEspNowTransport, &decoded) ==
           btp::Error::FrameTooLarge);
 }
 
@@ -282,11 +282,11 @@ void test_decoder_semantic_rejections() {
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidFlags);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
-    std::fill(changed.begin() + 12, changed.begin() + 16, 0U);
+    std::fill(changed.begin() + 12, changed.begin() + 16, std::uint8_t{0});
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidSourceId);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
-    std::fill(changed.begin() + 16, changed.begin() + 20, 0U);
+    std::fill(changed.begin() + 16, changed.begin() + 20, std::uint8_t{0});
     write_crc(&changed);
     CHECK(decode_serial(changed) == btp::Error::InvalidBootId);
     changed.assign(kEmptyLogVector.begin(), kEmptyLogVector.end());
@@ -327,7 +327,7 @@ void test_failure_does_not_publish_decoded_result() {
     decoded.crc32 = 0x12345678U;
     std::vector<std::uint8_t> invalid(kEmptyLogVector.begin(), kEmptyLogVector.end());
     invalid.back() ^= 1U;
-    CHECK(btp::decode(invalid.data(), invalid.size(), btp::TransportProfile::Serial,
+    CHECK(btp::decode(invalid.data(), invalid.size(), btp::kSerialTransport,
                       &decoded) == btp::Error::CrcMismatch);
     CHECK(decoded.header.source_id == 0xDEADBEEFU);
     CHECK(decoded.payload.data == reinterpret_cast<const std::uint8_t*>(1U));
@@ -361,7 +361,7 @@ void test_encode_header_matches_encode_bytes() {
     const std::uint8_t payload[] = {1U, 2U, 3U, 4U, 5U};
     const btp::Frame frame = {header, {payload, sizeof(payload)}};
     const std::vector<std::uint8_t> encoded =
-        encode_frame(frame, btp::TransportProfile::EspNow);
+        encode_frame(frame, btp::kEspNowTransport);
 
     std::uint8_t header_bytes[36] = {};
     CHECK(btp::encode_header(header, static_cast<std::uint16_t>(sizeof(payload)),
@@ -373,7 +373,7 @@ void test_encode_header_matches_encode_bytes() {
     plain_header.sequence = 7U;
     const btp::Frame plain_frame = {plain_header, {payload, sizeof(payload)}};
     const std::vector<std::uint8_t> plain_encoded =
-        encode_frame(plain_frame, btp::TransportProfile::EspNow);
+        encode_frame(plain_frame, btp::kEspNowTransport);
     std::uint8_t plain_header_bytes[36] = {};
     CHECK(btp::encode_header(plain_header, static_cast<std::uint16_t>(sizeof(payload)),
                              plain_header_bytes) == btp::Error::Ok);
@@ -408,7 +408,7 @@ void test_encrypted_round_trip_with_placeholder_cipher() {
 
     const btp::Frame frame = {header, {sealed, sizeof(sealed)}};
     const std::vector<std::uint8_t> encoded =
-        encode_frame(frame, btp::TransportProfile::EspNow);
+        encode_frame(frame, btp::kEspNowTransport);
 
     CHECK(encoded[4] == btp::kV2Version);
     CHECK(std::memcmp(encoded.data(), aad, sizeof(aad)) == 0);
@@ -418,7 +418,7 @@ void test_encrypted_round_trip_with_placeholder_cipher() {
     CHECK(header_payload_size == sealed_size);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
     CHECK((decoded.header.flags & btp::kFlagEncrypted) != 0U);
     CHECK(decoded.payload.size == sizeof(sealed));
@@ -432,7 +432,7 @@ void test_decoder_rejects_encrypted_flag_with_v1_version() {
     const btp::Frame frame = {header, {payload, sizeof(payload)}};
 
     std::vector<std::uint8_t> encoded =
-        encode_frame(frame, btp::TransportProfile::EspNow);
+        encode_frame(frame, btp::kEspNowTransport);
     CHECK(encoded[4] == btp::kV2Version);
 
     // Patch the version octet back to 1 while ENCRYPTED stays marked, then
@@ -441,7 +441,7 @@ void test_decoder_rejects_encrypted_flag_with_v1_version() {
     write_crc(&encoded);
 
     btp::DecodedFrame decoded = {};
-    CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::decode(encoded.data(), encoded.size(), btp::kEspNowTransport,
                       &decoded) == btp::Error::EncryptedVersionMismatch);
 }
 
@@ -477,7 +477,7 @@ void test_encoder_rejects_cipher_id_without_encrypted() {
     std::array<std::uint8_t, 64> output;
     output.fill(0xA5U);
     std::size_t written = 123U;
-    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(),
+    CHECK(btp::encode(frame, btp::kEspNowTransport, output.data(),
                       output.size(), &written) == btp::Error::InvalidCipherId);
     for (std::size_t index = 0U; index < output.size(); ++index) {
         CHECK(output[index] == 0xA5U);
@@ -497,7 +497,7 @@ void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
         const btp::Frame frame = {header, {payload, sizeof(payload)}};
 
         std::vector<std::uint8_t> encoded =
-            encode_frame(frame, btp::TransportProfile::EspNow);
+            encode_frame(frame, btp::kEspNowTransport);
         CHECK(encoded[4] == btp::kV2Version);
 
         // Patch flags to set the reserved CIPHER_ID value while ENCRYPTED
@@ -509,7 +509,7 @@ void test_decoder_rejects_reserved_cipher_id_with_encrypted() {
         write_crc(&encoded);
 
         btp::DecodedFrame decoded = {};
-        CHECK(btp::decode(encoded.data(), encoded.size(), btp::TransportProfile::EspNow,
+        CHECK(btp::decode(encoded.data(), encoded.size(), btp::kEspNowTransport,
                           &decoded) == btp::Error::InvalidCipherId);
     }
 }
@@ -533,7 +533,7 @@ void test_encrypted_is_rejected_on_usb_hid() {
 
     std::array<std::uint8_t, 64> output = {};
     std::size_t written = 12345U;
-    CHECK(btp::encode(frame, btp::TransportProfile::UsbHid, output.data(),
+    CHECK(btp::encode(frame, btp::kUsbHidTransport, output.data(),
                       output.size(),
                       &written) == btp::Error::EncryptedNotAllowedOnTransport);
     CHECK(written == 12345U);  // rejection stays atomic
@@ -541,18 +541,18 @@ void test_encrypted_is_rejected_on_usb_hid() {
     // The same frame is legal on the two profiles with room for the tag, and a
     // decoder on those profiles still accepts it.
     std::size_t espnow_written = 0U;
-    CHECK(btp::encode(frame, btp::TransportProfile::EspNow, output.data(),
+    CHECK(btp::encode(frame, btp::kEspNowTransport, output.data(),
                       output.size(), &espnow_written) == btp::Error::Ok);
 
     btp::DecodedFrame decoded = {};
     CHECK(btp::decode(output.data(), espnow_written,
-                      btp::TransportProfile::EspNow,
+                      btp::kEspNowTransport,
                       &decoded) == btp::Error::Ok);
 
     // Those same octets, offered to a UsbHid decoder, must be refused -- a
     // gateway must not relay an encrypted frame onto the HID profile.
     CHECK(btp::decode(output.data(), espnow_written,
-                      btp::TransportProfile::UsbHid,
+                      btp::kUsbHidTransport,
                       &decoded) == btp::Error::EncryptedNotAllowedOnTransport);
 
     // An unencrypted frame on UsbHid is unaffected.
@@ -560,11 +560,11 @@ void test_encrypted_is_rejected_on_usb_hid() {
     plain.flags = 0U;
     const btp::Frame plain_frame = {plain, {payload.data(), payload.size()}};
     std::size_t plain_written = 0U;
-    CHECK(btp::encode(plain_frame, btp::TransportProfile::UsbHid,
+    CHECK(btp::encode(plain_frame, btp::kUsbHidTransport,
                       output.data(), output.size(),
                       &plain_written) == btp::Error::Ok);
     CHECK(btp::decode(output.data(), plain_written,
-                      btp::TransportProfile::UsbHid,
+                      btp::kUsbHidTransport,
                       &decoded) == btp::Error::Ok);
 }
 

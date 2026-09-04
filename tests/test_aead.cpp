@@ -433,7 +433,7 @@ void test_sealed_message_survives_fragmentation_and_reassembly() {
                          sealed.data()) == btp::AeadError::Ok);
 
     std::uint8_t count = 0U;
-    CHECK(btp::fragment_count(sealed.size(), btp::TransportProfile::EspNow,
+    CHECK(btp::fragment_count(sealed.size(), btp::kEspNowTransport,
                               &count) == btp::Error::Ok);
     CHECK(count == 2U);
 
@@ -452,7 +452,7 @@ void test_sealed_message_survives_fragmentation_and_reassembly() {
     for (std::size_t step = 0U; step < 2U; ++step) {
         btp::Frame fragment = {};
         CHECK(btp::make_fragment(logical, {sealed.data(), sealed.size()},
-                                 btp::TransportProfile::EspNow, order[step],
+                                 btp::kEspNowTransport, order[step],
                                  &fragment) == btp::Error::Ok);
         last = reassembler.push(fragment, 5U, &message);
     }
