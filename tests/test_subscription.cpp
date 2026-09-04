@@ -96,7 +96,21 @@ struct TableFixture {
 
 void test_table_grants_and_clamps_rate() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    // auto, not `const Catalog catalog = ...`: Catalog owns none of its
+    // storage (btp/catalog.hpp's own top comment) -- it only holds pointers
+    // into StaticCatalog<>'s pools. Naming the base type here would slice the
+    // StaticCatalog<> temporary make_catalog() returns down to its Catalog
+    // subobject, copy those pointers, and then destroy the temporary that
+    // actually owned the pools they point into at the end of the full
+    // expression -- a dangling-pointer bug that (accidentally) reads back
+    // correct bytes on an unoptimized build, because nothing has overwritten
+    // that stack slot yet, and reliably fails under -O3 once the compiler
+    // reuses it. `auto` keeps the whole StaticCatalog<>, pools included,
+    // alive for catalog's own scope; every call below still takes it as
+    // `const Catalog&` through the ordinary derived-to-base reference
+    // conversion, no slicing involved. Every other make_catalog() call in
+    // this file follows the same rule.
+    const auto catalog = make_catalog();
     SubscribeResult result = {};
     f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U),
                              make_request(0x0101U, /*rate=*/50000U), 0U, &result);
@@ -112,7 +126,7 @@ void test_table_grants_and_clamps_rate() {
 
 void test_table_rejects_non_subscribable_or_unknown_topic() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
 
     SubscribeResult not_subscribable = {};
     f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U), make_request(0x0202U),
@@ -128,7 +142,7 @@ void test_table_rejects_non_subscribable_or_unknown_topic() {
 
 void test_table_renewal_reuses_the_subscription_id() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
 
     SubscribeResult first = {};
     f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U), make_request(0x0101U),
@@ -142,7 +156,7 @@ void test_table_renewal_reuses_the_subscription_id() {
 
 void test_table_capacity_exhausted() {
     TableFixture<2> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
     SubscribeResult a = {}, b = {}, c = {};
     f.table.handle_subscribe(catalog, make_header(1U, 1U, 1U), make_request(0x0101U), 0U,
                              &a);
@@ -159,7 +173,7 @@ void test_table_capacity_exhausted() {
 
 void test_table_unsubscribe_absent_or_foreign_is_success_but_a_no_op() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
     SubscribeResult granted = {};
     f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U), make_request(0x0101U), 0U,
                              &granted);
@@ -191,7 +205,7 @@ void test_table_unsubscribe_absent_or_foreign_is_success_but_a_no_op() {
 
 void test_table_expire_frees_lapsed_leases() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
     SubscribeResult result = {};
     f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U),
                              make_request(0x0101U, 10000U, /*lease_ms=*/500U), 0U,
@@ -206,7 +220,7 @@ void test_table_expire_frees_lapsed_leases() {
 
 void test_table_due_cadence_and_fastest_subscriber_wins() {
     TableFixture<4> f;
-    const Catalog catalog = make_catalog();
+    const auto catalog = make_catalog();
     // 1000 mHz -> a 1000 ms period; 5000 mHz (clamped from higher) -> 200 ms.
     SubscribeResult slow = {}, fast = {};
     f.table.handle_subscribe(catalog, make_header(1U, 1U, 1U),
