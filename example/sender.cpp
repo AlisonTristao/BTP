@@ -148,7 +148,7 @@ int main() {
     // config to set the node's identity, transport, and callbacks
     cfg.source_id = 0x00CAFE01U;                                // this robot    (non-zero)
     cfg.boot_id   = 0x0000B001U;                                // new each boot (non-zero) // attention: to use criptography, you need count the boots
-    cfg.transport = btp::kEspNowTransport;                      // frame size ceiling the fragmenter targets, payload derives automatically (max_frame_size - 40) -- kEspNowTransport 250, kSerialTransport 4096, kUsbHidTransport 62 (no encryption), or your own btp::TransportLimits{max_frame_size, allow_encrypted}
+    cfg.transport = btp::TransportLimits{250U, true};           // max_frame_size (payload derives automatically, max_frame_size - 40), allow_encrypted -- set by hand for whatever your link's MTU actually is, no named preset required
     cfg.send      = &send_frame;                                // function to send the frame using your trasport metod
     cfg.command   = &handle_command;                            // function to handle the command request, the node will call it when a COMMAND_REQUEST arrives
     cfg.terminal  = &handle_terminal_in;                        // function to handle the terminal input, the node will call it when a TERMINAL_IN arrives
