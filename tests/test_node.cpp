@@ -1151,6 +1151,13 @@ void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     CHECK(consumer.subscription_event() == SubscriptionEvent::None);
     CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SubscriptionHandled);
     CHECK(consumer.subscription_event() == SubscriptionEvent::Granted);
+    // subscription_outcome() -- the full struct behind the event, mirroring
+    // command_outcome(): no separate lookup needed to name what was granted.
+    CHECK(consumer.subscription_outcome().local_id == local_id);
+    CHECK(consumer.subscription_outcome().peer_source_id == kSenderId);
+    CHECK(consumer.subscription_outcome().topic_id == 0x0101U);
+    CHECK(consumer.subscription_outcome().requested_rate_millihz == 10000U);
+    CHECK(consumer.subscription_outcome().effective_rate_millihz == 10000U);
 
     // Producer publishes once due(), then the cadence follows the granted rate.
     CHECK(producer.publish(0x0101U, &fill_drive, nullptr, 5ULL));

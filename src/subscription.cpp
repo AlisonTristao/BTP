@@ -304,13 +304,26 @@ SubscriptionOutcome SubscriptionClient::on_result(const SubscribeResult& result,
         find_pending(result.request.request_source_id, result.request.request_boot_id,
                     result.request.reply_to_sequence);
     if (slot == nullptr) {
-        return SubscriptionOutcome{SubscriptionEvent::None, 0U};
+        return SubscriptionOutcome{SubscriptionEvent::None, 0U, 0U, 0U,
+                                   0U,  0U, 0U, 0U, 0U};
     }
 
-    const std::uint32_t local_id = slot->local_id_;
+    // Captured before a Rejected outcome resets the slot -- the caller's own
+    // UI message ("rejected topic 0x.. of source 0x..") needs to name what
+    // was asked for, not just that something failed.
+    SubscriptionOutcome outcome{};
+    outcome.local_id = slot->local_id_;
+    outcome.peer_source_id = slot->peer_source_id_;
+    outcome.peer_boot_id = slot->peer_boot_id_;
+    outcome.topic_id = slot->topic_id_;
+    outcome.requested_rate_millihz = slot->requested_rate_millihz_;
+    outcome.status = result.status;
+    outcome.error_code = result.error_code;
+
     if (result.status != static_cast<std::uint8_t>(ResultStatus::Success)) {
         *slot = ClientSubscription();
-        return SubscriptionOutcome{SubscriptionEvent::Rejected, local_id};
+        outcome.event = SubscriptionEvent::Rejected;
+        return outcome;
     }
 
     slot->state_ = ClientSubscription::State::Active;
@@ -323,7 +336,9 @@ SubscriptionOutcome SubscriptionClient::on_result(const SubscribeResult& result,
         static_cast<std::uint64_t>(result.granted_lease_ms) / 5U;
     slot->renew_at_ms_ =
         slot->expires_at_ms_ > margin_ms ? slot->expires_at_ms_ - margin_ms : 0U;
-    return SubscriptionOutcome{SubscriptionEvent::Granted, local_id};
+    outcome.event = SubscriptionEvent::Granted;
+    outcome.effective_rate_millihz = result.effective_rate_millihz;
+    return outcome;
 }
 
 void SubscriptionClient::expire(std::uint64_t now_ms) noexcept {

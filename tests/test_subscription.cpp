@@ -308,6 +308,13 @@ void test_client_on_result_success_activates() {
         f.client.on_result(make_success_result(5U, 77U, 10000U, 1000U), 0U);
     CHECK(o.event == SubscriptionEvent::Granted);
     CHECK(o.local_id == id);
+    // The outcome names what was granted without a second lookup -- straight
+    // off the slot (peer/topic/requested_rate) and the wire reply (effective_rate).
+    CHECK(o.peer_source_id == kPeerSource);
+    CHECK(o.peer_boot_id == kPeerBoot);
+    CHECK(o.topic_id == 0x0101U);
+    CHECK(o.requested_rate_millihz == 10000U);
+    CHECK(o.effective_rate_millihz == 10000U);
 
     // Not yet due for renewal right after granting (80% of 1000 ms left).
     CHECK(f.client.next_renewal_due(799U) == 0U);
@@ -322,8 +329,15 @@ void test_client_on_result_rejected_frees_the_slot() {
     reject.request.request_boot_id = kOwnBoot;
     reject.request.reply_to_sequence = 5U;
     reject.status = static_cast<std::uint8_t>(ResultStatus::Rejected);
+    reject.error_code = static_cast<std::uint16_t>(btp::ResultError::CapacityExhausted);
     const SubscriptionOutcome o = f.client.on_result(reject, 0U);
     CHECK(o.event == SubscriptionEvent::Rejected);
+    // Named even though the slot is gone by the time the caller sees this --
+    // captured before the reset, not read back from the (now Idle) slot.
+    CHECK(o.peer_source_id == kPeerSource);
+    CHECK(o.topic_id == 0x0101U);
+    CHECK(o.status == static_cast<std::uint8_t>(ResultStatus::Rejected));
+    CHECK(o.error_code == static_cast<std::uint16_t>(btp::ResultError::CapacityExhausted));
 
     // The slot is free again.
     CHECK(do_subscribe(f.client, 6U) != 0U);

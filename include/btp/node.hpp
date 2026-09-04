@@ -621,6 +621,15 @@ public:
         return last_subscription_event_;
     }
 
+    // The full outcome behind subscription_event() -- mirrors command_outcome():
+    // local_id/peer/topic/requested_rate always meaningful when event is
+    // Granted or Rejected, plus effective_rate_millihz (Granted) or
+    // status/error_code (Rejected), straight off SUBSCRIBE_RESULT with no
+    // separate decode. See btp::SubscriptionOutcome's own comment.
+    const SubscriptionOutcome& subscription_outcome() const noexcept {
+        return last_subscription_outcome_;
+    }
+
     // ---- commands (opt-in, docs/commands.md section 2) ---------------------
     // btp::DedupCache (session.hpp) is the RESPONDER's memory -- execute an
     // action once, remember the result, replay a retransmission instead of
@@ -952,6 +961,7 @@ private:
     SubscriptionTable* subscriptions_;        // nullptr until enable_subscriptions()
     SubscriptionClient* subscription_client_;  // nullptr until enable_subscription_client()
     SubscriptionEvent last_subscription_event_;
+    SubscriptionOutcome last_subscription_outcome_;
 
     DedupCache* commands_;         // nullptr until enable_commands()
     NodeActionFn on_command_;

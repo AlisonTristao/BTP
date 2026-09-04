@@ -33,6 +33,7 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       subscriptions_(nullptr),
       subscription_client_(nullptr),
       last_subscription_event_(SubscriptionEvent::None),
+      last_subscription_outcome_(),
       commands_(nullptr),
       on_command_(nullptr),
       on_command_ctx_(nullptr),
@@ -345,8 +346,8 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
         SubscribeResult result = {};
         if (decode_subscribe_result(out->payload.data, out->payload.size, &result) ==
             MessageError::Ok) {
-            last_subscription_event_ =
-                subscription_client_->on_result(result, now_ms).event;
+            last_subscription_outcome_ = subscription_client_->on_result(result, now_ms);
+            last_subscription_event_ = last_subscription_outcome_.event;
         }
         return NodeRx::SubscriptionHandled;
     }

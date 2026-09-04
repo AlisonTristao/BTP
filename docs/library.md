@@ -3176,9 +3176,12 @@ node.enable_subscription_client(&client);
 const std::uint32_t id = node.subscribe(robot_source_id, robot_boot_id,
                                         0x0101, 10000 /*mHz*/, 60000 /*ms*/);
 // ... node.receive() feeds SUBSCRIBE_RESULT to it (NodeRx::SubscriptionHandled,
-//     subscription_event() one of Granted / Rejected), tick() renews the
-//     grant at 80% of its lease on its own (another SUBSCRIBE, commands.md
-//     §4.3) ...
+//     subscription_event() one of Granted / Rejected -- subscription_outcome()
+//     is the full struct behind it, since 2.36.0: local_id/peer/topic/
+//     requested_rate always set, plus effective_rate_millihz on Granted or
+//     status/error_code on Rejected, mirroring command_outcome()), tick()
+//     renews the grant at 80% of its lease on its own (another SUBSCRIBE,
+//     commands.md §4.3) ...
 node.unsubscribe(id);
 ```
 

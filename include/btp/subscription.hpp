@@ -158,9 +158,25 @@ enum class SubscriptionEvent : std::uint8_t {
 
 const char* subscription_event_string(SubscriptionEvent event) noexcept;
 
+// Mirrors btp::CommandOutcome's shape: local_id/event always meaningful,
+// the rest filled from the correlated slot and the decoded SUBSCRIBE_RESULT
+// so a caller can build a UI message ("limited to X, requested Y" /
+// "rejected: <error>") straight off on_result()'s return, with no separate
+// lookup. Meaningful on Granted AND Rejected alike (both correlate to a real
+// slot); zero-valued on None (nothing correlated) and on Expired (the slot
+// is already gone by the time expire() reports it, same as
+// SubscriptionEvent::Expired never carrying a local_id today -- expire()
+// itself does not call on_result()).
 struct SubscriptionOutcome {
     SubscriptionEvent event;
-    std::uint32_t local_id;  // which slot -- 0 when event == None
+    std::uint32_t local_id;             // which slot -- 0 when event == None
+    std::uint32_t peer_source_id;       // the slot's own target, not the wire reply's envelope
+    std::uint32_t peer_boot_id;
+    std::uint16_t topic_id;
+    std::uint32_t requested_rate_millihz;  // what THIS node's subscribe() asked for
+    std::uint32_t effective_rate_millihz;  // SUBSCRIBE_RESULT's grant -- meaningful on Granted
+    std::uint8_t status;                   // ResultStatus -- meaningful on Rejected
+    std::uint16_t error_code;              // ResultError  -- meaningful on Rejected
 };
 
 // How long a Pending subscribe() / renew() waits for SUBSCRIBE_RESULT before
