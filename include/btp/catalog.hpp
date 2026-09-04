@@ -55,6 +55,28 @@ struct CatalogTopic {
     std::uint8_t flags;      // kTopicSubscribable
     std::uint32_t max_rate_millihz;
 
+    // Local SUBSCRIBE-granting policy for this SERVED topic -- commands.md
+    // section 3.3 has no wire field for either (only max_rate_millihz
+    // travels in a TopicRecord), so neither round-trips through write_topics()
+    // / ingest(): a consumer's own CatalogTopic always reads 0 for both, same
+    // as a topic add_topic()'s trailing rate-policy arguments were left
+    // default on. SubscriptionTable::handle_subscribe() is what actually
+    // reads them (library 2.40.0):
+    //   min_rate_millihz: the slowest rate this producer is willing to
+    //     schedule -- a request resolving under it is REJECTED/
+    //     INVALID_ARGUMENT rather than silently granted faster, since
+    //     commands.md section 4 forbids answering above the REQUESTED rate
+    //     (clamping up is not an option, so the only honest answers are
+    //     "reject" or "grant slower than the client can use"). 0 disables
+    //     the floor.
+    //   default_rate_millihz: the cap applied when max_rate_millihz is 0 (a
+    //     non-periodic topic, delivered on events rather than a fixed
+    //     cadence) -- keeps SUBSCRIBE_RESULT from echoing an arbitrary
+    //     client-requested number back as a promise this producer never
+    //     makes. 0 means no cap for a non-periodic topic.
+    std::uint32_t min_rate_millihz;
+    std::uint32_t default_rate_millihz;
+
     const FieldSpec* fields;
     std::size_t field_count;
 
@@ -132,6 +154,11 @@ public:
     // samples) has no fields by definition, and write_topics() already handles
     // an empty field loop correctly. Pass `fields = nullptr` for one of these;
     // a non-null `fields` with field_count 0 is accepted too (just unused).
+    //
+    // `min_rate_millihz` / `default_rate_millihz` (both default 0, i.e. "no
+    // policy") are SubscriptionTable::handle_subscribe()'s local granting
+    // policy for this topic -- see CatalogTopic's own comment; neither is a
+    // wire field.
     //   Ok                 -- stored.
     //   BufferTooSmall     -- a pool is full.
     //   InvalidArgument    -- `fields` null while field_count is non-zero, a
@@ -139,8 +166,9 @@ public:
     MessageError add_topic(std::uint16_t topic_id, std::uint16_t schema_version,
                            TelemetryEncoding encoding, bool subscribable,
                            std::uint32_t max_rate_millihz, const char* name,
-                           const FieldRecord* fields,
-                           std::size_t field_count) noexcept;
+                           const FieldRecord* fields, std::size_t field_count,
+                           std::uint32_t min_rate_millihz = 0U,
+                           std::uint32_t default_rate_millihz = 0U) noexcept;
 
     // The common case: a static FieldRecord[] whose length is deduced, PackedLe,
     // subscribable, no rate cap.
@@ -150,9 +178,12 @@ public:
                            const char* name, const FieldRecord (&fields)[N],
                            TelemetryEncoding encoding = TelemetryEncoding::PackedLe,
                            bool subscribable = true,
-                           std::uint32_t max_rate_millihz = 0U) noexcept {
+                           std::uint32_t max_rate_millihz = 0U,
+                           std::uint32_t min_rate_millihz = 0U,
+                           std::uint32_t default_rate_millihz = 0U) noexcept {
         return add_topic(topic_id, schema_version, encoding, subscribable,
-                         max_rate_millihz, name, fields, N);
+                         max_rate_millihz, name, fields, N, min_rate_millihz,
+                         default_rate_millihz);
     }
 
     // The chained alternative to naming a FieldRecord[] and calling
@@ -341,6 +372,19 @@ public:
                    is_nullable);
     }
 
+    // SubscriptionTable::handle_subscribe()'s local granting policy for this
+    // topic (see CatalogTopic's own comment) -- neither is a wire field, so
+    // unlike every method above these two do not affect what end() actually
+    // serialises, only what a later SUBSCRIBE against this topic resolves to.
+    TopicBuilder& min_rate(std::uint32_t min_rate_millihz) noexcept {
+        min_rate_millihz_ = min_rate_millihz;
+        return *this;
+    }
+    TopicBuilder& default_rate(std::uint32_t default_rate_millihz) noexcept {
+        default_rate_millihz_ = default_rate_millihz;
+        return *this;
+    }
+
     // Commits the buffered fields into the Catalog with one add_topic()
     // call. Ok on success; otherwise the same errors add_topic() documents,
     // plus whatever a chain call already stuck (CountTooLarge if a chain
@@ -350,7 +394,8 @@ public:
         if (error_ != MessageError::Ok) return error_;
         error_ = catalog_->add_topic(topic_id_, schema_version_, encoding_,
                                      subscribable_, max_rate_millihz_, name_,
-                                     fields_, count_);
+                                     fields_, count_, min_rate_millihz_,
+                                     default_rate_millihz_);
         return error_;
     }
 
@@ -368,6 +413,8 @@ private:
           encoding_(encoding),
           subscribable_(subscribable),
           max_rate_millihz_(max_rate_millihz),
+          min_rate_millihz_(0U),
+          default_rate_millihz_(0U),
           count_(0U),
           error_(MessageError::Ok) {}
 
@@ -389,6 +436,8 @@ private:
     TelemetryEncoding encoding_;
     bool subscribable_;
     std::uint32_t max_rate_millihz_;
+    std::uint32_t min_rate_millihz_;
+    std::uint32_t default_rate_millihz_;
     FieldRecord fields_[kMaxFields];
     std::size_t count_;
     MessageError error_;

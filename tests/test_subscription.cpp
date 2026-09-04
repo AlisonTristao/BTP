@@ -36,6 +36,7 @@ using btp::ClientSubscription;
 using btp::ControlResult;
 using btp::Header;
 using btp::MessageError;
+using btp::ResultError;
 using btp::ResultStatus;
 using btp::Subscribe;
 using btp::SubscribeResult;
@@ -56,6 +57,20 @@ btp::StaticCatalog<> make_catalog() {
                  /*max_rate_millihz=*/5000U, "capped", kSchema, 1U);
     cat.add_topic(0x0202U, 1U, btp::TelemetryEncoding::PackedLe, /*subscribable=*/false,
                  0U, "private", kSchema, 1U);
+    return cat;
+}
+
+// A second served catalogue exercising min_rate_millihz / default_rate_millihz
+// (library 2.40.0): 0x0303 is non-periodic (max=0) with a 2000 mHz nominal
+// default; 0x0404 has a 5000 mHz floor and no cap at all.
+btp::StaticCatalog<> make_catalog_with_rate_policy() {
+    btp::StaticCatalog<> cat;
+    cat.add_topic(0x0303U, 1U, btp::TelemetryEncoding::PackedLe, /*subscribable=*/true,
+                 /*max_rate_millihz=*/0U, "non_periodic", kSchema, 1U,
+                 /*min_rate_millihz=*/0U, /*default_rate_millihz=*/2000U);
+    cat.add_topic(0x0404U, 1U, btp::TelemetryEncoding::PackedLe, /*subscribable=*/true,
+                 /*max_rate_millihz=*/0U, "floored", kSchema, 1U,
+                 /*min_rate_millihz=*/5000U, /*default_rate_millihz=*/0U);
     return cat;
 }
 
@@ -169,6 +184,111 @@ void test_table_capacity_exhausted() {
     CHECK(b.status == static_cast<std::uint8_t>(ResultStatus::Success));
     CHECK(c.status != static_cast<std::uint8_t>(ResultStatus::Success));
     CHECK(c.subscription_id == 0U);
+}
+
+// ---------------------------------------------------------------------------
+// Rate policy (library 2.40.0): default_rate_millihz caps a non-periodic
+// topic (max_rate_millihz == 0) the same way max_rate_millihz caps a
+// periodic one; min_rate_millihz rejects outright rather than granting a
+// rate the client asked to go faster than, never slower.
+// ---------------------------------------------------------------------------
+void test_table_default_rate_caps_a_non_periodic_topic() {
+    TableFixture<4> f;
+    const auto catalog = make_catalog_with_rate_policy();
+
+    SubscribeResult result = {};
+    f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U),
+                             make_request(0x0303U, /*rate=*/50000U), 0U, &result);
+    CHECK(result.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(result.effective_rate_millihz == 2000U);  // clamped to the default, not the ask
+
+    // A request already under the default is granted as asked -- the default
+    // is a cap, not a floor.
+    SubscribeResult slow = {};
+    f.table.handle_subscribe(catalog, make_header(2U, 2U, 1U),
+                             make_request(0x0303U, /*rate=*/500U), 0U, &slow);
+    CHECK(slow.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(slow.effective_rate_millihz == 500U);
+}
+
+void test_table_rejects_rate_below_minimum() {
+    TableFixture<4> f;
+    const auto catalog = make_catalog_with_rate_policy();
+
+    SubscribeResult below = {};
+    f.table.handle_subscribe(catalog, make_header(1U, 2U, 1U),
+                             make_request(0x0404U, /*rate=*/1000U), 0U, &below);
+    CHECK(below.status == static_cast<std::uint8_t>(ResultStatus::Rejected));
+    CHECK(below.error_code == static_cast<std::uint16_t>(ResultError::InvalidArgument));
+    CHECK(below.subscription_id == 0U);
+    // The rejection never touched the slot table -- 0x0404 has no subscriber.
+    CHECK(f.table.subscriber_count(0x0404U) == 0U);
+
+    // At/above the floor, no cap at all (default_rate_millihz is 0 here) --
+    // granted exactly as requested.
+    SubscribeResult at_floor = {};
+    f.table.handle_subscribe(catalog, make_header(1U, 2U, 2U),
+                             make_request(0x0404U, /*rate=*/9000U), 0U, &at_floor);
+    CHECK(at_floor.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(at_floor.effective_rate_millihz == 9000U);
+}
+
+// ---------------------------------------------------------------------------
+// Introspection (library 2.40.0): subscriber_count() / aggregate_rate_millihz()
+// read back the granted slots for a caller's own observability, without a
+// parallel table of its own.
+// ---------------------------------------------------------------------------
+void test_table_subscriber_count_and_aggregate_rate() {
+    TableFixture<4> f;
+    const auto catalog = make_catalog();
+
+    CHECK(f.table.subscriber_count(0x0101U) == 0U);
+    CHECK(f.table.aggregate_rate_millihz(0x0101U) == 0U);
+
+    SubscribeResult a = {}, b = {};
+    f.table.handle_subscribe(catalog, make_header(1U, 1U, 1U),
+                             make_request(0x0101U, /*rate=*/1000U), 0U, &a);
+    f.table.handle_subscribe(catalog, make_header(2U, 2U, 1U),
+                             make_request(0x0101U, /*rate=*/3000U), 0U, &b);
+
+    CHECK(f.table.subscriber_count(0x0101U) == 2U);
+    // 5000 is the topic's own cap (make_catalog()); both requests -- 1000 and
+    // 3000 -- resolve under it, so the aggregate is the faster of the two, not
+    // the cap.
+    CHECK(f.table.aggregate_rate_millihz(0x0101U) == 3000U);
+    CHECK(f.table.subscriber_count(0x0202U) == 0U);  // a different topic
+}
+
+// ---------------------------------------------------------------------------
+// Reboot awareness (library 2.40.0): a SUBSCRIBE from a source_id already
+// holding subscriptions under a DIFFERENT boot_id evicts those first -- a
+// rebooted peer has no session left to keep publishing for.
+// ---------------------------------------------------------------------------
+void test_table_reboot_evicts_subscriptions_under_the_old_boot_id() {
+    TableFixture<2> f;
+    const auto catalog = make_catalog();
+
+    SubscribeResult first_boot = {};
+    f.table.handle_subscribe(catalog, make_header(1U, /*boot=*/2U, 1U),
+                             make_request(0x0101U), 0U, &first_boot);
+    SubscribeResult other_peer = {};
+    f.table.handle_subscribe(catalog, make_header(9U, 9U, 1U),
+                             make_request(0x0101U), 0U, &other_peer);
+    CHECK(first_boot.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(other_peer.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(f.table.subscriber_count(0x0101U) == 2U);  // the table is now full (2 slots)
+
+    // source_id 1 comes back with a NEW boot_id: its old subscription is
+    // evicted before this one is even looked up, so there IS a free slot for
+    // it despite the table's capacity never growing.
+    SubscribeResult new_boot = {};
+    f.table.handle_subscribe(catalog, make_header(1U, /*boot=*/3U, 1U),
+                             make_request(0x0101U), 0U, &new_boot);
+    CHECK(new_boot.status == static_cast<std::uint8_t>(ResultStatus::Success));
+    CHECK(new_boot.subscription_id != first_boot.subscription_id);
+    // Still 2: the old (source=1, boot=2) slot is gone, replaced by
+    // (source=1, boot=3); (source=9, boot=9) is untouched.
+    CHECK(f.table.subscriber_count(0x0101U) == 2U);
 }
 
 void test_table_unsubscribe_absent_or_foreign_is_success_but_a_no_op() {
@@ -436,6 +556,10 @@ int main() {
     test_table_rejects_non_subscribable_or_unknown_topic();
     test_table_renewal_reuses_the_subscription_id();
     test_table_capacity_exhausted();
+    test_table_default_rate_caps_a_non_periodic_topic();
+    test_table_rejects_rate_below_minimum();
+    test_table_subscriber_count_and_aggregate_rate();
+    test_table_reboot_evicts_subscriptions_under_the_old_boot_id();
     test_table_unsubscribe_absent_or_foreign_is_success_but_a_no_op();
     test_table_expire_frees_lapsed_leases();
     test_table_due_cadence_and_fastest_subscriber_wins();

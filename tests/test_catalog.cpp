@@ -115,6 +115,49 @@ void test_add_and_query() {
                         bad, 2U) == MessageError::InvalidArgument);
 }
 
+// min_rate_millihz / default_rate_millihz (library 2.40.0) are local
+// SUBSCRIBE-granting policy for SubscriptionTable::handle_subscribe() (see
+// btp/subscription.hpp) -- CatalogTopic carries them, but neither is a wire
+// field: write_topics() never emits them and ingest() always reads back 0,
+// even when the producer side set both.
+void test_rate_policy_is_local_and_never_on_the_wire() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.add_topic(0x0101U, 3U, TelemetryEncoding::PackedLe, true,
+                        /*max_rate_millihz=*/100000U, "drive_status", kDriveStatus, 4U,
+                        /*min_rate_millihz=*/1000U,
+                        /*default_rate_millihz=*/5000U) == MessageError::Ok);
+    const CatalogTopic* t = cat.topic(0x0101U);
+    CHECK(t != nullptr);
+    CHECK(t->min_rate_millihz == 1000U);
+    CHECK(t->default_rate_millihz == 5000U);
+
+    // The template array-form overload and the TopicBuilder chain both reach
+    // the same two trailing arguments.
+    CHECK(cat.add_topic(0x0102U, 1U, "templated", kDriveStatus,
+                        TelemetryEncoding::PackedLe, /*subscribable=*/true,
+                        /*max_rate_millihz=*/0U, /*min_rate_millihz=*/200U,
+                        /*default_rate_millihz=*/300U) == MessageError::Ok);
+    const CatalogTopic* t2 = cat.topic(0x0102U);
+    CHECK(t2 != nullptr && t2->min_rate_millihz == 200U && t2->default_rate_millihz == 300U);
+
+    CHECK(cat.topic(0x0103U, 1U, "built").f32("x").min_rate(10U).default_rate(20U).end() ==
+          MessageError::Ok);
+    const CatalogTopic* t3 = cat.topic(0x0103U);
+    CHECK(t3 != nullptr && t3->min_rate_millihz == 10U && t3->default_rate_millihz == 20U);
+
+    // Round-trip: a consumer's ingest()ed copy never carries either.
+    std::uint8_t wire[1024];
+    const std::size_t n = serialise(cat, wire, sizeof(wire));
+    CHECK(n != 0U);
+    btp::StaticCatalog<> consumer;
+    CHECK(consumer.ingest(wire, n) == MessageError::Ok);
+    const CatalogTopic* rt = consumer.topic(0x0101U);
+    CHECK(rt != nullptr);
+    CHECK(rt->max_rate_millihz == 100000U);  // the one rate field that IS wire
+    CHECK(rt->min_rate_millihz == 0U);
+    CHECK(rt->default_rate_millihz == 0U);
+}
+
 // A body-only topic (docs/commands.md section 3.3: OpaqueBytes/Utf8/
 // JsonUtf8/CsvUtf8 carry a raw document, not field-structured samples) has
 // field_count == 0 by definition -- add_topic() accepts that, and
@@ -526,6 +569,7 @@ void test_source_info_round_trips() {
 
 int main() {
     test_add_and_query();
+    test_rate_policy_is_local_and_never_on_the_wire();
     test_body_only_topic();
     test_schema_helpers();
     test_manifest_roundtrip();

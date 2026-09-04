@@ -133,7 +133,9 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
                                 TelemetryEncoding encoding, bool subscribable,
                                 std::uint32_t max_rate_millihz, const char* name,
                                 const FieldRecord* fields,
-                                std::size_t field_count) noexcept {
+                                std::size_t field_count,
+                                std::uint32_t min_rate_millihz,
+                                std::uint32_t default_rate_millihz) noexcept {
     // A null `fields` is only invalid when it would actually be read (some
     // field_count > 0); field_count == 0 alone describes a legitimate
     // body-only topic (OpaqueBytes/Utf8/JsonUtf8/CsvUtf8) and is accepted --
@@ -171,6 +173,8 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
     t.encoding = static_cast<std::uint8_t>(encoding);
     t.flags = subscribable ? kTopicSubscribable : 0U;
     t.max_rate_millihz = max_rate_millihz;
+    t.min_rate_millihz = min_rate_millihz;
+    t.default_rate_millihz = default_rate_millihz;
     t.fields = &field_pool_[field_pool_used_];
     t.field_count = field_count;
     t.name = intern(name);
@@ -280,6 +284,13 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
         t.encoding = topic.encoding;
         t.flags = topic.flags;
         t.max_rate_millihz = topic.max_rate_millihz;
+        // No wire field for either -- ingest() never learns a producer's own
+        // SUBSCRIBE-granting policy, only what it publishes (see CatalogTopic's
+        // own comment). Zeroed explicitly: topics_[] storage is reused across
+        // clear()/ingest() calls, and a stale non-zero value left over from a
+        // topic add_topic() populated here before would otherwise leak through.
+        t.min_rate_millihz = 0U;
+        t.default_rate_millihz = 0U;
         t.fields = &field_pool_[field_pool_used_];
         t.name = intern(topic.name.data, topic.name.size);
         t.field_names = keep_names ? &name_ptr_pool_[name_ptr_used_] : nullptr;

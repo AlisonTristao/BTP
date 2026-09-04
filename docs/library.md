@@ -3162,14 +3162,25 @@ the ones that are -- returning how many it actually sent.
 
 `receive()` answers a `SUBSCRIBE` against the served catalogue --
 `NodeRx::SubscriptionServed` -- checking the topic is subscribable and
-clamping `effective_rate_millihz` to its `max_rate_millihz` (0 = uncapped); a
-second `SUBSCRIBE` from the same requester for the same topic is a RENEWAL
-(commands.md §4.3) and reuses the `subscription_id`. `table.due(topic_id,
-now_ms)` is true once any of that topic's *local* subscribers is due by its
-own granted rate -- the fastest one sets the cadence, and one `publish()`
-satisfies every subscriber of that topic at once; `note_published()` resets
-it. `UNSUBSCRIBE` answers the same way; removing an absent subscription is
-still success (commands.md §4.4).
+resolving `effective_rate_millihz` against its local rate policy (2.40.0):
+capped at `max_rate_millihz` when set, else at `default_rate_millihz` (the
+nominal rate for a non-periodic topic); a request resolving under
+`min_rate_millihz` -- when set -- is REJECTED/INVALID_ARGUMENT rather than
+granted anyway (§4's MUST NOT allows clamping down, never up). All three are
+`Catalog::add_topic()`'s trailing arguments (or `TopicBuilder::min_rate()` /
+`.default_rate()`) -- local policy only, none is a wire field. A second
+`SUBSCRIBE` from the same requester for the same topic is a RENEWAL
+(commands.md §4.3) and reuses the `subscription_id`. Before any of that,
+every OTHER subscription this same `source_id` holds under a DIFFERENT
+`boot_id` is evicted -- a rebooted peer has no session left to keep
+publishing for. `table.due(topic_id, now_ms)` is true once any of that
+topic's *local* subscribers is due by its own granted rate -- the fastest
+one sets the cadence, and one `publish()` satisfies every subscriber of that
+topic at once; `note_published()` resets it. `UNSUBSCRIBE` answers the same
+way; removing an absent subscription is still success (commands.md §4.4).
+`subscriber_count(topic_id)` / `aggregate_rate_millihz(topic_id)` (2.40.0)
+read back the granted slots for a caller's own observability (e.g. a
+per-topic STATUS block) without a parallel table of its own.
 
 ```cpp
 // consumer:

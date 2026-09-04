@@ -86,18 +86,32 @@ public:
     bool valid() const noexcept { return slots_ != nullptr && slot_count_ != 0U; }
     std::size_t slot_count() const noexcept { return slot_count_; }
 
-    // Handle one SUBSCRIBE against `catalog` (a catalogue this node SERVES --
-    // checks the topic is subscribable and clamps effective_rate to its
-    // max_rate_millihz, 0 meaning uncapped). `header` is the SUBSCRIBE
+    // Handle one SUBSCRIBE against `catalog` (a catalogue this node SERVES).
+    // The granted rate follows commands.md section 4 plus CatalogTopic's own
+    // local policy (library 2.40.0): capped at max_rate_millihz when set,
+    // else at default_rate_millihz (a non-periodic topic's nominal rate);
+    // requested_rate_millihz resolving under min_rate_millihz -- when set --
+    // is REJECTED/INVALID_ARGUMENT instead of granted anyway (section 4 forbids
+    // answering above what was requested, so "grant slower" is not an option
+    // once the client's own floor is not met). `header` is the SUBSCRIBE
     // frame's envelope; its source_id / boot_id / sequence go into the
     // RequestRef, the same way btp::Session::build_hello_result reads its
-    // request's header. A second SUBSCRIBE from the same
-    // (header.source_id, header.boot_id) for the same topic_id is a RENEWAL
-    // -- it reuses the existing subscription_id and does not reset its
-    // publish cadence (docs/commands.md 4.3). Always fills *result_out; a
-    // rejection (unknown / non-subscribable topic, no free slot) is a normal
-    // SUBSCRIBE_RESULT with status != Success, not a different code path --
-    // the Node sends it either way.
+    // request's header.
+    //
+    // Before any of that: every OTHER subscription this same source_id holds
+    // under a DIFFERENT boot_id is evicted first (library 2.40.0) -- a peer
+    // that rebooted has no session to keep publishing for, the same "PASSO 6"
+    // rule an application-level responder would otherwise have to re-implement
+    // (see docs/library.md's SubscriptionTable section). This runs on every
+    // SUBSCRIBE, independent of whether THIS particular request is granted.
+    //
+    // A second SUBSCRIBE from the same (header.source_id, header.boot_id) for
+    // the same topic_id is a RENEWAL -- it reuses the existing subscription_id
+    // and does not reset its publish cadence (docs/commands.md 4.3). Always
+    // fills *result_out; a rejection (unknown / non-subscribable topic, rate
+    // outside policy, no free slot) is a normal SUBSCRIBE_RESULT with
+    // status != Success, not a different code path -- the Node sends it
+    // either way.
     void handle_subscribe(const Catalog& catalog, const Header& header,
                           const Subscribe& request, std::uint64_t now_ms,
                           SubscribeResult* result_out) noexcept;
@@ -126,7 +140,27 @@ public:
     // regardless of each one's own requested rate.
     void note_published(std::uint16_t topic_id, std::uint64_t now_ms) noexcept;
 
+    // ----- introspection (library 2.40.0) -----------------------------------
+    // Read-only queries over the currently granted slots -- for a caller
+    // reporting per-topic observability (e.g. a STATUS message's per-topic
+    // subscriber_count / effective_rate block) without hand-rolling its own
+    // parallel walk of the table. Neither call mutates anything or expires a
+    // lapsed slot itself -- call expire(now_ms) first if a precise "right
+    // now" count matters; otherwise this reads whatever expire() last left.
+
+    // Number of active subscriptions currently granted for `topic_id`, across
+    // every requester.
+    std::size_t subscriber_count(std::uint16_t topic_id) const noexcept;
+
+    // The fastest (highest) effective_rate_millihz among `topic_id`'s active
+    // subscriptions -- a slow subscriber never throttles a fast one, the same
+    // rule due()/note_published() already apply. 0 when `topic_id` has no
+    // active subscription.
+    std::uint32_t aggregate_rate_millihz(std::uint16_t topic_id) const noexcept;
+
 private:
+    void evict_other_boots(std::uint32_t source_id, std::uint32_t boot_id) noexcept;
+
     SubscriptionRecord* find(std::uint32_t source_id, std::uint32_t boot_id,
                              std::uint16_t topic_id) noexcept;
     SubscriptionRecord* find_by_id(std::uint32_t subscription_id) noexcept;

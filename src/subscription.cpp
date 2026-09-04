@@ -63,6 +63,17 @@ SubscriptionRecord* SubscriptionTable::allocate() noexcept {
     return nullptr;
 }
 
+void SubscriptionTable::evict_other_boots(std::uint32_t source_id,
+                                          std::uint32_t boot_id) noexcept {
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        SubscriptionRecord& s = slots_[i];
+        if (s.used_ && s.requester_source_id_ == source_id &&
+            s.requester_boot_id_ != boot_id) {
+            s = SubscriptionRecord();
+        }
+    }
+}
+
 void SubscriptionTable::handle_subscribe(const Catalog& catalog,
                                          const Header& header,
                                          const Subscribe& request,
@@ -74,10 +85,35 @@ void SubscriptionTable::handle_subscribe(const Catalog& catalog,
     result_out->request.request_boot_id = header.boot_id;
     result_out->request.reply_to_sequence = header.sequence;
 
+    // A rebooted peer has no session left to keep publishing for -- drop
+    // every OTHER boot_id's subscription of this source_id before granting
+    // or renewing this one, independent of this request's own outcome.
+    evict_other_boots(header.source_id, header.boot_id);
+
     const CatalogTopic* topic = catalog.topic(request.topic_id);
     if (topic == nullptr || (topic->flags & kTopicSubscribable) == 0U) {
         result_out->status = static_cast<std::uint8_t>(ResultStatus::Rejected);
         result_out->error_code = static_cast<std::uint16_t>(ResultError::NotFound);
+        return;
+    }
+
+    // A periodic topic is capped by its own max_rate_millihz; a non-periodic
+    // one (max == 0) by the local default_rate_millihz, if any -- either way
+    // never above what the client asked for (commands.md section 4's MUST
+    // NOT). Resolved BEFORE touching the slot table: a request landing under
+    // min_rate_millihz -- when set -- is rejected outright rather than
+    // granted at a rate slower than the client can use, the same "reject,
+    // don't clamp up" rule cap application already follows in the other
+    // direction.
+    const std::uint32_t cap = (topic->max_rate_millihz != 0U)
+                                  ? topic->max_rate_millihz
+                                  : topic->default_rate_millihz;
+    std::uint32_t effective_rate = request.requested_rate_millihz;
+    if (cap != 0U && effective_rate > cap) effective_rate = cap;
+    if (topic->min_rate_millihz != 0U && effective_rate < topic->min_rate_millihz) {
+        result_out->status = static_cast<std::uint8_t>(ResultStatus::Rejected);
+        result_out->error_code =
+            static_cast<std::uint16_t>(ResultError::InvalidArgument);
         return;
     }
 
@@ -96,12 +132,6 @@ void SubscriptionTable::handle_subscribe(const Catalog& catalog,
         slot->subscription_id_ = next_id_++;
         slot->due_at_ms_ = now_ms;  // due right away; a renewal leaves this alone
     }
-
-    const std::uint32_t cap = topic->max_rate_millihz;  // 0 == uncapped
-    const std::uint32_t effective_rate =
-        (cap != 0U && cap < request.requested_rate_millihz)
-            ? cap
-            : request.requested_rate_millihz;
 
     slot->used_ = true;
     slot->requester_source_id_ = header.source_id;
@@ -159,6 +189,27 @@ void SubscriptionTable::note_published(std::uint16_t topic_id,
             s.due_at_ms_ = now_ms + period_ms(s.effective_rate_millihz_);
         }
     }
+}
+
+std::size_t SubscriptionTable::subscriber_count(std::uint16_t topic_id) const noexcept {
+    std::size_t count = 0U;
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        if (slots_[i].used_ && slots_[i].topic_id_ == topic_id) ++count;
+    }
+    return count;
+}
+
+std::uint32_t SubscriptionTable::aggregate_rate_millihz(
+    std::uint16_t topic_id) const noexcept {
+    std::uint32_t fastest = 0U;
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        const SubscriptionRecord& s = slots_[i];
+        if (s.used_ && s.topic_id_ == topic_id &&
+            s.effective_rate_millihz_ > fastest) {
+            fastest = s.effective_rate_millihz_;
+        }
+    }
+    return fastest;
 }
 
 // ===========================================================================
