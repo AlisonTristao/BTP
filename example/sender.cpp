@@ -90,10 +90,7 @@ namespace {
     // path, so a slow action belongs on a task of its own that answers once
     // it's done. `outcome` arrives pre-set to Success / no message / no
     // result -- good news needs no field touched at all.
-    void handle_command(void* /*ctx*/, std::uint16_t action_id,
-                        std::uint16_t /*action_version*/,
-                        btp::ByteView /*parameters*/,
-                        btp::NodeActionOutcome* outcome) {
+    void handle_command(void* /*ctx*/, std::uint16_t action_id, std::uint16_t /*action_version*/, btp::ByteView /*parameters*/, btp::NodeActionOutcome* outcome) {
         switch (action_id) {
             case 0x0001U:  // e.g. "stop" -- no parameters
                 // ... actually stop the robot ...
@@ -112,35 +109,25 @@ namespace {
     // receive() itself, so answering back needs nothing threaded in via
     // `ctx`. Here it just echoes the bytes back as TERMINAL_OUT -- a real
     // shell would feed `payload` to a line editor instead.
-    void handle_terminal_in(void* /*ctx*/, btp::Node& node,
-                            const btp::Header& /*header*/, btp::ByteView payload,
-                            std::uint64_t now_ms) {
-        node.send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
-                 payload.data, payload.size, now_ms * 1000ULL);
+    void handle_terminal_in(void* /*ctx*/, btp::Node& node, const btp::Header& /*header*/, btp::ByteView payload, std::uint64_t now_ms) {
+        node.send(btp::MessageType::Terminal, btp::object_id::kTerminalOut, payload.data, payload.size, now_ms * 1000ULL);
     }
 
     // EndpointSealFn -- `context` is kDemoAeadKey. CIPHER_ID on `header` is
     // already AesGcm (fragmenting_flags() never sets those bits, and AesGcm
     // is 0), so aead_seal() dispatches there on its own; the KEY is the only
     // thing living here, never inside BTP itself.
-    bool seal_message(void* context, const btp::Header& header,
-                      std::uint16_t payload_size, const std::uint8_t* plaintext,
-                      std::uint8_t* out) {
-        const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
-                               btp::kAesGcmKeySize};
-        return btp::aead_seal(key, header, payload_size, plaintext, out) ==
-               btp::AeadError::Ok;
+    bool seal_message(void* context, const btp::Header& header, std::uint16_t payload_size, const std::uint8_t* plaintext, std::uint8_t* out) {
+        const btp::AeadKey key{static_cast<const std::uint8_t*>(context), btp::kAesGcmKeySize};
+        return btp::aead_seal(key, header, payload_size, plaintext, out) == btp::AeadError::Ok;
     }
 
     // NodeOpenFn -- the mirror; same key, dispatched by whatever CIPHER_ID
     // the sender actually sealed with.
-    bool open_message(void* context, const btp::Header& header,
-                      std::uint16_t sealed_size, const std::uint8_t* sealed,
-                      std::uint8_t* out_plaintext) {
+    bool open_message(void* context, const btp::Header& header, std::uint16_t payload_size, const std::uint8_t* plaintext, std::uint8_t* out_plaintext) {
         const btp::AeadKey key{static_cast<const std::uint8_t*>(context),
                                btp::kAesGcmKeySize};
-        return btp::aead_open(key, header, sealed_size, sealed,
-                              out_plaintext) == btp::AeadError::Ok;
+        return btp::aead_open(key, header, payload_size, plaintext, out_plaintext) == btp::AeadError::Ok;
     }
 
     // The node hands every finished frame here. Fake: a real node transmits it.
@@ -155,18 +142,20 @@ namespace {
 }  // namespace
 
 int main() {
+    // The node's own configuration -- its identity, the transport it targets,
+    // and the callbacks it needs to send, seal, open, and handle commands /
     btp::NodeConfig cfg = {};
-    cfg.source_id = 0x00CAFE01U;                    // this robot    (non-zero)
-    // attention: to use criptography, you need count the boots
-    cfg.boot_id   = 0x0000B001U;                    // new each boot (non-zero)
-    cfg.transport = btp::TransportProfile::EspNow;
-    cfg.send      = &send_frame;
-    cfg.command   = &handle_command;                // StaticNode<> already owns the dedup cache
-    cfg.terminal  = &handle_terminal_in;
-    cfg.seal      = &seal_message;
-    cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);  // void* ctx never modifies it
-    cfg.open      = &open_message;
-    cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);
+    // config to set the node's identity, transport, and callbacks
+    cfg.source_id = 0x00CAFE01U;                                // this robot    (non-zero)
+    cfg.boot_id   = 0x0000B001U;                                // new each boot (non-zero) // attention: to use criptography, you need count the boots
+    cfg.transport = btp::kEspNowTransport;                      // frame/payload size ceiling the fragmenter targets -- kEspNowTransport 250/210, kSerialTransport 4096/4056, kUsbHidTransport 62/22, or your own btp::TransportLimits
+    cfg.send      = &send_frame;                                // function to send the frame using your trasport metod
+    cfg.command   = &handle_command;                            // function to handle the command request, the node will call it when a COMMAND_REQUEST arrives
+    cfg.terminal  = &handle_terminal_in;                        // function to handle the terminal input, the node will call it when a TERMINAL_IN arrives
+    cfg.seal      = &seal_message;                              // function to seal the message, the node will call it when a message needs to be sealed
+    cfg.open      = &open_message;                              // function to open the message, the node will call it when a message needs to be opened
+    cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);    // void* ctx never modifies it
+    cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);    // void* ctx never modifies it
 
     btp::StaticNode<> node(cfg);
 

@@ -72,7 +72,7 @@ int main() {
     // -----------------------------------------------------------------------
     btp::DecodedFrame decoded = {};
     const btp::Error err = btp::decode(wire, wire_size,
-                                       btp::TransportProfile::EspNow, &decoded);
+                                       btp::kEspNowTransport, &decoded);
     if (err != btp::Error::Ok) {
         std::printf("frame decode failed: %s\n", btp::error_string(err));
         return 1;

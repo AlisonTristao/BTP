@@ -143,7 +143,7 @@ int main() {
     btp::NodeConfig cfg = {};
     cfg.source_id = 0x00B0B0FEU;   // this device  (non-zero)
     cfg.boot_id   = 0x0000C0DEU;   // new each boot (non-zero)
-    cfg.transport = btp::TransportProfile::EspNow;
+    cfg.transport = btp::kEspNowTransport;
     cfg.send      = &send_frame;
     cfg.terminal  = &handle_terminal_out;
     cfg.seal      = &seal_message;

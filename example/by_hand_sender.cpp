@@ -137,7 +137,7 @@ int main() {
     const btp::Frame frame = { header, { body, body_size } };
     std::uint8_t wire[btp::kEspNowMaxFrameSize];
     std::size_t wire_size = 0;
-    const btp::Error err = btp::encode(frame, btp::TransportProfile::EspNow,
+    const btp::Error err = btp::encode(frame, btp::kEspNowTransport,
                                        wire, sizeof(wire), &wire_size);
     if (err != btp::Error::Ok) {
         std::printf("frame encode failed: %s\n", btp::error_string(err));
