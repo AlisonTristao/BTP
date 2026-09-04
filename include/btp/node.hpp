@@ -20,16 +20,23 @@
 // rest of the library: no internal allocation, noexcept, no I/O, no clock of
 // its own, no global state.
 //
-// EVERYTHING the node calls out to is a C-style function pointer in NodeConfig
-// (void* context + a plain function), never std::function / virtual:
+// EVERYTHING the node calls out to is a virtual method on btp::NodeConfig,
+// an abstract class YOU inherit from once (see below) -- never std::function,
+// never a bare ctx you cast back by hand at every call site. Internally the
+// node still bridges into btp::Endpoint / btp::Receiver's own C-style
+// function-pointer callbacks (they stay exactly as they always were); the
+// bridging thunks live here, written once, so no caller ever writes one.
 //
-//   send   one encoded frame -> your radio / UART / HID. Needed to send() or
-//          run a session; a receive-only node omits it.
-//   clock  (optional)  -> millis since boot; nullptr means you pass now_ms
-//   seal   (optional)  encrypt one logical payload; nullptr means cleartext.
-//                      The KEY lives in your seal function, never in BTP.
-//   open   (optional)  decrypt one received payload; nullptr means receive()
-//                      hands back the sealed bytes for you to open.
+//   send()   REQUIRED -- one encoded frame -> your radio / UART / HID. A
+//            receive-only node still implements it (return false).
+//   clock()  optional (has_clock() false by default) -> millis since boot;
+//            not overridden means you pass now_ms explicitly.
+//   seal()   optional (has_seal() false by default) -- encrypt one logical
+//            payload; not overridden means cleartext. The KEY lives in your
+//            override, never in BTP.
+//   open()   optional (has_open() false by default) -- decrypt one received
+//            payload; not overridden means receive() hands back the sealed
+//            bytes for you to open.
 //
 // OUT of scope, on purpose (docs/library.md chapter 11 still applies):
 //   * everything past HELLO_RESULT on the initiator side -- MANIFEST_REQUEST
@@ -64,47 +71,12 @@ namespace btp {
 class Node;  // NodeTerminalFn below needs the name before the class itself.
 
 // ---------------------------------------------------------------------------
-// Callbacks the node calls out to
+// Callbacks the node calls out to (independent of NodeConfig -- these stay
+// plain C-style function pointers: on_sample() / publish() / on_publish() /
+// on_terminal() / Node::enable_commands() are all post-construction escape
+// hatches on a live Node, not part of the NodeConfig an object is built
+// with, so there is no "your class" to attach a virtual method to.)
 // ---------------------------------------------------------------------------
-
-// Returns a monotonic millisecond reading -- millis() / esp_timer_get_time() /
-// 1000 on an MCU, QElapsedTimer::elapsed() under Qt, a counter in a test. May
-// be read from a timer ISR that increments a word; the node's own methods must
-// NOT be called from an ISR (btp::Receiver / btp::Session are not internally
-// synchronised, by design).
-using NodeClockFn = std::uint64_t (*)(void* ctx);
-
-// Decrypts ONE reassembled logical payload -- the mirror of EndpointSealFn.
-// `header` is the canonical logical header the receiver hands back (FRAGMENTED
-// cleared, fragment_index 0, fragment_count 1, ENCRYPTED still set).
-// `sealed_size` includes the trailing 16-octet AEAD tag; `out_plaintext` has
-// room for `sealed_size - 16`. Return false (tag mismatch, no key) and the
-// node drops the message. The KEY lives here (real: RadioSeal / bally-seal,
-// which selects it from header.source_id), never in BTP.
-using NodeOpenFn = bool (*)(void* ctx, const Header& header,
-                            std::uint16_t sealed_size,
-                            const std::uint8_t* sealed,
-                            std::uint8_t* out_plaintext);
-
-// Picks the seal for ONE automatic reply the node is about to send: a
-// SUBSCRIBE_RESULT / UNSUBSCRIBE_RESULT, a COMMAND_RESULT (a fresh one or a
-// DuplicateComplete replay), or a MANIFEST_DATA. `request_header` is the
-// ORIGINAL request's header -- source_id names who actually asked, unlike
-// the reply's own header, which always carries this node's own identity, so
-// this is the one place a hub-shaped node (several keys, one per relayed
-// peer or channel) can pick the matching key per reply instead of one key
-// for every automatic send. Leave both `*out_seal`/`*out_seal_ctx` at their
-// nullptr default to send this ONE reply in the clear, whatever cfg.seal is.
-//
-// Optional: nullptr (the default) means every automatic reply seals with
-// cfg.seal/cfg.seal_ctx, exactly as if this callback did not exist. Does NOT
-// apply to send() / send_with() / publish() / publish_named() -- those are
-// the caller's own sends, already covered by send_with()'s explicit seal
-// argument -- nor to an INITIATOR's own outgoing requests (connect() /
-// subscribe() / command() and their renewals), which have no "original
-// request" to classify by and always use cfg.seal.
-using NodeReplySealFn = void (*)(void* ctx, const Header& request_header,
-                                 EndpointSealFn* out_seal, void** out_seal_ctx);
 
 // Called by receive() for one TELEMETRY sample of a topic the attached learn
 // catalog knows. `reader` is positioned at the first field; pull values with
@@ -174,14 +146,59 @@ using NodeActionFn = void (*)(void* ctx, std::uint16_t action_id,
                               NodeActionOutcome* outcome);
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration -- an abstract class YOU inherit from
 // ---------------------------------------------------------------------------
+//
+// One class, one object, one lifetime: it holds this node's identity AND
+// every callback the node calls out to, as named virtual methods instead of
+// a bag of (function pointer, void* ctx) pairs. send() is the only one you
+// MUST override -- everything else defaults to "this axis is off", exactly
+// what leaving the matching field null meant before this class existed.
+//
+//   class RobotLink : public btp::NodeConfig {
+//   public:
+//       RobotLink(const AeadKey& key) : key_(key) {
+//           source_id = 0x00CAFE01U;
+//           boot_id   = 0x0000B001U;
+//           transport = btp::kEspNowTransport;
+//       }
+//       bool send(const std::uint8_t* frame, std::size_t n) override {
+//           return esp_now_send(peer_mac_, frame, n) == ESP_OK;
+//       }
+//       bool has_seal() const override { return true; }
+//       bool seal(const Header& h, std::uint16_t n, const std::uint8_t* pt,
+//                 std::uint8_t* out) override {
+//           return aead_seal(key_, h, n, pt, out) == AeadError::Ok;
+//       }
+//       // has_open()/open() the same, if this node also receives.
+//   private:
+//       AeadKey key_;
+//   };
+//
+//   RobotLink link(my_key);
+//   btp::StaticNode<> node(link);   // node holds a REFERENCE to link -- see
+//                                   // the constructor's own comment on
+//                                   // ownership/lifetime below.
+//
+// A class that both inherits NodeConfig AND owns its Node as a member is the
+// usual shape (example/receiver.cpp, example/sender.cpp): base-before-member
+// construction order means `*this` is already a live NodeConfig by the time
+// the Node member's constructor runs, and members outlive... survive their
+// own destructor running BEFORE the base's, so the reference stays valid for
+// the Node's entire lifetime with no manual bookkeeping. Don't call any
+// method on the Node you're mid-constructing from your own mem-initializers
+// or constructor body -- store, don't dispatch, same rule the Node's own
+// constructor follows (see Node::Node's comment).
+class NodeConfig {
+public:
+    virtual ~NodeConfig() = default;
 
-struct NodeConfig {
     // Identity. Both non-zero (BTP reserves 0 for each); source_id is usually
-    // derived from the MAC, boot_id changes every reboot.
-    std::uint32_t source_id;
-    std::uint32_t boot_id;
+    // derived from the MAC, boot_id changes every reboot. Plain data, not
+    // behaviour -- set in your constructor (or any time before begin(), see
+    // above), no override needed.
+    std::uint32_t source_id = 0U;
+    std::uint32_t boot_id = 0U;
 
     // NOT "which transport" -- the node never touches your link. It is only
     // the frame/payload size ceiling the fragmenter targets, plus one policy
@@ -189,45 +206,121 @@ struct NodeConfig {
     // kSerialTransport 4096/4056, kUsbHidTransport 62/22, the last with
     // allow_encrypted false) if your link is one of those three, or build
     // your own TransportLimits to fit any other link's MTU.
-    TransportLimits transport;
+    TransportLimits transport{};
 
-    EndpointSendFn send;      // one encoded frame -> the wire. Needed to send()
-    void* send_ctx;           // or run a session; a receive-only node may omit it.
+    // ---- REQUIRED ----
+    // Hands one encoded frame to your radio / UART / HID. Needed to send()
+    // or run a session. A receive-only node still implements this -- return
+    // false unconditionally -- the same outcome an unset `send` produced
+    // before this class existed.
+    virtual bool send(const std::uint8_t* frame, std::size_t frame_size) = 0;
 
-    NodeClockFn clock;        // optional. nullptr -> pass now_ms to receive/tick.
-    void* clock_ctx;
+    // ---- OPTIONAL: every one of these defaults to "this axis is off",
+    // exactly what leaving the matching NodeConfig field null used to mean.
+    // Override has_X() alongside X() -- Node calls has_X() first and only
+    // calls X() when it says true, so a subclass that has nothing to add can
+    // leave both alone. ----
 
-    EndpointSealFn seal;      // optional. nullptr -> send() is cleartext.
-    void* seal_ctx;
+    // millis since boot -- millis() / esp_timer_get_time() / 1000 on an MCU,
+    // QElapsedTimer::elapsed() under Qt, a counter in a test. May be read
+    // from a timer ISR that increments a word; the node's own methods must
+    // NOT be called from an ISR (btp::Receiver / btp::Session are not
+    // internally synchronised, by design). has_clock() false (the default)
+    // means you pass now_ms explicitly to receive() / tick() / etc.
+    virtual bool has_clock() const noexcept { return false; }
+    virtual std::uint64_t clock() { return 0U; }
 
-    NodeOpenFn open;          // optional. nullptr -> receive() returns sealed bytes.
-    void* open_ctx;
+    // Encrypts ONE logical payload before it is fragmented; the mirror of
+    // open() below. has_seal() false (the default) means send() is
+    // cleartext. The KEY lives in your override, never in BTP.
+    virtual bool has_seal() const noexcept { return false; }
+    virtual bool seal(const Header& header, std::uint16_t payload_size,
+                      const std::uint8_t* plaintext, std::uint8_t* out) {
+        (void)header;
+        (void)payload_size;
+        (void)plaintext;
+        (void)out;
+        return false;
+    }
 
-    // optional. nullptr -> TERMINAL_IN / TERMINAL_OUT come back as
-    // NodeRx::Complete for the caller to route by hand, same as before
-    // on_terminal() existed. Wired straight from here by every Node (no
-    // extra storage needed, same as seal / open above); on_terminal(...)
-    // stays reachable to set or replace it after construction.
-    NodeTerminalFn terminal;
-    void* terminal_ctx;
+    // Decrypts ONE reassembled logical payload -- the mirror of seal() above.
+    // `header` is the canonical logical header the receiver hands back
+    // (FRAGMENTED cleared, fragment_index 0, fragment_count 1, ENCRYPTED
+    // still set). `sealed_size` includes the trailing 16-octet AEAD tag;
+    // `out_plaintext` has room for `sealed_size - 16`. Return false (tag
+    // mismatch, no key) and the node drops the message. has_open() false
+    // (the default) means receive() hands back the sealed bytes for you to
+    // open. The KEY lives here (real: RadioSeal / bally-seal, which selects
+    // it from header.source_id), never in BTP.
+    virtual bool has_open() const noexcept { return false; }
+    virtual bool open(const Header& header, std::uint16_t sealed_size,
+                      const std::uint8_t* sealed, std::uint8_t* out_plaintext) {
+        (void)header;
+        (void)sealed_size;
+        (void)sealed;
+        (void)out_plaintext;
+        return false;
+    }
 
-    // optional. nullptr -> COMMAND_REQUEST goes unanswered, same as before
-    // enable_commands() existed. Unlike terminal above, this ONLY takes
-    // effect on a StaticNode<> -- it owns the DedupCache this needs
-    // (commands_cache_) and wires it from here in its own constructor; a
-    // bare Node has no such storage to bind it to; call
-    // Node::enable_commands(cache, handler, ctx) yourself there instead, as
-    // always. enable_commands(handler, ctx) (StaticNode<> sugar) stays
-    // reachable to set or replace the handler after construction.
-    NodeActionFn command;
-    void* command_ctx;
+    // Called by receive() for a TERMINAL_IN / TERMINAL_OUT frame -- see
+    // Node::on_terminal()'s own comment for the parameters. has_terminal()
+    // false (the default) means the frame comes back as NodeRx::Complete for
+    // the caller to route by hand, same as before this class existed.
+    // Node::on_terminal() stays reachable to set or replace a handler after
+    // construction, independent of this.
+    virtual bool has_terminal() const noexcept { return false; }
+    virtual void terminal(Node& node, const Header& header, ByteView payload,
+                          std::uint64_t now_ms) {
+        (void)node;
+        (void)header;
+        (void)payload;
+        (void)now_ms;
+    }
 
-    // Optional: a caller building NodeConfig with a positional aggregate
-    // initializer (an existing one, or docs/library.md's own mockup) leaves
-    // this nullptr too -- see NodeReplySealFn's own comment for what that
-    // means.
-    NodeReplySealFn reply_seal;
-    void* reply_seal_ctx;
+    // Runs a Fresh COMMAND_REQUEST's action synchronously -- see
+    // NodeActionFn's own comment for the parameters. has_command() false
+    // (the default) means COMMAND_REQUEST goes unanswered. Unlike terminal()
+    // above, this ONLY takes effect on a StaticNode<> -- it owns the
+    // DedupCache this needs and wires it from here in its own constructor; a
+    // bare Node has no such storage to bind it to, and ignores this --
+    // call Node::enable_commands(cache, handler, ctx) yourself there
+    // instead, as always.
+    virtual bool has_command() const noexcept { return false; }
+    virtual void command(std::uint16_t action_id, std::uint16_t action_version,
+                         ByteView parameters, NodeActionOutcome* outcome) {
+        (void)action_id;
+        (void)action_version;
+        (void)parameters;
+        (void)outcome;
+    }
+
+    // Picks the seal for ONE automatic reply the node is about to send: a
+    // SUBSCRIBE_RESULT / UNSUBSCRIBE_RESULT, a COMMAND_RESULT (a fresh one or
+    // a DuplicateComplete replay), or a MANIFEST_DATA. `request_header` is
+    // the ORIGINAL request's header -- source_id names who actually asked,
+    // unlike the reply's own header, which always carries this node's own
+    // identity, so this is the one place a hub-shaped node (several keys,
+    // one per relayed peer or channel) can pick the matching key per reply
+    // instead of one key for every automatic send. Leave both
+    // `*out_seal`/`*out_seal_ctx` at their nullptr default (this method's own
+    // default body already does) to fall through to has_seal()/seal(); set
+    // `*out_seal` to send this ONE reply in the clear regardless, or to any
+    // OTHER raw EndpointSealFn (not necessarily this object's own seal() --
+    // that is what buys a hub several independently selectable keys without
+    // several NodeConfig objects).
+    //
+    // Does NOT apply to send() / send_with() / publish() / publish_named()
+    // -- those are the caller's own sends, already covered by send_with()'s
+    // explicit seal argument -- nor to an INITIATOR's own outgoing requests
+    // (connect() / subscribe() / command() and their renewals), which have
+    // no "original request" to classify by and always use
+    // has_seal()/seal().
+    virtual void reply_seal(const Header& request_header, EndpointSealFn* out_seal,
+                            void** out_seal_ctx) {
+        (void)request_header;
+        *out_seal = nullptr;
+        *out_seal_ctx = nullptr;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -273,11 +366,16 @@ const char* node_rx_string(NodeRx rx) noexcept;
 // Node
 // ---------------------------------------------------------------------------
 //
-//   btp::StaticNode<> node({source_id, boot_id, btp::kEspNowTransport,
-//                           &radio_send, nullptr,   // send
-//                           &clock_ms,   nullptr,   // clock
-//                           &seal_c,     nullptr,   // seal  (the key lives here)
-//                           &open_c,     nullptr}); // open
+//   class RobotLink : public btp::NodeConfig { ... };  // send() required,
+//                                                       // has_seal()/seal()
+//                                                       // etc. opt-in --
+//                                                       // see NodeConfig's
+//                                                       // own comment
+//   RobotLink link;
+//   link.source_id = source_id;
+//   link.boot_id = boot_id;
+//   link.transport = btp::kEspNowTransport;
+//   btp::StaticNode<> node(link);
 //   if (!node.begin()) { /* bad identity or storage */ }
 //
 //   // producer:
@@ -299,23 +397,33 @@ const char* node_rx_string(NodeRx rx) noexcept;
 
 class Node {
 public:
-    // `cfg` is copied in. The rest is caller-owned storage, exactly as
+    // The rest of the arguments are caller-owned storage, exactly as
     // btp::Receiver / btp::Endpoint expect it:
     //   slots / storage / slot_count / reassembly_timeout_ms  -> btp::Receiver
     //   rx_buffer / rx_capacity        the buffer receive() copies a completed
     //                                  logical message into (>= slot capacity)
     //   seal_scratch / seal_scratch_cap  the sealed copy a FRAGMENTED encrypted
     //                                  send is cut from; may be {nullptr, 0}
-    //                                  when `cfg.seal` is null or messages
-    //                                  never fragment
-    //   open_buffer / open_capacity    where `cfg.open` writes the plaintext
+    //                                  when `cfg.has_seal()` is false or
+    //                                  messages never fragment
+    //   open_buffer / open_capacity    where `cfg.open()` writes the plaintext
     //                                  (>= slot capacity); may be {nullptr, 0}
-    //                                  when `cfg.open` is null
+    //                                  when `cfg.has_open()` is false
     //   scratch_buffer / scratch_capacity  where serve_catalog() builds a
     //                                  MANIFEST_DATA and publish() a sample;
     //                                  may be {nullptr, 0} for a node that does
     //                                  neither
-    Node(const NodeConfig& cfg, ReassemblySlot* slots,
+    // `cfg` itself is stored by REFERENCE, not copied -- it must outlive the Node
+    // (the usual shape: your class inherits NodeConfig and holds the Node as
+    // its own member, see NodeConfig's own comment for why that is safe with
+    // no manual lifetime bookkeeping). This is also what replaces the old
+    // reconfigure() method: because identity/transport/callbacks are read
+    // from `cfg` live, at the point of each call, a caller whose identity is
+    // only known after something else exists just mutates its own
+    // source_id/boot_id/transport fields (a plain assignment, no Node method
+    // involved) any time before begin() -- no placeholder-then-reconfigure
+    // dance needed.
+    Node(NodeConfig& cfg, ReassemblySlot* slots,
          const ReassemblyStorage* storage, std::size_t slot_count,
          std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
          std::size_t rx_capacity, std::uint8_t* seal_scratch,
@@ -326,32 +434,12 @@ public:
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
-    // Replaces the whole external configuration (identity, transport, send /
-    // seal / open / reply_seal / terminal / command) without touching the
-    // receiver's storage, any attached session/catalogue/subscription/
-    // command state, or frames_tx(). The one way to change it after
-    // construction -- the constructor is the only other place `cfg` is read.
-    // Meant for a caller whose identity or send callback is only known
-    // after something else exists (e.g. TxScheduler configured later than
-    // the Node itself is constructed): build with a placeholder NodeConfig,
-    // reconfigure() with the real one once it is known, THEN begin().
-    //
-    // Calling it again later (already begin()'d, maybe already receiving)
-    // is not guarded -- the same trust the rest of this library places in
-    // the caller. begin() afterward re-runs endpoint.configure(), which
-    // resets the sequence counter to 1 (btp::Endpoint::configure()'s own
-    // documented behaviour) -- correct for a fresh identity, a corruption of
-    // any in-flight correlation (a session, an outstanding subscribe()/
-    // command()) if the identity did not actually change. A hub re-keying a
-    // still-idle node (no session armed, nothing outstanding) is the
-    // intended later-call case; mid-flight is the caller's call to make.
-    void reconfigure(const NodeConfig& cfg) noexcept { cfg_ = cfg; }
-
     // endpoint.configure() + receiver.valid() + (session enabled?
-    // session.valid()). Check once at boot, and again after reconfigure() if
-    // identity/transport changed. A missing `send` is not a failure here --
-    // send() / send_with() and a session reply check for it in place -- so a
-    // receive-only node can leave it null.
+    // session.valid()). Check once at boot, and again if you mutate identity/
+    // transport on your NodeConfig later (see the constructor's own comment).
+    // A missing `send` is not possible any more (NodeConfig::send() is
+    // required) -- a receive-only node's override simply returns false in
+    // place, same outcome as before.
     //
     // `arm_and_announce` (default false -- every existing begin() call keeps
     // meaning exactly what it always did) additionally arm_session()s any
@@ -377,10 +465,10 @@ public:
     std::uint32_t boot_id() const noexcept { return cfg_.boot_id; }
 
     // ---- transmit ----------------------------------------------------------
-    // Encodes `payload` as one or more frames and hands each to `cfg.send`. A
-    // fresh sequence is reserved. `cfg.seal != nullptr` seals once over the
-    // whole payload before fragmenting; a false from the seal sends nothing
-    // (fail-closed). Returns "did the whole logical message go out".
+    // Encodes `payload` as one or more frames and hands each to `cfg.send()`.
+    // A fresh sequence is reserved. `cfg.has_seal()` seals once over the
+    // whole payload before fragmenting; a false from `cfg.seal()` sends
+    // nothing (fail-closed). Returns "did the whole logical message go out".
     //
     // FIRST-CUT LIMIT: a single encoded frame must fit the ESP-NOW ceiling
     // (250 octets) -- true for every EspNow and UsbHid frame, and for Serial
@@ -393,7 +481,7 @@ public:
 
     // Same, with a seal for THIS message (a hub that seals channel C to a robot
     // and channel B to a desktop with different keys). A null `seal` forces
-    // cleartext regardless of cfg.seal.
+    // cleartext regardless of cfg.has_seal()/cfg.seal().
     bool send_with(MessageType type, std::uint16_t object_id,
                    const std::uint8_t* payload, std::size_t size,
                    std::uint64_t timestamp_us, EndpointSealFn seal,
@@ -403,13 +491,14 @@ public:
     // Feed one already-delimited datagram (ESP-NOW / USB HID deliver these
     // whole). Sweeps stale partials, decodes, checks CRC, reassembles; with a
     // session enabled it also runs the HELLO handshake, renews the watchdog and
-    // answers SESSION_CLOSE (through `cfg.send`) before a frame is routed. On
+    // answers SESSION_CLOSE (through `cfg.send()`) before a frame is routed. On
     // NodeRx::Complete, *out holds the whole logical message -- its payload
-    // copied into rx_buffer (or open_buffer, if `cfg.open` decrypted it), valid
-    // until the next receive().
+    // copied into rx_buffer (or open_buffer, if `cfg.open()` decrypted it),
+    // valid until the next receive().
     //
-    // The no-now overload reads `cfg.clock`; without one it behaves as now = 0
-    // (fine for a session-less consumer, wrong for the watchdog).
+    // The no-now overload reads `cfg.clock()` when `cfg.has_clock()`; without
+    // one it behaves as now = 0 (fine for a session-less consumer, wrong for
+    // the watchdog).
     NodeRx receive(const std::uint8_t* datagram, std::size_t size,
                    ReceivedMessage* out) noexcept;
     NodeRx receive(const std::uint8_t* datagram, std::size_t size,
@@ -651,11 +740,11 @@ public:
                        std::uint64_t timestamp_us) noexcept;
 
     // publish() / publish_named(), sealed with `seal` for THIS sample instead
-    // of cfg.seal -- the publish-side mirror of send_with() (a producer whose
-    // TELEMETRY key differs from the one cfg.seal carries for automatic
-    // replies, the dual-key hub case NodeReplySealFn covers on the reply
-    // side). A null `seal` forces cleartext regardless of cfg.seal, same rule
-    // send_with() already follows.
+    // of cfg.seal() -- the publish-side mirror of send_with() (a producer
+    // whose TELEMETRY key differs from the one cfg.seal() carries for
+    // automatic replies, the dual-key hub case NodeConfig::reply_seal()
+    // covers on the reply side). A null `seal` forces cleartext regardless of
+    // cfg.has_seal()/cfg.seal(), same rule send_with() already follows.
     bool publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                       std::uint64_t timestamp_us, EndpointSealFn seal,
                       void* seal_ctx) noexcept;
@@ -755,10 +844,10 @@ private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
     NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out,
                  std::uint64_t now_ms) noexcept;
-    // cfg_.reply_seal, or cfg_.seal/cfg_.seal_ctx when it is null -- see
-    // NodeReplySealFn's comment. Every automatic-reply send site below calls
-    // this once, right before send_with(), instead of using send()/cfg_.seal
-    // directly.
+    // cfg_.reply_seal()'s pick, or cfg_.has_seal()/cfg_.seal() when it
+    // leaves *out_seal null -- see NodeConfig::reply_seal()'s own comment.
+    // Every automatic-reply send site below calls this once, right before
+    // send_with(), instead of using send()/cfg_.seal() directly.
     void reply_seal_for(const Header& request, EndpointSealFn* out_seal,
                         void** out_seal_ctx) const noexcept;
     void serve_manifest(const Header& request, ByteView payload) noexcept;
@@ -779,7 +868,45 @@ private:
                              ResultError error) noexcept;
     void emit_status(std::uint64_t now_ms) noexcept;
 
-    NodeConfig cfg_;
+    // Bridges from NodeConfig's virtual methods into the plain C-style
+    // function pointers btp::Endpoint / btp::Receiver themselves take (they
+    // never changed -- only what calls them did). `ctx` is always a
+    // NodeConfig* here (this node's own cfg_, or -- for command_thunk, the
+    // only one a subclass needs -- a StaticNode<>'s own cfg_ reached through
+    // its own protected access). Written once, here, so no caller ever
+    // writes one of these.
+    static bool send_thunk(void* ctx, const std::uint8_t* frame,
+                           std::size_t frame_size) noexcept;
+    static bool seal_thunk(void* ctx, const Header& header,
+                           std::uint16_t payload_size,
+                           const std::uint8_t* plaintext,
+                           std::uint8_t* out) noexcept;
+    // No open_thunk: cfg_.open() is never handed to Endpoint/Receiver as a
+    // callback -- finish() below calls it directly (a plain virtual
+    // dispatch), unlike send()/seal(), which Endpoint calls internally
+    // mid-fragmentation and therefore needs bridged to its own C-style
+    // EndpointSendFn/EndpointSealFn.
+    static void terminal_thunk(void* ctx, Node& node, const Header& header,
+                               ByteView payload, std::uint64_t now_ms) noexcept;
+
+  protected:
+    // StaticNode<>'s own constructor (a template, defined inline below) needs
+    // this one to wire cfg.has_command()/cfg.command() into enable_commands()
+    // -- see NodeConfig::command()'s own comment on why only StaticNode<> can
+    // do this. Not part of the public API; a bare Node ignores cfg.command
+    // entirely, same as always.
+    static void command_thunk(void* ctx, std::uint16_t action_id,
+                              std::uint16_t action_version, ByteView parameters,
+                              NodeActionOutcome* outcome) noexcept;
+
+  private:
+    // cfg_.has_seal() ? &seal_thunk : nullptr, and the matching ctx -- every
+    // send-a-message call site used to write `cfg_.seal, cfg_.seal_ctx`
+    // inline; these two centralise the has_seal() check that replaced it.
+    EndpointSealFn current_seal() const noexcept;
+    void* current_seal_ctx() const noexcept;
+
+    NodeConfig& cfg_;
     std::uint8_t* rx_buffer_;
     std::size_t rx_capacity_;
     std::uint8_t* seal_scratch_;
@@ -967,7 +1094,7 @@ class StaticNode
 
 public:
     explicit StaticNode(
-        const NodeConfig& cfg,
+        NodeConfig& cfg,
         std::uint64_t reassembly_timeout_ms =
             kNodeDefaultReassemblyTimeoutMs) noexcept
         : Storage(),
@@ -995,13 +1122,14 @@ public:
         enable_subscriptions(&subscriptions_);
         enable_subscription_client(&client_subscriptions_);
         enable_command_client(&client_commands_);
-        // The RESPONDER side wired straight from cfg.command / cfg.command_ctx
-        // -- nullptr either way (the default) leaves commands_ pointed at
-        // commands_cache_ with on_command_ still null, same "attached but
-        // unanswered" no-op as never calling this at all (serve_command()'s
-        // own guard checks on_command_ != nullptr). enable_commands(handler,
-        // ctx) sugar stays reachable to set or replace it after construction.
-        enable_commands(cfg.command, cfg.command_ctx);
+        // The RESPONDER side wired straight from cfg.has_command()/
+        // cfg.command() through the command_thunk bridge -- has_command()
+        // false (the default) leaves commands_ pointed at commands_cache_
+        // with on_command_ still null, same "attached but unanswered" no-op
+        // as never calling this at all (serve_command()'s own guard checks
+        // on_command_ != nullptr). enable_commands(handler, ctx) sugar stays
+        // reachable to set or replace it after construction.
+        enable_commands(cfg.has_command() ? &Node::command_thunk : nullptr, &cfg);
     }
 
     // This node's own catalogue -- no separate btp::StaticCatalog to declare

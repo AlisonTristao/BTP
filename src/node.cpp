@@ -4,7 +4,7 @@
 
 namespace btp {
 
-Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
+Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
            const ReassemblyStorage* storage, std::size_t slot_count,
            std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
            std::size_t rx_capacity, std::uint8_t* seal_scratch,
@@ -38,8 +38,8 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       on_command_ctx_(nullptr),
       command_client_(nullptr),
       last_command_outcome_(),
-      on_terminal_(cfg.terminal),
-      on_terminal_ctx_(cfg.terminal_ctx),
+      on_terminal_(cfg.has_terminal() ? &Node::terminal_thunk : nullptr),
+      on_terminal_ctx_(cfg.has_terminal() ? &cfg : nullptr),
       frames_tx_(0U),
       status_period_ms_(0U),
       status_last_ms_(0U),
@@ -55,13 +55,50 @@ Node::Node(const NodeConfig& cfg, ReassemblySlot* slots,
       publish_slot_capacity_(0U),
       publish_slot_count_(0U) {}
 
+// ---------------------------------------------------------------------------
+// NodeConfig bridges -- the only place a virtual call becomes a C-style
+// function pointer for btp::Endpoint / btp::Receiver. `ctx` is always the
+// NodeConfig this Node (or, for command_thunk, a StaticNode<>'s own
+// cfg_ reached via its own enable_commands() call) was built with.
+// ---------------------------------------------------------------------------
+
+bool Node::send_thunk(void* ctx, const std::uint8_t* frame,
+                      std::size_t frame_size) noexcept {
+    return static_cast<NodeConfig*>(ctx)->send(frame, frame_size);
+}
+
+bool Node::seal_thunk(void* ctx, const Header& header, std::uint16_t payload_size,
+                      const std::uint8_t* plaintext, std::uint8_t* out) noexcept {
+    return static_cast<NodeConfig*>(ctx)->seal(header, payload_size, plaintext, out);
+}
+
+void Node::terminal_thunk(void* ctx, Node& node, const Header& header,
+                          ByteView payload, std::uint64_t now_ms) noexcept {
+    static_cast<NodeConfig*>(ctx)->terminal(node, header, payload, now_ms);
+}
+
+void Node::command_thunk(void* ctx, std::uint16_t action_id,
+                         std::uint16_t action_version, ByteView parameters,
+                         NodeActionOutcome* outcome) noexcept {
+    static_cast<NodeConfig*>(ctx)->command(action_id, action_version, parameters,
+                                           outcome);
+}
+
+EndpointSealFn Node::current_seal() const noexcept {
+    return cfg_.has_seal() ? &Node::seal_thunk : nullptr;
+}
+
+void* Node::current_seal_ctx() const noexcept {
+    return cfg_.has_seal() ? &cfg_ : nullptr;
+}
+
 bool Node::begin(bool arm_and_announce) noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
     if (!receiver_.valid()) return false;
     if (session_on_ && !session_.valid()) return false;
-    // cfg_.send is not required here: a receive-only node that never sends and
-    // never enables a session does not need one. send() / send_with() and a
-    // session reply check for it at the point of use.
+    // NodeConfig::send() is always implemented (it is pure virtual) -- a
+    // receive-only node's own override just returns false unconditionally,
+    // so there is nothing to check here any more.
 
     if (arm_and_announce) {
         if (session_on_) arm_session();
@@ -82,7 +119,7 @@ bool Node::configured() const noexcept {
 }
 
 std::uint64_t Node::resolve_now(std::uint64_t fallback) const noexcept {
-    return cfg_.clock != nullptr ? cfg_.clock(cfg_.clock_ctx) : fallback;
+    return cfg_.has_clock() ? cfg_.clock() : fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,11 +130,10 @@ bool Node::send_with(MessageType type, std::uint16_t object_id,
                      const std::uint8_t* payload, std::size_t size,
                      std::uint64_t timestamp_us, EndpointSealFn seal,
                      void* seal_ctx) noexcept {
-    if (cfg_.send == nullptr) return false;
     const LogicalMessage message{type, object_id, timestamp_us,
                                  {payload, size}};
-    const bool ok = endpoint_.send_logical(message, cfg_.transport, cfg_.send,
-                                          cfg_.send_ctx, seal_scratch_,
+    const bool ok = endpoint_.send_logical(message, cfg_.transport, &Node::send_thunk,
+                                          &cfg_, seal_scratch_,
                                           seal_scratch_cap_, seal, seal_ctx);
     if (ok) ++frames_tx_;
     return ok;
@@ -106,20 +142,19 @@ bool Node::send_with(MessageType type, std::uint16_t object_id,
 bool Node::send(MessageType type, std::uint16_t object_id,
                 const std::uint8_t* payload, std::size_t size,
                 std::uint64_t timestamp_us) noexcept {
-    return send_with(type, object_id, payload, size, timestamp_us, cfg_.seal,
-                     cfg_.seal_ctx);
+    return send_with(type, object_id, payload, size, timestamp_us,
+                     current_seal(), current_seal_ctx());
 }
 
 void Node::reply_seal_for(const Header& request, EndpointSealFn* out_seal,
                           void** out_seal_ctx) const noexcept {
-    if (cfg_.reply_seal != nullptr) {
-        *out_seal = nullptr;
-        *out_seal_ctx = nullptr;
-        cfg_.reply_seal(cfg_.reply_seal_ctx, request, out_seal, out_seal_ctx);
-        return;
+    *out_seal = nullptr;
+    *out_seal_ctx = nullptr;
+    cfg_.reply_seal(request, out_seal, out_seal_ctx);
+    if (*out_seal == nullptr) {
+        *out_seal = current_seal();
+        *out_seal_ctx = current_seal_ctx();
     }
-    *out_seal = cfg_.seal;
-    *out_seal_ctx = cfg_.seal_ctx;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,11 +233,8 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
         const LogicalMessage reply_msg{
             MessageType::Control, reply_object, resolve_now(0U) * 1000ULL,
             {reply, outcome.reply_size}};
-        if (cfg_.send != nullptr) {
-            endpoint_.send_logical(reply_msg, cfg_.transport, cfg_.send,
-                                   cfg_.send_ctx, seal_scratch_,
-                                   seal_scratch_cap_, nullptr, nullptr);
-        }
+        endpoint_.send_logical(reply_msg, cfg_.transport, &Node::send_thunk, &cfg_,
+                               seal_scratch_, seal_scratch_cap_, nullptr, nullptr);
     }
     switch (outcome.event) {
         case SessionEvent::FrameAccepted:
@@ -238,12 +270,12 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
     }
 
     // Complete. Open the sealed payload in place when a key function is set.
-    if (cfg_.open != nullptr && (out->header.flags & kFlagEncrypted) != 0U) {
+    if (cfg_.has_open() && (out->header.flags & kFlagEncrypted) != 0U) {
         if (out->payload.size < kEndpointAeadTagSize || open_buffer_ == nullptr ||
             out->payload.size - kEndpointAeadTagSize > open_capacity_) {
             return NodeRx::DroppedFrame;
         }
-        if (!cfg_.open(cfg_.open_ctx, out->header,
+        if (!cfg_.open(out->header,
                        static_cast<std::uint16_t>(out->payload.size),
                        out->payload.data, open_buffer_)) {
             return NodeRx::DroppedFrame;
@@ -391,7 +423,7 @@ void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
 std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
                               std::uint16_t topic_id, std::uint32_t rate_millihz,
                               std::uint32_t lease_ms) noexcept {
-    if (subscription_client_ == nullptr || cfg_.send == nullptr) return 0U;
+    if (subscription_client_ == nullptr) return 0U;
     std::uint32_t sequence = 0U;
     if (!endpoint_.reserve_sequence(&sequence)) return 0U;
 
@@ -409,14 +441,15 @@ std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_b
     // A send failure here is rare (the frame fit at subscribe() time) and not
     // fatal: the slot stays Pending and simply times out via expire(), the
     // same fail-safe as any other lost frame.
-    endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
-                                   cfg_.send_ctx, seal_scratch_, seal_scratch_cap_,
-                                   cfg_.seal, cfg_.seal_ctx);
+    endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
+                                   &Node::send_thunk, &cfg_, seal_scratch_,
+                                   seal_scratch_cap_, current_seal(),
+                                   current_seal_ctx());
     return local_id;
 }
 
 bool Node::unsubscribe(std::uint32_t local_id) noexcept {
-    if (subscription_client_ == nullptr || cfg_.send == nullptr) return false;
+    if (subscription_client_ == nullptr) return false;
     std::uint32_t sequence = 0U;
     if (!endpoint_.reserve_sequence(&sequence)) return false;
 
@@ -430,13 +463,13 @@ bool Node::unsubscribe(std::uint32_t local_id) noexcept {
     const LogicalMessage message{MessageType::Control, object_id::kUnsubscribe,
                                  resolve_now(0U) * 1000ULL, {buffer, written}};
     return endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                          cfg_.send, cfg_.send_ctx, seal_scratch_,
-                                          seal_scratch_cap_, cfg_.seal,
-                                          cfg_.seal_ctx);
+                                          &Node::send_thunk, &cfg_, seal_scratch_,
+                                          seal_scratch_cap_, current_seal(),
+                                          current_seal_ctx());
 }
 
 void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
-    if (subscription_client_ == nullptr || cfg_.send == nullptr) return;
+    if (subscription_client_ == nullptr) return;
     for (;;) {
         const std::uint32_t local_id = subscription_client_->next_renewal_due(now_ms);
         if (local_id == 0U) break;
@@ -452,9 +485,10 @@ void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
         }
         const LogicalMessage message{MessageType::Control, object_id::kSubscribe,
                                      now_ms * 1000ULL, {buffer, written}};
-        endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
-                                       cfg_.send_ctx, seal_scratch_,
-                                       seal_scratch_cap_, cfg_.seal, cfg_.seal_ctx);
+        endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
+                                       &Node::send_thunk, &cfg_, seal_scratch_,
+                                       seal_scratch_cap_, current_seal(),
+                                       current_seal_ctx());
     }
 }
 
@@ -583,8 +617,7 @@ std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boo
                             std::uint16_t action_id, std::uint16_t action_version,
                             const std::uint8_t* parameters,
                             std::size_t parameters_size) noexcept {
-    if (command_client_ == nullptr || cfg_.send == nullptr ||
-        scratch_buffer_ == nullptr) {
+    if (command_client_ == nullptr || scratch_buffer_ == nullptr) {
         return 0U;
     }
     std::uint32_t sequence = 0U;
@@ -602,9 +635,10 @@ std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boo
                                  now_ms * 1000ULL, {scratch_buffer_, written}};
     // A send failure here is rare and not fatal: the slot stays Pending and
     // simply times out via expire(), the same fail-safe as any lost frame.
-    endpoint_.send_logical_reserved(sequence, message, cfg_.transport, cfg_.send,
-                                   cfg_.send_ctx, seal_scratch_, seal_scratch_cap_,
-                                   cfg_.seal, cfg_.seal_ctx);
+    endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
+                                   &Node::send_thunk, &cfg_, seal_scratch_,
+                                   seal_scratch_cap_, current_seal(),
+                                   current_seal_ctx());
     return local_id;
 }
 
@@ -699,8 +733,7 @@ void Node::serve_catalog(Catalog* catalog, std::uint8_t role,
 void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
                          std::uint8_t status, std::uint8_t flags,
                          std::uint16_t error_code, bool with_topics) noexcept {
-    if (serve_catalog_ == nullptr || cfg_.send == nullptr ||
-        scratch_buffer_ == nullptr) {
+    if (serve_catalog_ == nullptr || scratch_buffer_ == nullptr) {
         return;
     }
 
@@ -782,8 +815,7 @@ void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
 }
 
 bool Node::announce_catalog() noexcept {
-    if (serve_catalog_ == nullptr || cfg_.send == nullptr ||
-        scratch_buffer_ == nullptr) {
+    if (serve_catalog_ == nullptr || scratch_buffer_ == nullptr) {
         return false;
     }
     // Unsolicited: no request to reply to, so nothing to classify by either
@@ -797,8 +829,8 @@ bool Node::announce_catalog() noexcept {
 
 bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                    std::uint64_t timestamp_us) noexcept {
-    return publish_with(topic_id, fill, ctx, timestamp_us, cfg_.seal,
-                        cfg_.seal_ctx);
+    return publish_with(topic_id, fill, ctx, timestamp_us, current_seal(),
+                        current_seal_ctx());
 }
 
 bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
@@ -824,8 +856,8 @@ bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
 
 bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
                          void* ctx, std::uint64_t timestamp_us) noexcept {
-    return publish_named_with(topic_id, fill, ctx, timestamp_us, cfg_.seal,
-                              cfg_.seal_ctx);
+    return publish_named_with(topic_id, fill, ctx, timestamp_us, current_seal(),
+                              current_seal_ctx());
 }
 
 bool Node::publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
@@ -922,7 +954,6 @@ bool Node::connect(const Hello& local, std::uint64_t deadline_ms) noexcept {
 
 bool Node::connect(const Hello& local, std::uint64_t now_ms,
                    std::uint64_t deadline_ms) noexcept {
-    if (cfg_.send == nullptr) return false;
     std::uint32_t sequence = 0U;
     if (!endpoint_.reserve_sequence(&sequence)) return false;
 
@@ -939,7 +970,7 @@ bool Node::connect(const Hello& local, std::uint64_t now_ms,
     const LogicalMessage message{MessageType::Control, object_id::kHello,
                                  now_ms * 1000ULL, {hello, written}};
     if (!endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                         cfg_.send, cfg_.send_ctx,
+                                         &Node::send_thunk, &cfg_,
                                          seal_scratch_, seal_scratch_cap_,
                                          nullptr, nullptr)) {
         initiator_.reset();  // the HELLO never left -- undo the AwaitingResult
@@ -969,7 +1000,6 @@ bool Node::disconnect(std::uint8_t reason,
 
 bool Node::disconnect(std::uint64_t now_ms, std::uint8_t reason,
                       std::uint32_t drain_timeout_ms) noexcept {
-    if (cfg_.send == nullptr) return false;
     std::uint8_t buffer[kSessionMaxHelloSize];
     std::size_t written = 0U;
     if (!initiator_.disconnect(now_ms, reason, drain_timeout_ms, buffer,

@@ -231,17 +231,16 @@ void setup() {
     // btp::Receiver and (opt-in) btp::Session in one object, every dependency a
     // function pointer, buffers owned by btp::StaticNode, no allocation, no
     // exceptions.
-    struct NodeSink {
-        static bool send(void*, const std::uint8_t* frame, std::size_t size) {
+    struct NodeSink : public btp::NodeConfig {
+        bool send(const std::uint8_t* frame, std::size_t size) override {
             (void)frame;
             return size != 0U;
         }
     };
-    btp::NodeConfig node_config = {};
+    static NodeSink node_config;
     node_config.source_id = 0x0A0B0C0DU;
     node_config.boot_id = 0x01020304U;
     node_config.transport = btp::kEspNowTransport;
-    node_config.send = &NodeSink::send;
     static btp::StaticNode<2U, btp::kEspNowMaxPayloadSize, 256U> node(
         node_config);
     (void)node.begin();

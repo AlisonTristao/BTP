@@ -139,19 +139,79 @@ Hello make_hello(Role role) {
     return h;
 }
 
-NodeConfig base_config(std::uint32_t source_id, std::uint32_t boot_id,
+// Every axis TestConfig now exposes as a virtual method, forwarded to a
+// settable raw function pointer -- keeps the free-function test doubles
+// above (Sink::send, fake_seal, fake_open, ...) usable exactly as they were
+// against the old POD TestConfig, one class, written once, instead of a
+// subclass per test scenario. nullptr means "this axis is off", same
+// meaning a null TestConfig field had before TestConfig became abstract.
+class TestConfig : public btp::NodeConfig {
+public:
+    btp::EndpointSendFn send_fn = nullptr;
+    void* send_ctx = nullptr;
+    std::uint64_t (*clock_fn)(void*) = nullptr;
+    void* clock_ctx = nullptr;
+    btp::EndpointSealFn seal_fn = nullptr;
+    void* seal_ctx = nullptr;
+    btp::EndpointSealFn open_fn = nullptr;  // same shape as EndpointSealFn
+    void* open_ctx = nullptr;
+    btp::NodeTerminalFn terminal_fn = nullptr;
+    void* terminal_ctx = nullptr;
+    btp::NodeActionFn command_fn = nullptr;
+    void* command_ctx = nullptr;
+    void (*reply_seal_fn)(void*, const btp::Header&, btp::EndpointSealFn*,
+                          void**) = nullptr;
+    void* reply_seal_ctx = nullptr;
+
+    bool send(const std::uint8_t* frame, std::size_t n) override {
+        return send_fn != nullptr && send_fn(send_ctx, frame, n);
+    }
+    bool has_clock() const noexcept override { return clock_fn != nullptr; }
+    std::uint64_t clock() override { return clock_fn(clock_ctx); }
+    bool has_seal() const noexcept override { return seal_fn != nullptr; }
+    bool seal(const btp::Header& h, std::uint16_t n, const std::uint8_t* pt,
+             std::uint8_t* out) override {
+        return seal_fn(seal_ctx, h, n, pt, out);
+    }
+    bool has_open() const noexcept override { return open_fn != nullptr; }
+    bool open(const btp::Header& h, std::uint16_t n, const std::uint8_t* s,
+             std::uint8_t* out) override {
+        return open_fn(open_ctx, h, n, s, out);
+    }
+    bool has_terminal() const noexcept override { return terminal_fn != nullptr; }
+    void terminal(btp::Node& node, const btp::Header& h, btp::ByteView p,
+                  std::uint64_t now_ms) override {
+        terminal_fn(terminal_ctx, node, h, p, now_ms);
+    }
+    bool has_command() const noexcept override { return command_fn != nullptr; }
+    void command(std::uint16_t id, std::uint16_t ver, btp::ByteView params,
+                btp::NodeActionOutcome* out) override {
+        command_fn(command_ctx, id, ver, params, out);
+    }
+    void reply_seal(const btp::Header& request, btp::EndpointSealFn* out_seal,
+                    void** out_ctx) override {
+        if (reply_seal_fn != nullptr) {
+            reply_seal_fn(reply_seal_ctx, request, out_seal, out_ctx);
+        } else {
+            *out_seal = nullptr;
+            *out_ctx = nullptr;
+        }
+    }
+};
+
+TestConfig base_config(std::uint32_t source_id, std::uint32_t boot_id,
                        Sink* sink) {
-    NodeConfig cfg{};
+    TestConfig cfg{};
     cfg.source_id = source_id;
     cfg.boot_id = boot_id;
     cfg.transport = kEspNowTransport;
-    cfg.send = &Sink::send;
+    cfg.send_fn = &Sink::send;
     cfg.send_ctx = sink;
-    cfg.clock = nullptr;
+    cfg.clock_fn = nullptr;
     cfg.clock_ctx = nullptr;
-    cfg.seal = nullptr;
+    cfg.seal_fn = nullptr;
     cfg.seal_ctx = nullptr;
-    cfg.open = nullptr;
+    cfg.open_fn = nullptr;
     cfg.open_ctx = nullptr;
     return cfg;
 }
@@ -174,20 +234,22 @@ NodeRx deliver(TestNode& dst, Sink& sink, std::uint64_t now_ms,
 void test_begin() {
     Sink sink;
 
-    TestNode ok(base_config(kSenderId, kSenderBoot, &sink));
+    TestConfig ok_cfg = base_config(kSenderId, kSenderBoot, &sink);
+
+    TestNode ok(ok_cfg);
     CHECK(ok.begin());
     CHECK(ok.configured());
     CHECK(ok.source_id() == kSenderId);
     CHECK(ok.session() == nullptr);
 
-    NodeConfig bad_id = base_config(0U, kSenderBoot, &sink);
+    TestConfig bad_id = base_config(0U, kSenderBoot, &sink);
     TestNode bad(bad_id);
     CHECK(!bad.begin());
 
     // A receive-only node may omit `send`: begin() still succeeds, but send()
     // then fails in place.
-    NodeConfig nosend_cfg = base_config(kSenderId, kSenderBoot, &sink);
-    nosend_cfg.send = nullptr;
+    TestConfig nosend_cfg = base_config(kSenderId, kSenderBoot, &sink);
+    nosend_cfg.send_fn = nullptr;
     TestNode nosend(nosend_cfg);
     CHECK(nosend.begin());
     const std::uint8_t body[4] = {1, 2, 3, 4};
@@ -195,36 +257,44 @@ void test_begin() {
 }
 
 // Built with a placeholder config (no identity, no send -- as if TxScheduler
-// were not configured yet), reconfigure()'d with the real one only once it
-// is known, THEN begin() -- the two-phase boot pattern reconfigure() exists
-// for. begin() before reconfigure() would fail here (source_id 0); after it,
-// begin()/source_id()/send() all reflect the NEW config, not the placeholder.
+// were not configured yet), then the SAME config object mutated in place
+// with the real identity/send once it is known, THEN begin() -- the
+// two-phase boot pattern Node's constructor comment describes: because the
+// Node only holds a REFERENCE to this TestConfig, it always reads the
+// current fields at each call, so there is no separate reconfigure() method
+// any more -- just assign the fields, same as any other object. begin()
+// before that mutation would fail here (source_id 0); after it,
+// begin()/source_id()/send() all reflect the NEW fields.
 void test_reconfigure_before_begin() {
     Sink placeholder_sink;
-    NodeConfig placeholder{};
-    placeholder.transport = kEspNowTransport;
-    placeholder.send = &Sink::send;
-    placeholder.send_ctx = &placeholder_sink;
-    TestNode node(placeholder);
+    TestConfig cfg{};
+    cfg.transport = kEspNowTransport;
+    cfg.send_fn = &Sink::send;
+    cfg.send_ctx = &placeholder_sink;
+    TestNode node(cfg);
     CHECK(!node.begin());  // source_id/boot_id still 0
 
     Sink real_sink;
-    node.reconfigure(base_config(kSenderId, kSenderBoot, &real_sink));
+    cfg.source_id = kSenderId;
+    cfg.boot_id = kSenderBoot;
+    cfg.send_ctx = &real_sink;
     CHECK(node.begin());
     CHECK(node.source_id() == kSenderId);
     CHECK(node.boot_id() == kSenderBoot);
 
     const std::uint8_t body[4] = {9, 8, 7, 6};
     CHECK(node.send(MessageType::Telemetry, 0x0101U, body, sizeof(body), 0U));
-    CHECK(placeholder_sink.count() == 0U);  // never sent through the old cfg
+    CHECK(placeholder_sink.count() == 0U);  // never sent through the old ctx
     CHECK(real_sink.count() == 1U);
 }
 
 void test_cleartext_roundtrip() {
     Sink tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
     Sink rx_out;
-    TestNode receiver(base_config(kPeerId, kPeerBoot, &rx_out));
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode receiver(receiver_cfg);
     CHECK(sender.begin());
     CHECK(receiver.begin());
 
@@ -245,9 +315,11 @@ void test_cleartext_roundtrip() {
 
 void test_fragmented_roundtrip() {
     Sink tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
     Sink rx_out;
-    TestNode receiver(base_config(kPeerId, kPeerBoot, &rx_out));
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode receiver(receiver_cfg);
     sender.begin();
     receiver.begin();
 
@@ -271,13 +343,13 @@ void test_fragmented_roundtrip() {
 
 void test_sealed_roundtrip() {
     Sink tx;
-    NodeConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
-    sender_cfg.seal = &fake_seal;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    sender_cfg.seal_fn = &fake_seal;
     TestNode sender(sender_cfg);
 
     Sink rx_out;
-    NodeConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
-    receiver_cfg.open = &fake_open;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    receiver_cfg.open_fn = &fake_open;
     TestNode receiver(receiver_cfg);
     sender.begin();
     receiver.begin();
@@ -295,7 +367,8 @@ void test_sealed_roundtrip() {
 
     // A receiver with no open callback gets the sealed bytes verbatim.
     Sink other_out;
-    TestNode raw(base_config(0x00ABCDEFU, 0x00FEDCBAU, &other_out));
+    TestConfig raw_cfg = base_config(0x00ABCDEFU, 0x00FEDCBAU, &other_out);
+    TestNode raw(raw_cfg);
     raw.begin();
     ReceivedMessage sealed{};
     CHECK(deliver(raw, tx, 0U, &sealed) == NodeRx::Complete);
@@ -305,7 +378,8 @@ void test_sealed_roundtrip() {
 
 void test_session_handshake() {
     Sink peer_tx;
-    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    TestConfig peer_cfg = base_config(kPeerId, kPeerBoot, &peer_tx);
+    TestNode peer(peer_cfg);
     peer.enable_session(make_hello(Role::Consumer), /*hello_deadline_ms=*/0U);
     CHECK(peer.begin());
     CHECK(peer.session() != nullptr);
@@ -350,7 +424,8 @@ void test_session_handshake() {
     // Now an application frame from the same identity routes normally and
     // renews the watchdog.
     Sink app_tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &app_tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &app_tx);
+    TestNode sender(sender_cfg);
     sender.begin();
     const std::vector<std::uint8_t> payload = make_payload(24, 0x01);
     sender.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
@@ -370,13 +445,15 @@ void test_session_handshake() {
 
 void test_session_ignores_frame_before_hello() {
     Sink peer_tx;
-    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    TestConfig peer_cfg = base_config(kPeerId, kPeerBoot, &peer_tx);
+    TestNode peer(peer_cfg);
     peer.enable_session(make_hello(Role::Consumer), 0U);
     peer.begin();
     peer.arm_session(0U);
 
     Sink app_tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &app_tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &app_tx);
+    TestNode sender(sender_cfg);
     sender.begin();
     const std::vector<std::uint8_t> payload = make_payload(16, 0x02);
     sender.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
@@ -390,7 +467,8 @@ void test_session_ignores_frame_before_hello() {
 
 void test_stats() {
     Sink rx_out;
-    TestNode receiver(base_config(kPeerId, kPeerBoot, &rx_out));
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode receiver(receiver_cfg);
     receiver.begin();
 
     // A too-short buffer is a decode failure.
@@ -400,7 +478,8 @@ void test_stats() {
     CHECK(receiver.stats().rx.dropped_decode >= 1U);
 
     Sink tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
     sender.begin();
     const std::vector<std::uint8_t> payload = make_payload(20, 0x40);
     sender.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
@@ -474,11 +553,13 @@ void test_catalog_discovery() {
 
     // A sender node just relays the raw MANIFEST_DATA / TELEMETRY frames.
     Sink tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
     sender.begin();
 
     Sink rx_out;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &rx_out));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode consumer(consumer_cfg);
     btp::StaticCatalog<> learned;
     consumer.learn_catalog(&learned);
     SampleCapture capture = {};
@@ -537,7 +618,8 @@ void test_catalog_serve_and_publish() {
 
     // Producer: a served catalogue.
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     btp::StaticCatalog<> served;
     served.set_config_revision(4U);
     CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
@@ -548,7 +630,8 @@ void test_catalog_serve_and_publish() {
 
     // Consumer: a learn catalogue.
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     btp::StaticCatalog<> learned;
     consumer.learn_catalog(&learned);
     SampleCapture capture = {};
@@ -592,7 +675,8 @@ void test_catalog_serve_and_publish() {
     CHECK(prod_tx.count() >= 1U);
     btp::StaticCatalog<> late;
     Sink late_tx;
-    TestNode latecomer(base_config(0x00A1A1A1U, 0x00B2B2B2U, &late_tx));
+    TestConfig latecomer_cfg = base_config(0x00A1A1A1U, 0x00B2B2B2U, &late_tx);
+    TestNode latecomer(latecomer_cfg);
     latecomer.learn_catalog(&late);
     latecomer.begin();
     CHECK(deliver(latecomer, prod_tx, 0U, &msg) == NodeRx::CatalogUpdated);
@@ -603,7 +687,8 @@ void test_catalog_serve_and_publish() {
 
 void test_request_manifest() {
     Sink tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &tx);
+    TestNode consumer(consumer_cfg);
     consumer.begin();
     CHECK(consumer.request_manifest(kSenderId, kSenderBoot, /*known_rev=*/0U));
     CHECK(tx.count() == 1U);
@@ -628,7 +713,8 @@ using btp::InitiatorEvent;
 
 void test_connect_handshake_and_effective_limits() {
     Sink init_tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
     CHECK(initiator.begin());
     CHECK(!initiator.connected());
 
@@ -637,7 +723,8 @@ void test_connect_handshake_and_effective_limits() {
     CHECK(init_tx.count() == 1U);
 
     Sink peer_tx;
-    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    TestConfig peer_cfg = base_config(kPeerId, kPeerBoot, &peer_tx);
+    TestNode peer(peer_cfg);
     peer.enable_session(make_hello(Role::Producer), 0U);
     CHECK(peer.begin());
     peer.arm_session(0U);
@@ -657,7 +744,8 @@ void test_connect_handshake_and_effective_limits() {
     // An application frame from the peer now routes normally AND renews the
     // initiator's own watchdog.
     Sink app_tx;
-    TestNode app(base_config(kPeerId, kPeerBoot, &app_tx));
+    TestConfig app_cfg = base_config(kPeerId, kPeerBoot, &app_tx);
+    TestNode app(app_cfg);
     app.begin();
     const std::vector<std::uint8_t> payload = make_payload(12, 0x07);
     app.send(MessageType::Telemetry, 0x0101U, payload.data(), payload.size(),
@@ -669,7 +757,8 @@ void test_connect_handshake_and_effective_limits() {
 
 void test_connect_times_out_without_a_reply() {
     Sink tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode initiator(initiator_cfg);
     initiator.begin();
     CHECK(initiator.connect(make_hello(Role::Consumer), 0U,
                             /*deadline_ms=*/2000U));
@@ -683,8 +772,8 @@ void test_connect_times_out_without_a_reply() {
 
 void test_connect_requires_send() {
     Sink tx;
-    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &tx);
-    cfg.send = nullptr;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx);
+    cfg.send_fn = nullptr;
     TestNode initiator(cfg);
     initiator.begin();
     CHECK(!initiator.connect(make_hello(Role::Consumer), 0U, 2000U));
@@ -692,12 +781,14 @@ void test_connect_requires_send() {
 
 void test_disconnect_sends_session_close() {
     Sink init_tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
     initiator.begin();
     CHECK(initiator.connect(make_hello(Role::Consumer), 0U, 2000U));
 
     Sink peer_tx;
-    TestNode peer(base_config(kPeerId, kPeerBoot, &peer_tx));
+    TestConfig peer_cfg = base_config(kPeerId, kPeerBoot, &peer_tx);
+    TestNode peer(peer_cfg);
     peer.enable_session(make_hello(Role::Producer), 0U);
     peer.begin();
     peer.arm_session(0U);
@@ -723,7 +814,8 @@ void test_disconnect_sends_session_close() {
 
 void test_static_node_owns_its_catalog() {
     Sink tx;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(node_cfg);
 
     // TopicBuilder, straight off the node -- no local StaticCatalog to declare.
     CHECK(node.topic(0x0101U, 2U, "drive_status")
@@ -745,7 +837,8 @@ void test_static_node_owns_its_catalog() {
 
     // The consumer side of the same sugar: learn_catalog() with no argument.
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     consumer.learn_catalog();
     consumer.begin();
     ReceivedMessage msg{};
@@ -765,7 +858,8 @@ void fill_drive_by_name(void* /*ctx*/, btp::NamedSampleWriter& w) {
 
 void test_publish_named_round_trips() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status")
              .f32("left_rpm")
              .f32("right_rpm")
@@ -778,7 +872,8 @@ void test_publish_named_round_trips() {
     CHECK(prod_tx.count() == 1U);
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     consumer.learn_catalog();
     SampleCapture capture = {};
     consumer.on_sample(&capture_sample, &capture);
@@ -807,8 +902,8 @@ void test_publish_named_round_trips() {
 // the wire -- proof the override, not cfg.seal, decided each one.
 void test_publish_with_overrides_cfg_seal() {
     Sink prod_tx;
-    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
-    cfg.seal = &fake_seal;  // the node's default -- publish_with() bypasses it
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.seal_fn = &fake_seal;  // the node's default -- publish_with() bypasses it
     TestNode producer(cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status")
              .f32("left_rpm")
@@ -856,7 +951,8 @@ using btp::SubscriptionTable;
 
 void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     btp::StaticCatalog<> served;
     CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
           btp::MessageError::Ok);
@@ -868,7 +964,8 @@ void test_subscribe_grant_publish_cadence_and_unsubscribe() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     ClientSubscription client_slots[4];
     SubscriptionClient client(client_slots, 4);
     consumer.enable_subscription_client(&client);
@@ -923,8 +1020,8 @@ void pick_seal_by_alt_requester(void*, const btp::Header& request,
 
 void test_reply_seal_hook_picks_seal_per_subscribe_requester() {
     Sink prod_tx;
-    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
-    cfg.reply_seal = &pick_seal_by_alt_requester;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.reply_seal_fn = &pick_seal_by_alt_requester;
     TestNode producer(cfg);
     btp::StaticCatalog<> served;
     CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
@@ -938,7 +1035,8 @@ void test_reply_seal_hook_picks_seal_per_subscribe_requester() {
 
     // kPeerId: not the alt requester -- falls back to fake_seal (the "A" tag).
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     ClientSubscription cons_slots[4];
     SubscriptionClient cons_client(cons_slots, 4);
     consumer.enable_subscription_client(&cons_client);
@@ -954,7 +1052,8 @@ void test_reply_seal_hook_picks_seal_per_subscribe_requester() {
     // "B" tag), a DIFFERENT key from the one above, for the exact same node.
     prod_tx.clear();
     Sink alt_tx;
-    TestNode alt_consumer(base_config(kAltPeerId, kAltPeerBoot, &alt_tx));
+    TestConfig alt_consumer_cfg = base_config(kAltPeerId, kAltPeerBoot, &alt_tx);
+    TestNode alt_consumer(alt_consumer_cfg);
     ClientSubscription alt_slots[4];
     SubscriptionClient alt_client(alt_slots, 4);
     alt_consumer.enable_subscription_client(&alt_client);
@@ -972,7 +1071,8 @@ void test_reply_seal_hook_picks_seal_per_subscribe_requester() {
 // and the loop becomes a single call.
 void test_publish_subscribed_topics_walks_registered_topics() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     // Same schema fill_drive_by_name itself expects (left_rpm, right_rpm,
     // battery_v-nullable) -- not kDriveFields, which is a different one.
     btp::StaticCatalog<> served;
@@ -994,7 +1094,8 @@ void test_publish_subscribed_topics_walks_registered_topics() {
     CHECK(prod_tx.count() == 0U);
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     ClientSubscription client_slots[4];
     SubscriptionClient client(client_slots, 4);
     consumer.enable_subscription_client(&client);
@@ -1024,7 +1125,8 @@ void test_publish_subscribed_topics_walks_registered_topics() {
 // call needed. Same scenario as the test above, but through that one call.
 void test_topic_with_fill_registers_publish_in_one_call() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1037,7 +1139,8 @@ void test_topic_with_fill_registers_publish_in_one_call() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     ClientSubscription client_slots[4];
     SubscriptionClient client(client_slots, 4);
     consumer.enable_subscription_client(&client);
@@ -1064,7 +1167,8 @@ void test_topic_with_fill_registers_publish_in_one_call() {
 // on_publish()/publish_subscribed_topics() already get.
 void test_static_node_grants_subscriptions_with_no_setup_call() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1076,7 +1180,8 @@ void test_static_node_grants_subscriptions_with_no_setup_call() {
     CHECK(producer.subscriptions() != nullptr);
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     // No consumer.enable_subscription_client(...) here either -- StaticNode<>
     // already has one of its own, same as the producer's subscriptions() above.
     CHECK(consumer.begin());
@@ -1095,14 +1200,16 @@ void test_static_node_grants_subscriptions_with_no_setup_call() {
 // same as before this parameter existed.
 void test_begin_can_arm_session_and_announce_catalog() {
     Sink tx;
-    TestNode plain(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig plain_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode plain(plain_cfg);
     plain.enable_session(make_hello(Role::Producer), 0U);
     CHECK(plain.begin());  // default: neither armed nor announced
     CHECK(plain.session()->state() == btp::SessionState::Idle);
     CHECK(tx.count() == 0U);
 
     Sink tx2;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx2));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx2);
+    TestNode node(node_cfg);
     CHECK(node.topic(0x0101U, 1U, "drive_status").f32("x").end() ==
           MessageError::Ok);
     node.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
@@ -1123,7 +1230,8 @@ void test_begin_can_arm_session_and_announce_catalog() {
 // no longer writes begin() then connect() as two statements.
 void test_begin_with_hello_connects_out() {
     Sink tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode initiator(initiator_cfg);
     CHECK(initiator.begin(make_hello(Role::Consumer), /*connect_deadline_ms=*/2000U));
     CHECK(tx.count() == 1U);  // the HELLO connect() sent
     CHECK(!initiator.connected());  // no HELLO_RESULT delivered yet
@@ -1134,7 +1242,8 @@ void test_begin_with_hello_connects_out() {
 // already gives the responder-side table.
 void test_static_node_bundles_subscription_client() {
     Sink tx;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(node_cfg);
     CHECK(node.begin());
     const std::uint32_t id =
         node.subscribe(kPeerId, kPeerBoot, 0x0101U, /*rate_millihz=*/1000U,
@@ -1156,11 +1265,13 @@ void test_static_node_learn_catalog_with_sample_registers_on_sample() {
     CHECK(manifest_n != 0U);
 
     Sink tx;
-    TestNode sender(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
     sender.begin();
 
     Sink rx_out;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &rx_out));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    TestNode consumer(consumer_cfg);
     SampleCapture capture = {};
     consumer.learn_catalog(&capture_sample, &capture);  // the one call under test
     CHECK(consumer.learned_catalog() == &consumer.catalog());
@@ -1191,7 +1302,8 @@ void test_routine_publishes_and_ticks() {
     // The publish half: a producer's routine() sends a due topic exactly
     // like publish_subscribed_topics() alone would.
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1201,7 +1313,8 @@ void test_routine_publishes_and_ticks() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     CHECK(consumer.begin());
     consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
     ReceivedMessage msg{};
@@ -1214,7 +1327,8 @@ void test_routine_publishes_and_ticks() {
     // The tick half: an initiator's routine() sweeps the connection watchdog
     // exactly like tick() alone would (test_connect_times_out_without_a_reply).
     Sink init_tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &init_tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
     CHECK(initiator.begin(make_hello(Role::Consumer),
                           /*connect_deadline_ms=*/2000U));
     initiator.routine(1999U);
@@ -1230,7 +1344,8 @@ void test_routine_publishes_and_ticks() {
 // branch on "did a datagram arrive" at all.
 void test_routine_with_datagram_decodes_and_still_runs_housekeeping() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1240,7 +1355,8 @@ void test_routine_with_datagram_decodes_and_still_runs_housekeeping() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     CHECK(consumer.begin());
     consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
     ReceivedMessage msg{};
@@ -1266,7 +1382,8 @@ void test_routine_with_datagram_decodes_and_still_runs_housekeeping() {
 // cares about already ran through a callback).
 void test_routine_without_out_param_behaves_the_same() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1276,7 +1393,8 @@ void test_routine_without_out_param_behaves_the_same() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     CHECK(consumer.begin());
     consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
     ReceivedMessage msg{};
@@ -1299,7 +1417,8 @@ void test_routine_without_out_param_behaves_the_same() {
 // configure_producer() did by hand.
 void test_static_node_begin_folds_catalog_and_session_setup() {
     Sink tx;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(node_cfg);
     CHECK(node.topic(0x0101U, 1U, "drive_status").f32("x").end() ==
           MessageError::Ok);
 
@@ -1347,7 +1466,8 @@ void echo_action(void* ctx, std::uint16_t action_id, std::uint16_t /*action_vers
 
 void test_command_round_trip_and_dedup_replay() {
     Sink resp_tx;
-    TestNode responder(base_config(kSenderId, kSenderBoot, &resp_tx));
+    TestConfig responder_cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
+    TestNode responder(responder_cfg);
     DedupSlot dedup_slots[4];
     std::uint8_t dedup_bytes[4][64];
     DedupStorage dedup_storage[4];
@@ -1359,7 +1479,8 @@ void test_command_round_trip_and_dedup_replay() {
     CHECK(responder.begin());
 
     Sink init_tx;
-    TestNode initiator(base_config(kPeerId, kPeerBoot, &init_tx));
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
     ClientCommand cmd_slots[2];
     CommandClient client(cmd_slots, 2);
     initiator.enable_command_client(&client);
@@ -1399,8 +1520,8 @@ void test_command_round_trip_and_dedup_replay() {
 // request's source_id, not by which code path answered it.
 void test_reply_seal_hook_picks_seal_per_command_requester() {
     Sink resp_tx;
-    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
-    cfg.reply_seal = &pick_seal_by_alt_requester;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
+    cfg.reply_seal_fn = &pick_seal_by_alt_requester;
     TestNode responder(cfg);
     DedupSlot dedup_slots[4];
     std::uint8_t dedup_bytes[4][64];
@@ -1414,7 +1535,8 @@ void test_reply_seal_hook_picks_seal_per_command_requester() {
 
     // kPeerId: falls back to fake_seal (the "A" tag) on the Fresh reply...
     Sink init_tx;
-    TestNode initiator(base_config(kPeerId, kPeerBoot, &init_tx));
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
     ClientCommand cmd_slots[2];
     CommandClient client(cmd_slots, 2);
     initiator.enable_command_client(&client);
@@ -1438,7 +1560,8 @@ void test_reply_seal_hook_picks_seal_per_command_requester() {
     // kAltPeerId: a DIFFERENT requester, on a Fresh request of its own --
     // the "B" tag, same responder node, same enable_commands() wiring.
     Sink alt_tx;
-    TestNode alt_initiator(base_config(kAltPeerId, kAltPeerBoot, &alt_tx));
+    TestConfig alt_initiator_cfg = base_config(kAltPeerId, kAltPeerBoot, &alt_tx);
+    TestNode alt_initiator(alt_initiator_cfg);
     ClientCommand alt_cmd_slots[2];
     CommandClient alt_client(alt_cmd_slots, 2);
     alt_initiator.enable_command_client(&alt_client);
@@ -1454,7 +1577,8 @@ void test_reply_seal_hook_picks_seal_per_command_requester() {
 
 void test_command_times_out_without_a_reply() {
     Sink tx;
-    TestNode initiator(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig initiator_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode initiator(initiator_cfg);
     ClientCommand slots[2];
     CommandClient client(slots, 2);
     initiator.enable_command_client(&client);
@@ -1492,14 +1616,16 @@ void capture_terminal(void* ctx, btp::Node& /*node*/, const btp::Header& header,
 // and reports NodeRx::TerminalDelivered instead.
 void test_on_terminal_delivers_and_falls_back_to_complete() {
     Sink src_tx;
-    TestNode source(base_config(kSenderId, kSenderBoot, &src_tx));
+    TestConfig source_cfg = base_config(kSenderId, kSenderBoot, &src_tx);
+    TestNode source(source_cfg);
     CHECK(source.begin());
     const std::uint8_t bytes[] = {'h', 'i'};
     CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
                       sizeof(bytes), 0ULL));
 
     Sink dst_tx;
-    TestNode plain(base_config(kPeerId, kPeerBoot, &dst_tx));
+    TestConfig plain_cfg = base_config(kPeerId, kPeerBoot, &dst_tx);
+    TestNode plain(plain_cfg);
     CHECK(plain.begin());
     ReceivedMessage msg{};
     CHECK(deliver(plain, src_tx, 0U, &msg) == NodeRx::Complete);
@@ -1520,16 +1646,17 @@ void test_on_terminal_delivers_and_falls_back_to_complete() {
 // no separate on_terminal() call needed, same round trip as the test above.
 void test_node_config_wires_on_terminal() {
     Sink src_tx;
-    TestNode source(base_config(kSenderId, kSenderBoot, &src_tx));
+    TestConfig source_cfg = base_config(kSenderId, kSenderBoot, &src_tx);
+    TestNode source(source_cfg);
     CHECK(source.begin());
     const std::uint8_t bytes[] = {'h', 'i'};
     CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
                       sizeof(bytes), 0ULL));
 
     Sink dst_tx;
-    NodeConfig cfg = base_config(kPeerId, kPeerBoot, &dst_tx);
+    TestConfig cfg = base_config(kPeerId, kPeerBoot, &dst_tx);
     TerminalCapture capture = {};
-    cfg.terminal = &capture_terminal;
+    cfg.terminal_fn = &capture_terminal;
     cfg.terminal_ctx = &capture;
     TestNode node(cfg);
     CHECK(node.begin());
@@ -1546,13 +1673,15 @@ void test_node_config_wires_on_terminal() {
 // above).
 void test_static_node_bundles_commands() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     ActionCalls calls = {};
     producer.enable_commands(&echo_action, &calls);  // no DedupCache to pass
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     // No consumer.enable_command_client(...) here -- StaticNode<> already
     // has one of its own.
     CHECK(consumer.begin());
@@ -1575,14 +1704,15 @@ void test_static_node_bundles_commands() {
 void test_static_node_config_wires_commands() {
     Sink prod_tx;
     ActionCalls calls = {};
-    NodeConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
-    cfg.command = &echo_action;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    cfg.command_fn = &echo_action;
     cfg.command_ctx = &calls;
     TestNode producer(cfg);
     CHECK(producer.begin());
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     CHECK(consumer.begin());
 
     const std::uint8_t params[2] = {9, 8};
@@ -1600,7 +1730,8 @@ void test_static_node_config_wires_commands() {
 
 void test_status_disabled_by_default() {
     Sink tx;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(node_cfg);
     node.begin();
     CHECK(!node.status_enabled());
     node.tick(1000000U);
@@ -1609,7 +1740,8 @@ void test_status_disabled_by_default() {
 
 void test_status_sends_after_the_period_and_counts_frames_tx() {
     Sink tx;
-    TestNode node(base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(node_cfg);
     node.begin();
     node.enable_status(500U);
     CHECK(node.status_enabled());
@@ -1643,7 +1775,8 @@ void test_status_sends_after_the_period_and_counts_frames_tx() {
 
 void test_subscribe_renews_before_the_lease_runs_out() {
     Sink prod_tx;
-    TestNode producer(base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
     btp::StaticCatalog<> served;
     served.add_topic(0x0101U, 2U, "drive_status", kDriveFields);
     producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
@@ -1654,7 +1787,8 @@ void test_subscribe_renews_before_the_lease_runs_out() {
     producer.begin();
 
     Sink cons_tx;
-    TestNode consumer(base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
     ClientSubscription client_slots[4];
     SubscriptionClient client(client_slots, 4);
     consumer.enable_subscription_client(&client);
@@ -1694,8 +1828,8 @@ void test_sized_node_medium_matches_static_node_defaults() {
 // something this test would otherwise miss silently.
 void test_sized_node_low_round_trips_a_topic() {
     Sink prod_tx;
-    btp::SizedNode<btp::NodeSize::Low> producer(
-        base_config(kSenderId, kSenderBoot, &prod_tx));
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    btp::SizedNode<btp::NodeSize::Low> producer(producer_cfg);
     CHECK(producer.topic(0x0101U, 1U, "x", &fill_drive_by_name)
              .f32("left_rpm")
              .f32("right_rpm")
@@ -1705,8 +1839,8 @@ void test_sized_node_low_round_trips_a_topic() {
     CHECK(producer.begin());
 
     Sink cons_tx;
-    btp::SizedNode<btp::NodeSize::Low> consumer(
-        base_config(kPeerId, kPeerBoot, &cons_tx));
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    btp::SizedNode<btp::NodeSize::Low> consumer(consumer_cfg);
     CHECK(consumer.begin());
     consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U);
     ReceivedMessage msg{};
@@ -1729,8 +1863,8 @@ void test_sized_node_low_round_trips_a_topic() {
 // code path from the other two tiers.
 void test_sized_node_high_begins() {
     Sink tx;
-    btp::SizedNode<btp::NodeSize::High> node(
-        base_config(kSenderId, kSenderBoot, &tx));
+    TestConfig node_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    btp::SizedNode<btp::NodeSize::High> node(node_cfg);
     CHECK(node.begin());
 }
 
