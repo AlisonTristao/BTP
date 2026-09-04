@@ -151,7 +151,10 @@ int main() {
     cfg.open      = &open_message;
     cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);
 
-    btp::StaticNode<> node(cfg);
+    // NodeSize::Low -- learns one small catalogue, holds one subscription
+    // and one outstanding command. sizeof() == 7,248 (node.hpp's own
+    // comment on SizedNode<>). Medium/High are the same shape, more room.
+    btp::SizedNode<btp::NodeSize::Low> node(cfg);
     node.learn_catalog(&on_drive_status);  // this node's own catalogue, learned from the wire
 
     if (!node.begin(make_hello(btp::Role::Consumer), /*connect_deadline_ms=*/2000U)) {

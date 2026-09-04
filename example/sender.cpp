@@ -157,7 +157,10 @@ int main() {
     cfg.seal_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);    // void* ctx never modifies it
     cfg.open_ctx  = const_cast<std::uint8_t*>(kDemoAeadKey);    // void* ctx never modifies it
 
-    btp::StaticNode<> node(cfg);
+    // NodeSize::Low -- one small topic, one command, no subscribers to
+    // speak of. sizeof() == 7,248 (node.hpp's own comment on SizedNode<>).
+    // Medium/High are the same shape, more room.
+    btp::SizedNode<btp::NodeSize::Low> node(cfg);
 
     // in this example, we declare this topic: 
     /*  topic_id:       0x0101U
