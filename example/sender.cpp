@@ -20,7 +20,13 @@
 //                                                waiting for it
 //   ProducerLink::command()                     -> answers COMMAND_REQUEST;
 //                                                StaticNode<> already owns
-//                                                the dedup cache
+//                                                the dedup cache. One action
+//                                                (0x0002) answers LATER
+//                                                instead of from inside the
+//                                                callback -- see the loop
+//                                                below and command()'s own
+//                                                comment (node_config.hpp)
+//                                                for node.complete_command()
 //   ProducerLink::terminal()                    -> called directly for
 //                                                TERMINAL_IN (NodeRx::
 //                                                TerminalDelivered), which
@@ -122,6 +128,13 @@ int main() {
     // in your code, you need to call the clock, and get the time
     std::uint64_t now_ms = 0U;
 
+    // Stands in for "some other task" finishing the 0x0002 ("self_test")
+    // action node_config.hpp's command() deferred -- a real deployment
+    // completes it from wherever that other task actually is, not from this
+    // loop; the polling + pass-counting here exist only so this file stays a
+    // runnable demo with no real second thread.
+    std::uint64_t self_test_done_at_ms = 0U;
+
     std::uint8_t datagram[256];
     for (;;) {
         const std::size_t n = link_poll(datagram, sizeof datagram);
@@ -132,6 +145,20 @@ int main() {
         // ProducerLink::terminal() (node_config.hpp) already ran, nothing
         // left to check here, so no *out to pass.
         node.routine(datagram, n, now_ms);
+
+        // A fresh 0x0002 request just marked itself pending -- pretend the
+        // work takes 5 passes, then answer it from here, exactly as a real
+        // background task would call node.complete_command() once done.
+        if (cfg.has_pending_command() && self_test_done_at_ms == 0U) {
+            self_test_done_at_ms = now_ms + 5U;
+        }
+        if (self_test_done_at_ms != 0U && now_ms >= self_test_done_at_ms) {
+            btp::NodeActionOutcome outcome = {};
+            outcome.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+            node.complete_command(cfg.pending_command(), outcome);
+            cfg.clear_pending_command();
+            self_test_done_at_ms = 0U;
+        }
 
         // remember to update the clock in your code, and get the time
         now_ms += 1U;

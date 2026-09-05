@@ -74,26 +74,46 @@ public:
     // node.enable_commands() calls this for a Fresh COMMAND_REQUEST (docs/
     // commands.md section 2). `outcome` arrives pre-set to Success / no
     // message / no result / not pending -- good news needs no field touched
-    // at all. A slow action can instead set outcome->pending = true, save
-    // `ticket`, and call node.complete_command(ticket, real_outcome) later
-    // from its own task once it actually finishes (btp::NodeActionFn's own
-    // comment walks through both shapes) -- this demo answers every action
-    // synchronously, so it never touches `ticket`.
+    // at all.
+    //
+    // 0x0002 ("self_test") shows the OTHER shape: a slow action sets
+    // outcome->pending = true and saves `ticket` instead of answering right
+    // here -- sender.cpp's loop stands in for "some other task", and calls
+    // node.complete_command(ticket, real_outcome) a few passes later, once
+    // the (simulated) work is done. Nothing goes out until then; a
+    // retransmission arriving in the meantime is dropped as
+    // DuplicateInFlight, same as a slow SYNCHRONOUS handler already gets.
+    // Only one can be outstanding at a time in this demo -- a real
+    // deployment sizes as many ticket slots as it can have actions running
+    // at once.
     bool has_command() const noexcept override { return true; }
     void command(std::uint16_t action_id, std::uint16_t /*action_version*/,
                 btp::ByteView /*parameters*/,
                 btp::NodeActionOutcome* outcome,
-                const btp::NodeCommandTicket& /*ticket*/) override {
+                const btp::NodeCommandTicket& ticket) override {
         switch (action_id) {
-            case 0x0001U:  // e.g. "stop" -- no parameters
+            case 0x0001U:  // e.g. "stop" -- no parameters, answered right away
                 // ... actually stop the robot ...
                 break;     // outcome is already Success
+            case 0x0002U:  // "self_test" -- pretend it takes a while
+                pending_ticket_ = ticket;
+                has_pending_ = true;
+                outcome->pending = true;
+                break;
             default:
                 outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Rejected);
                 outcome->error_code = static_cast<std::uint16_t>(btp::ResultError::NotFound);
                 break;
         }
     }
+
+    // sender.cpp's loop polls this instead of a real task-completion queue --
+    // see the comment on command() above.
+    bool has_pending_command() const noexcept { return has_pending_; }
+    const btp::NodeCommandTicket& pending_command() const noexcept {
+        return pending_ticket_;
+    }
+    void clear_pending_command() noexcept { has_pending_ = false; }
 
     // TERMINAL has no other btp::Node support -- its payload is opaque
     // bytes, no struct, on purpose (docs/session-and-terminal.md section
@@ -108,6 +128,12 @@ public:
         node.send(btp::MessageType::Terminal, btp::object_id::kTerminalOut,
                   payload.data, payload.size, now_ms * 1000ULL);
     }
+
+private:
+    // Backs the 0x0002 ("self_test") demo above -- one ticket at a time, no
+    // queue, this is illustration, not a pattern to copy verbatim.
+    btp::NodeCommandTicket pending_ticket_{};
+    bool has_pending_ = false;
 };
 
 // Everything btp::Node calls out to for receiver.cpp's consumer, in one
