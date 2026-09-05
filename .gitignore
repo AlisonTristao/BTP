@@ -1,4 +1,5 @@
 /build/
+/bv/
 /.pio/
 /tests/embedded/.pio/
 /example/build/
