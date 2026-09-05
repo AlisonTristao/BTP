@@ -86,6 +86,76 @@ builds its own, there is no enum to extend.
 
 Between transports only the numbers change, never the semantics.
 
+## The node layer
+
+The codec above is the wire; most consumers don't hand-roll frames at all --
+they build a `btp::Node` (target `btp::node`) and get identity, sequencing,
+receive, an optional responder session and a schema catalogue wired into one
+object. Every external dependency -- the link, encryption, terminal, commands
+-- is a virtual method on `btp::NodeConfig`, an abstract class a consumer
+**inherits from once**; `send()` is the only one required, everything else
+defaults to "this axis is off":
+
+```cpp
+#include "btp/node.hpp"
+
+class RobotLink : public btp::NodeConfig {
+public:
+    RobotLink() {
+        source_id = 0x00CAFE01U;          // non-zero, usually the MAC
+        boot_id   = 0x0000B001U;          // non-zero, changes every boot
+        transport = btp::kEspNowTransport;
+    }
+    bool send(const std::uint8_t* frame, std::size_t n) override {
+        return esp_now_send(peer_mac_, frame, n) == ESP_OK;
+    }
+    // has_seal()/seal(), has_open()/open(), has_terminal()/terminal(),
+    // has_command()/command() -- override only the axes this node needs.
+};
+
+RobotLink link;
+btp::SizedNode<btp::NodeSize::Medium> node(link);  // owns every buffer, see below
+node.begin("example-robot",
+          btp::HelloBuilder(btp::Role::Producer, my_uuid).build());
+
+std::uint64_t now_ms = 0U;
+for (;;) {
+    const std::size_t n = link_poll(datagram, sizeof datagram);
+    node.routine(datagram, n, now_ms);  // receive + due topics + session watchdog
+    now_ms = read_clock();
+}
+```
+
+Storage -- reassembly slots, seal scratch, the schema catalogue, subscription
+and command tables -- is caller-owned, never allocated by BTP. Reasoning
+about the ten template parameters that size it by hand is exactly the kind of
+thing worth naming once, so `btp::SizedNode<NodeSize::Low | Medium | High>`
+picks all ten together, as one of three memory tiers:
+
+| tier | `sizeof()` | fits |
+| --- | ---: | --- |
+| `Low` | ~7.2 KiB | one small topic -- a battery-powered sensor, or a memory-starved corner of a bigger deployment |
+| `Medium` | ~17.4 KiB | the ESP32-class robot this library was sized for -- identical to `StaticNode<>`'s bare defaults |
+| `High` | ~67.7 KiB | a hub or desktop aggregator: many topics, many subscribers, several concurrent large reassemblies |
+
+`btp::StaticNode<Slots, SlotBytes, SealBytes, ScratchBytes, CatalogTopics,
+CatalogFields, CatalogStringBytes, MaxSubscriptions, MaxCommands,
+CommandBytes>` is the same storage with every dimension spelled out by hand --
+`SizedNode`'s own alias target, and the escape hatch for a node that needs one
+dimension off that curve: a desktop hub with a huge catalogue but few
+concurrent reassemblies, say.
+
+[`example/sender.cpp`](example/sender.cpp) /
+[`example/receiver.cpp`](example/receiver.cpp) are a producer and a consumer
+built on `btp::Node` end to end; [`example/node_config.hpp`](example/node_config.hpp)
+holds the `NodeConfig` subclass each one inherits from -- `ProducerLink` /
+`ConsumerLink` -- with the `send()` / `seal()` / `open()` / `terminal()` /
+`command()` overrides BTP calls out to, kept in one file since the two
+programs are one demo split across two processes sharing one AEAD key.
+[`example/README.md`](example/README.md) walks the whole pair; [docs/library.md
+§16](https://alisontristao.github.io/BTP/library/#16-the-node-layer) covers
+the rest of the contract -- sessions, subscriptions, commands, STATUS.
+
 ## Building
 
 ```bash
