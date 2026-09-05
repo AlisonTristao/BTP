@@ -1,6 +1,6 @@
 {
   "name": "btp",
-  "version": "2.41.0",
+  "version": "2.42.0",
   "description": "Portable, allocation-free codec, transport and AEAD utilities for BTP (Binary Telemetry Protocol) v1/v2 -- real-time communication and data plotting over ESP32/ESP-NOW",
   "keywords": ["btp", "telemetry", "protocol", "codec", "esp32", "esp-now"],
   "build": {

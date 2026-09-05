@@ -72,14 +72,18 @@ public:
     }
 
     // node.enable_commands() calls this for a Fresh COMMAND_REQUEST (docs/
-    // commands.md section 2) -- SYNCHRONOUSLY, no "pending, complete later"
-    // path, so a slow action belongs on a task of its own that answers once
-    // it's done. `outcome` arrives pre-set to Success / no message / no
-    // result -- good news needs no field touched at all.
+    // commands.md section 2). `outcome` arrives pre-set to Success / no
+    // message / no result / not pending -- good news needs no field touched
+    // at all. A slow action can instead set outcome->pending = true, save
+    // `ticket`, and call node.complete_command(ticket, real_outcome) later
+    // from its own task once it actually finishes (btp::NodeActionFn's own
+    // comment walks through both shapes) -- this demo answers every action
+    // synchronously, so it never touches `ticket`.
     bool has_command() const noexcept override { return true; }
     void command(std::uint16_t action_id, std::uint16_t /*action_version*/,
                 btp::ByteView /*parameters*/,
-                btp::NodeActionOutcome* outcome) override {
+                btp::NodeActionOutcome* outcome,
+                const btp::NodeCommandTicket& /*ticket*/) override {
         switch (action_id) {
             case 0x0001U:  // e.g. "stop" -- no parameters
                 // ... actually stop the robot ...

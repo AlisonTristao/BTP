@@ -82,9 +82,10 @@ void Node::terminal_thunk(void* ctx, Node& node, const Header& header,
 
 void Node::command_thunk(void* ctx, std::uint16_t action_id,
                          std::uint16_t action_version, ByteView parameters,
-                         NodeActionOutcome* outcome) noexcept {
+                         NodeActionOutcome* outcome,
+                         const NodeCommandTicket& ticket) noexcept {
     static_cast<NodeConfig*>(ctx)->command(action_id, action_version, parameters,
-                                           outcome);
+                                           outcome, ticket);
 }
 
 EndpointSealFn Node::current_seal() const noexcept {
@@ -544,10 +545,17 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
         case DedupVerdict::Fresh: {
             NodeActionOutcome outcome = {};
             outcome.status = static_cast<std::uint8_t>(ResultStatus::Success);
+            const NodeCommandTicket ticket{request, req.action_id,
+                                          req.action_version, slot, true};
             on_command_(on_command_ctx_, req.action_id, req.action_version,
-                       req.parameters, &outcome);
-            emit_command_result(request, req.action_id, req.action_version, outcome,
-                                slot);
+                       req.parameters, &outcome, ticket);
+            // pending: the handler kept the ticket for later -- nothing to
+            // send now, the slot stays Reserved (a retransmission in the
+            // meantime classifies DuplicateInFlight and is dropped).
+            if (!outcome.pending) {
+                emit_command_result(request, req.action_id, req.action_version,
+                                    outcome, slot);
+            }
             break;
         }
         case DedupVerdict::DuplicateComplete: {
@@ -576,7 +584,7 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
     }
 }
 
-void Node::emit_command_result(const Header& request, std::uint16_t action_id,
+bool Node::emit_command_result(const Header& request, std::uint16_t action_id,
                                std::uint16_t action_version,
                                const NodeActionOutcome& outcome,
                                std::size_t slot) noexcept {
@@ -598,17 +606,31 @@ void Node::emit_command_result(const Header& request, std::uint16_t action_id,
     std::size_t written = 0U;
     if (encode_command_result(result, scratch_buffer_, scratch_capacity_, &written) !=
         MessageError::Ok) {
-        return;
+        return false;
     }
     // Remember the result BEFORE sending -- the action ran exactly once
     // whether or not this send succeeds; a later retransmission of the same
     // identity must still find it and replay rather than running again.
-    commands_->record_result(slot, scratch_buffer_, written);
+    // Also this call's own guard against a stale/repeated ticket
+    // (complete_command()): a slot that is not Reserved any more --
+    // already Complete from an earlier call, or long evicted -- refuses
+    // here and nothing is sent.
+    if (commands_->record_result(slot, scratch_buffer_, written) != MessageError::Ok) {
+        return false;
+    }
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
     reply_seal_for(request, &seal, &seal_ctx);
     send_with(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
              resolve_now(0U) * 1000ULL, seal, seal_ctx);
+    return true;
+}
+
+bool Node::complete_command(const NodeCommandTicket& ticket,
+                            const NodeActionOutcome& outcome) noexcept {
+    if (!ticket.valid() || commands_ == nullptr) return false;
+    return emit_command_result(ticket.request, ticket.action_id,
+                               ticket.action_version, outcome, ticket.slot);
 }
 
 void Node::emit_command_reject(const Header& request, std::uint16_t action_id,

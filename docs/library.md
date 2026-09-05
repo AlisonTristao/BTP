@@ -2688,7 +2688,7 @@ constructor; every external dependency is a virtual method, each an optional
 | `has_seal()` / `seal()` | optional | encrypt one logical payload; not overridden → `send()` is cleartext |
 | `has_open()` / `open()` | optional | decrypt one received payload; not overridden → `receive()` hands back the sealed bytes |
 | `has_terminal()` / `terminal()` | optional | answer a `TERMINAL_IN` / `TERMINAL_OUT` frame directly ([§16.5](#165-terminal-nodeon_terminal-nodeconfigterminal)) |
-| `has_command()` / `command()` | optional, `SizedNode<>` / `StaticNode<>` only | run a Fresh `COMMAND_REQUEST` synchronously ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
+| `has_command()` / `command()` | optional, `SizedNode<>` / `StaticNode<>` only | run a Fresh `COMMAND_REQUEST`, synchronously or not ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
 | `reply_seal()` | optional | picks the seal for ONE automatic reply (`SUBSCRIBE_RESULT` / `UNSUBSCRIBE_RESULT` / `COMMAND_RESULT` / `MANIFEST_DATA`) from the *original request's* header; default falls through to `has_seal()` / `seal()` |
 
 ```cpp
@@ -3237,20 +3237,48 @@ btp::DedupCache commands(slots, storage, 8, requesters, 4);
 node.enable_commands(&commands, &arm_motors, &robot);
 
 void arm_motors(void* ctx, std::uint16_t action_id, std::uint16_t version,
-               btp::ByteView parameters, btp::NodeActionOutcome* outcome) {
+               btp::ByteView parameters, btp::NodeActionOutcome* outcome,
+               const btp::NodeCommandTicket& ticket) {
     // ... do it, synchronously ...
     outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
 }
 ```
 
 `receive()` classifies a `COMMAND_REQUEST` against the cache
-(`NodeRx::CommandServed` either way): Fresh runs the handler once, builds and
-sends `COMMAND_RESULT` from the `NodeActionOutcome` it filled, and records it;
+(`NodeRx::CommandServed` either way): Fresh runs the handler once;
 `DuplicateComplete` replays the stored result verbatim, no second run;
 `DuplicateInFlight` drops silently (the peer retries); `Conflict` /
 `Evicted` / `CapacityExhausted` get an automatic `REJECTED` / `BUSY` reply.
-There is no "pending, complete me later" path in this first cut -- a slow
-action belongs on a task of its own that answers once done.
+
+A Fresh handler answers two ways. Synchronously (the original shape): fill
+`outcome` and return -- the node builds and sends `COMMAND_RESULT` from it
+and records it, same as always. Or asynchronously (`NodeActionOutcome::
+pending`, 2.42.0): set `outcome->pending = true` and return having saved a
+copy of `ticket` (a plain POD -- the original request's `Header`, the action
+id/version, and its reserved `DedupCache` slot) -- nothing is sent yet, and a
+retransmission in the meantime classifies `DuplicateInFlight` exactly as it
+would during a slow synchronous call, just held open longer. Once the real
+work finishes, on any task, `node.complete_command(ticket, real_outcome)`
+does what returning synchronously would have:
+
+```cpp
+void arm_motors(void* ctx, std::uint16_t action_id, std::uint16_t version,
+               btp::ByteView parameters, btp::NodeActionOutcome* outcome,
+               const btp::NodeCommandTicket& ticket) {
+    outcome->pending = true;
+    queue_for_the_motor_task(ticket, action_id, parameters);  // returns now
+}
+
+// ... later, on the motor task, once it actually finishes:
+btp::NodeActionOutcome done = {};
+done.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+node.complete_command(saved_ticket, done);
+```
+
+`complete_command()` returns `false` and sends nothing for a ticket that is
+not `valid()` (default-constructed) or was already spent -- calling it twice
+on the same ticket only sends the first time, the second finds the slot no
+longer `Reserved` and stops there.
 
 ```cpp
 // initiator:

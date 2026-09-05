@@ -185,8 +185,9 @@ public:
     }
     bool has_command() const noexcept override { return command_fn != nullptr; }
     void command(std::uint16_t id, std::uint16_t ver, btp::ByteView params,
-                btp::NodeActionOutcome* out) override {
-        command_fn(command_ctx, id, ver, params, out);
+                btp::NodeActionOutcome* out,
+                const btp::NodeCommandTicket& ticket) override {
+        command_fn(command_ctx, id, ver, params, out, ticket);
     }
     void reply_seal(const btp::Header& request, btp::EndpointSealFn* out_seal,
                     void** out_ctx) override {
@@ -1624,6 +1625,7 @@ using btp::DedupRequester;
 using btp::DedupSlot;
 using btp::DedupStorage;
 using btp::NodeActionOutcome;
+using btp::NodeCommandTicket;
 
 struct ActionCalls {
     int calls;
@@ -1631,7 +1633,8 @@ struct ActionCalls {
 };
 
 void echo_action(void* ctx, std::uint16_t action_id, std::uint16_t /*action_version*/,
-                 btp::ByteView parameters, NodeActionOutcome* outcome) {
+                 btp::ByteView parameters, NodeActionOutcome* outcome,
+                 const NodeCommandTicket& /*ticket*/) {
     ActionCalls* c = static_cast<ActionCalls*>(ctx);
     ++c->calls;
     c->last_action_id = action_id;
@@ -1687,6 +1690,93 @@ void test_command_round_trip_and_dedup_replay() {
     CHECK(deliver(responder, init_tx, 100U, &msg) == NodeRx::CommandServed);
     CHECK(calls.calls == 1);  // still 1
     CHECK(resp_tx.count() == 1U);
+}
+
+// ---------------------------------------------------------------------------
+// btp::Node -- asynchronous commands (NodeActionOutcome::pending, 2.42.0)
+// ---------------------------------------------------------------------------
+
+struct AsyncCall {
+    int calls = 0;
+    bool got_ticket = false;
+    NodeCommandTicket ticket{};
+};
+
+// Defers every action: never answers from inside the callback, just stashes
+// the ticket for the test to complete explicitly (standing in for "handed to
+// another task").
+void defer_action(void* ctx, std::uint16_t /*action_id*/,
+                  std::uint16_t /*action_version*/, btp::ByteView /*parameters*/,
+                  NodeActionOutcome* outcome, const NodeCommandTicket& ticket) {
+    AsyncCall* c = static_cast<AsyncCall*>(ctx);
+    ++c->calls;
+    c->ticket = ticket;
+    c->got_ticket = true;
+    outcome->pending = true;
+}
+
+void test_async_command_completes_later_via_complete_command() {
+    Sink resp_tx;
+    TestConfig responder_cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
+    TestNode responder(responder_cfg);
+    DedupSlot dedup_slots[4];
+    std::uint8_t dedup_bytes[4][64];
+    DedupStorage dedup_storage[4];
+    for (std::size_t i = 0; i < 4; ++i) dedup_storage[i] = {dedup_bytes[i], 64};
+    DedupRequester dedup_requesters[2];
+    DedupCache dedup(dedup_slots, dedup_storage, 4, dedup_requesters, 2);
+    AsyncCall async{};
+    responder.enable_commands(&dedup, &defer_action, &async);
+    CHECK(responder.begin());
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    ClientCommand cmd_slots[2];
+    CommandClient client(cmd_slots, 2);
+    initiator.enable_command_client(&client);
+    CHECK(initiator.begin());
+
+    const std::uint8_t params[2] = {7, 8};
+    const std::uint32_t local_id =
+        initiator.command(kSenderId, kSenderBoot, 5U, 1U, params, sizeof(params));
+    CHECK(local_id != 0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(responder, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(async.calls == 1);
+    CHECK(async.got_ticket);
+    CHECK(resp_tx.count() == 0U);  // pending -- nothing sent yet
+
+    // A retransmission while still pending: classify() reports
+    // DuplicateInFlight (dropped) -- the action does not run again, and
+    // still nothing goes out, the same protection a slow SYNCHRONOUS handler
+    // already gets, just held open longer.
+    CHECK(deliver(responder, init_tx, 50U, &msg) == NodeRx::CommandServed);
+    CHECK(async.calls == 1);
+    CHECK(resp_tx.count() == 0U);
+
+    // The real work finishes, on whatever task -- completes the ticket.
+    NodeActionOutcome outcome = {};
+    outcome.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    const std::uint8_t result_bytes[1] = {0x2AU};
+    outcome.result_data = result_bytes;
+    outcome.result_size = sizeof(result_bytes);
+    CHECK(responder.complete_command(async.ticket, outcome));
+    CHECK(resp_tx.count() == 1U);
+
+    CHECK(deliver(initiator, resp_tx, 50U, &msg) == NodeRx::CommandHandled);
+    CHECK(initiator.command_outcome().event == CommandEvent::Completed);
+    CHECK(initiator.command_outcome().local_id == local_id);
+    CHECK(initiator.command_outcome().result.size == 1U);
+
+    // The ticket is spent -- calling it again sends nothing more and reports
+    // false, same as a default-constructed (never armed) one.
+    resp_tx.clear();
+    CHECK(!responder.complete_command(async.ticket, outcome));
+    CHECK(resp_tx.count() == 0U);
+    CHECK(!responder.complete_command(NodeCommandTicket{}, outcome));
+    CHECK(resp_tx.count() == 0U);
 }
 
 // Same cfg.reply_seal mechanism as the subscribe test above, exercised on
@@ -2179,6 +2269,7 @@ int main() {
     test_publish_with_overrides_cfg_seal();
 
     test_command_round_trip_and_dedup_replay();
+    test_async_command_completes_later_via_complete_command();
     test_command_times_out_without_a_reply();
     test_reply_seal_hook_picks_seal_per_command_requester();
     test_on_terminal_delivers_and_falls_back_to_complete();

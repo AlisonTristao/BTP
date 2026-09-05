@@ -138,27 +138,63 @@ struct PublishRegistration {
 
 // Filled by NodeActionFn (below) to describe how a COMMAND_REQUEST's action
 // finished. Zero-initialise before your own fields matter -- status defaults
-// to 0 (ResultStatus::Success) and error_code to 0 (ResultError::None), so a
-// handler that only has good news to report can leave them alone.
+// to 0 (ResultStatus::Success), error_code to 0 (ResultError::None) and
+// pending to false, so a handler that only has good news to report, right
+// away, can leave every field alone.
 struct NodeActionOutcome {
     std::uint8_t status;              // ResultStatus
     std::uint16_t error_code;         // ResultError
     const char* message;              // NUL-terminated UTF-8, optional (nullptr -> none)
     const std::uint8_t* result_data;  // optional action-defined result bytes
     std::size_t result_size;
+
+    // true: the action is not finished yet -- every field above is ignored,
+    // no COMMAND_RESULT goes out from this call. `ticket` (NodeActionFn's
+    // last parameter) is already armed for this request; save a copy and
+    // call Node::complete_command(ticket, outcome) once the action actually
+    // finishes, from any task -- see NodeCommandTicket below. false (the
+    // zero-initialised default) is the synchronous behavior this outcome
+    // always had before pending existed: unchanged.
+    bool pending;
+};
+
+// A COMMAND_REQUEST accepted for out-of-band completion -- see
+// NodeActionOutcome::pending above. Handed to NodeActionFn already armed;
+// opaque otherwise, copy it whole (it is a plain POD, cheap to copy) into
+// wherever the async work tracks its own state, and pass it back to
+// complete_command() unchanged once done. A default-constructed /
+// zero-initialised ticket is not valid -- valid() says so, and
+// complete_command() refuses it the same way it refuses a stale one used
+// twice.
+struct NodeCommandTicket {
+    Header request;               // the original COMMAND_REQUEST's envelope
+    std::uint16_t action_id;
+    std::uint16_t action_version;
+    std::size_t slot;             // this request's reserved DedupCache slot
+    bool armed;
+
+    bool valid() const noexcept { return armed; }
 };
 
 // Called once for a Fresh COMMAND_REQUEST (btp::DedupCache has not seen this
-// requester + sequence before). Runs the action SYNCHRONOUSLY -- there is no
-// "pending, complete me later" path in this first cut, so a slow action
-// belongs on a task of its own, with the handler answering once it is done.
-// Fill `outcome` (pre-set to Success, no message, no result) and return; the
-// node builds COMMAND_RESULT from it, sends it, and records it so a
-// retransmission of this exact request replays the same bytes instead of
-// running the action a second time.
+// requester + sequence before). Two ways to answer:
+//   SYNCHRONOUSLY (the original, "first cut" shape, still the common case):
+//     fill `outcome` (pre-set to Success, no message, no result, not
+//     pending) and return -- the node builds COMMAND_RESULT from it, sends
+//     it, and records it so a retransmission of this exact request replays
+//     the same bytes instead of running the action a second time.
+//   ASYNCHRONOUSLY: set outcome->pending = true and return, having saved a
+//     copy of `ticket`. Nothing is sent yet -- classify() already reports a
+//     retransmission arriving in the meantime as DuplicateInFlight (dropped,
+//     not re-executed), the exact same protection a slow synchronous call
+//     gets for free, just held open longer. Once the real work finishes
+//     (any task), call Node::complete_command(ticket, real_outcome) with
+//     pending left false this time -- that call does what returning from
+//     this one synchronously would have.
 using NodeActionFn = void (*)(void* ctx, std::uint16_t action_id,
                               std::uint16_t action_version, ByteView parameters,
-                              NodeActionOutcome* outcome);
+                              NodeActionOutcome* outcome,
+                              const NodeCommandTicket& ticket);
 
 // ---------------------------------------------------------------------------
 // Configuration -- an abstract class YOU inherit from
@@ -292,21 +328,23 @@ public:
         (void)now_ms;
     }
 
-    // Runs a Fresh COMMAND_REQUEST's action synchronously -- see
-    // NodeActionFn's own comment for the parameters. has_command() false
-    // (the default) means COMMAND_REQUEST goes unanswered. Unlike terminal()
-    // above, this ONLY takes effect on a StaticNode<> -- it owns the
-    // DedupCache this needs and wires it from here in its own constructor; a
-    // bare Node has no such storage to bind it to, and ignores this --
-    // call Node::enable_commands(cache, handler, ctx) yourself there
-    // instead, as always.
+    // Runs a Fresh COMMAND_REQUEST's action -- synchronously or not, see
+    // NodeActionFn's own comment for the parameters (this is that same
+    // signature). has_command() false (the default) means COMMAND_REQUEST
+    // goes unanswered. Unlike terminal() above, this ONLY takes effect on a
+    // StaticNode<> -- it owns the DedupCache this needs and wires it from
+    // here in its own constructor; a bare Node has no such storage to bind
+    // it to, and ignores this -- call Node::enable_commands(cache, handler,
+    // ctx) yourself there instead, as always.
     virtual bool has_command() const noexcept { return false; }
     virtual void command(std::uint16_t action_id, std::uint16_t action_version,
-                         ByteView parameters, NodeActionOutcome* outcome) {
+                         ByteView parameters, NodeActionOutcome* outcome,
+                         const NodeCommandTicket& ticket) {
         (void)action_id;
         (void)action_version;
         (void)parameters;
         (void)outcome;
+        (void)ticket;
     }
 
     // Picks the seal for ONE automatic reply the node is about to send: a
@@ -357,8 +395,10 @@ enum class NodeRx : std::uint8_t {
                          // subscriptions() table -- the node already replied.
     SubscriptionHandled,  // a SUBSCRIBE_RESULT for a subscribe()/renew() this
                           // node holds. See subscription_event().
-    CommandServed,   // a COMMAND_REQUEST against commands() -- the node already
-                     // ran the action (or replayed / rejected it) and replied.
+    CommandServed,   // a COMMAND_REQUEST against commands() -- the node ran the
+                     // action (or replayed / rejected it); already replied,
+                     // UNLESS the action marked its outcome pending (2.42.0) --
+                     // then nothing was sent yet, see NodeActionOutcome::pending.
     CommandHandled,  // a COMMAND_RESULT for a command() this node holds. See
                      // command_outcome().
     CatalogUpdated,  // a MANIFEST_DATA -- the node ingested it into the learn catalog.
@@ -658,8 +698,8 @@ public:
     // subscriptions -- the caller sizes the cache for the largest request /
     // result it will ever see.
 
-    // RESPONDER: `cache` deduplicates; `handler` runs a Fresh request
-    // synchronously (NodeActionFn above). nullptr for either detaches.
+    // RESPONDER: `cache` deduplicates; `handler` runs a Fresh request,
+    // synchronously or not (NodeActionFn above). nullptr for either detaches.
     void enable_commands(DedupCache* cache, NodeActionFn handler, void* ctx) noexcept {
         commands_ = cache;
         on_command_ = handler;
@@ -667,6 +707,22 @@ public:
     }
     DedupCache* commands() noexcept { return commands_; }
     const DedupCache* commands() const noexcept { return commands_; }
+
+    // Finishes a command NodeActionFn marked outcome->pending (library
+    // 2.42.0) -- builds and sends the same COMMAND_RESULT a synchronous
+    // return would have, from `ticket` (still armed) and `outcome` (pending
+    // now ignored either way). Safe to call from a different task than the
+    // one that ran receive() -- ticket.slot names a DedupCache slot, and
+    // classify()/record_result() are the only two calls not synchronised
+    // with each other by the library itself (same note as always: a caller
+    // running RX on another thread already needs its own critical section
+    // around the pair). Returns false, and sends nothing: !ticket.valid()
+    // (default-constructed, or already completed once -- a ticket is spent
+    // the first time this succeeds, calling it again on the same one hits
+    // this the same way an out-of-range slot would) or enable_commands()
+    // was never called.
+    bool complete_command(const NodeCommandTicket& ticket,
+                          const NodeActionOutcome& outcome) noexcept;
 
     // INITIATOR: hold outstanding commands on a peer. nullptr detaches.
     void enable_command_client(CommandClient* client) noexcept {
@@ -933,7 +989,14 @@ private:
     void serve_unsubscribe(const Header& request, ByteView payload) noexcept;
     void drain_subscription_renewals(std::uint64_t now_ms) noexcept;
     void serve_command(const Header& request, ByteView payload) noexcept;
-    void emit_command_result(const Header& request, std::uint16_t action_id,
+    // Returns false, sending nothing, when commands_->record_result() itself
+    // refuses `slot` (WrongOrder -- already completed by an earlier call, the
+    // way a spent/reused NodeCommandTicket would; or InvalidArgument -- an
+    // out-of-range index) -- complete_command()'s guard against a stale or
+    // repeated ticket. The Fresh path in serve_command() below never sees
+    // false in practice (its slot is always freshly Reserved), but checks
+    // the same way for the one code path either caller goes through.
+    bool emit_command_result(const Header& request, std::uint16_t action_id,
                              std::uint16_t action_version,
                              const NodeActionOutcome& outcome,
                              std::size_t slot) noexcept;
@@ -971,7 +1034,8 @@ private:
     // entirely, same as always.
     static void command_thunk(void* ctx, std::uint16_t action_id,
                               std::uint16_t action_version, ByteView parameters,
-                              NodeActionOutcome* outcome) noexcept;
+                              NodeActionOutcome* outcome,
+                              const NodeCommandTicket& ticket) noexcept;
 
   private:
     // cfg_.has_seal() ? &seal_thunk : nullptr, and the matching ctx -- every
