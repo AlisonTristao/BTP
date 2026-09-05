@@ -23,6 +23,7 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       endpoint_(),
       receiver_(slots, storage, slot_count, reassembly_timeout_ms,
                 cfg.transport),
+      last_receive_outcome_(ReceiveOutcome::InvalidArgument),
       session_(Hello{}, 0U),
       session_on_(false),
       last_session_event_(SessionEvent::None),
@@ -175,6 +176,7 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
     last_session_event_ = SessionEvent::None;
     last_initiator_event_ = InitiatorEvent::None;
     if (out == nullptr || datagram == nullptr || size == 0U) {
+        last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
         return NodeRx::DroppedFrame;
     }
 
@@ -193,8 +195,10 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
     if (error != Error::Ok) {
         if (error == Error::CrcMismatch) {
             ++session_path_dropped_crc_;
+            last_receive_outcome_ = ReceiveOutcome::DroppedCrc;
         } else {
             ++session_path_dropped_decode_;
+            last_receive_outcome_ = ReceiveOutcome::DroppedDecode;
         }
         return NodeRx::DroppedFrame;
     }
@@ -210,7 +214,10 @@ NodeRx Node::receive(const DecodedFrame& frame, std::uint64_t now_ms,
                      ReceivedMessage* out) noexcept {
     last_session_event_ = SessionEvent::None;
     last_initiator_event_ = InitiatorEvent::None;
-    if (out == nullptr) return NodeRx::DroppedFrame;
+    if (out == nullptr) {
+        last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
+        return NodeRx::DroppedFrame;
+    }
     return route_decoded(frame, now_ms, out);
 }
 
@@ -279,6 +286,7 @@ NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
 
 NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
                     std::uint64_t now_ms) noexcept {
+    last_receive_outcome_ = outcome;
     switch (outcome) {
         case ReceiveOutcome::Complete:
             break;

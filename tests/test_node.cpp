@@ -37,6 +37,7 @@ using btp::MessageType;
 using btp::NodeConfig;
 using btp::NodeRx;
 using btp::ReceivedMessage;
+using btp::ReceiveOutcome;
 using btp::Role;
 using btp::kEspNowTransport;
 using btp::SessionEvent;
@@ -575,6 +576,10 @@ void test_stats() {
     ReceivedMessage msg{};
     CHECK(receiver.receive(junk, sizeof(junk), 0U, &msg) == NodeRx::DroppedFrame);
     CHECK(receiver.stats().rx.dropped_decode >= 1U);
+    // receive_outcome() recovers the reason NodeRx::DroppedFrame rounds off --
+    // a caller with its own per-reason bookkeeping needs this, not just the
+    // cumulative stats() counter (see the accessor's own comment).
+    CHECK(receiver.receive_outcome() == ReceiveOutcome::DroppedDecode);
 
     Sink tx;
     TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
@@ -585,6 +590,7 @@ void test_stats() {
                 1ULL);
     CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::Complete);
     CHECK(receiver.stats().rx.completed == 1U);
+    CHECK(receiver.receive_outcome() == ReceiveOutcome::Complete);
 }
 
 // --- discovery: consumer learns a schema from MANIFEST_DATA -----------------

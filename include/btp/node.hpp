@@ -575,6 +575,21 @@ public:
     NodeRx receive(const DecodedFrame& frame, std::uint64_t now_ms,
                    ReceivedMessage* out) noexcept;
 
+    // The btp::Receiver-level detail behind the most recent receive()'s
+    // NodeRx::Pending / NodeRx::DroppedFrame -- same idea as session_event()
+    // for the session path, one level further down. NodeRx collapses
+    // ReceiveOutcome's seven values into two (Pending covers
+    // FragmentAccepted/DuplicateFragment; DroppedFrame covers
+    // DroppedCrc/DroppedDecode/DroppedReassembly/InvalidArgument) because
+    // most callers only need "stored, nothing yet" vs "rejected" -- but a
+    // caller with its own per-reason bookkeeping (a hub clearing a pending
+    // relay reservation only on DroppedReassembly, say, not on every drop)
+    // needs the original reason, not Node's rounder one. Meaningless (stale,
+    // from whatever receive() last actually reached btp::Receiver) when the
+    // most recent NodeRx was anything else -- a session/initiator/
+    // subscription/command/catalog/terminal outcome never touches this.
+    ReceiveOutcome receive_outcome() const noexcept { return last_receive_outcome_; }
+
     // ---- session responder (opt-in) -------------------------------------
     // `local` is this peer's HELLO advertisement (role, versions, limits,
     // peer_uuid, config_revision). `hello_deadline_ms` bounds the wait for the
@@ -1056,6 +1071,7 @@ private:
 
     Endpoint endpoint_;
     Receiver receiver_;
+    ReceiveOutcome last_receive_outcome_;  // see receive_outcome()'s own comment
     Session session_;       // placeholder HELLO until enable_session()
     bool session_on_;
     SessionEvent last_session_event_;
