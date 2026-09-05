@@ -3281,8 +3281,24 @@ Best-effort, not exact -- documented in full on `enable_status()`: `frames_rx`
 / `reassembly_completed` both read the reassembled-logical-message counter
 (the closest thing to "a frame" this layer keeps), `frames_tx` only counts
 `send()` / `send_with()` (not the bootstrap `HELLO` / `SUBSCRIBE` /
-`COMMAND_REQUEST` traffic), `telemetry_dropped` is not tracked separately yet
-(reads 0), and v2's per-topic `TopicStatusRecord` list is not built (v1 only).
+`COMMAND_REQUEST` traffic), and `telemetry_dropped` is not tracked separately
+yet (reads 0).
+
+`node.enable_status_topics(callback, ctx)` (2.41.0) upgrades the next
+`emit_status()` from plain v1 to v2
+([Commands and discovery §5.2](commands.md#52-status-version-2)): one
+`TopicStatusRecord` per topic of the **served** catalog (`serve_catalog()`)
+that currently has at least one active subscriber
+(`enable_subscriptions()`). `source_id` (this node's own), `subscriber_count`
+and `effective_rate_millihz` all come from the attached `SubscriptionTable`
+directly -- `callback` is only asked for the two counters genuinely outside
+this layer's own state, `bytes_total` and `samples_dropped_total`, the same
+boundary `publish()` itself draws around the caller's own TX path. At most
+`Node::kMaxStatusTopics` (8) topics are reported per emission, in the served
+catalog's own order; a catalog with more than that concurrently subscribed
+has the rest silently left out of *that* message. No callback attached, no
+served catalog, no subscription table, or simply nothing subscribed right
+now: falls back to v1, unchanged from before this existed.
 
 ### 16.9 What stays out
 
@@ -3300,8 +3316,7 @@ BTP frame; a caller that owns its own framing (feeds bytes through
 `btp::SerialDecoder`, de-pads a HID report) hands the decoded frame to
 `receive(const DecodedFrame&, …)` (2.35.0) instead, and gets the identical
 session / reassembly / discovery path. A single encoded frame must still fit
-the ESP-NOW ceiling — large-Serial TX is a later addition. And **STATUS v2**
-(§16.8) -- no per-topic record list yet.
+the ESP-NOW ceiling — large-Serial TX is a later addition.
 
 ---
 

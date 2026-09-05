@@ -112,6 +112,19 @@ using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 using NodeTerminalFn = void (*)(void* ctx, Node& node, const Header& header,
                                 ByteView payload, std::uint64_t now_ms);
 
+// Called by emit_status() once per actively-subscribed topic (see
+// enable_status_topics() below) to fill the two counters this layer cannot
+// know itself -- bytes actually put on the wire and samples dropped are the
+// caller's own TX-path bookkeeping (the priority queue / staging slot this
+// layer deliberately does not own, the same boundary publish() itself draws).
+// `*bytes_total` / `*samples_dropped_total` start at 0; leave either alone to
+// report 0. Do not keep `node` past the callback beyond what emit_status()
+// itself already does (it is mid-send, the same reentrancy publish_named()
+// allows from on_publish()).
+using NodeStatusTopicFn = void (*)(void* ctx, Node& node, std::uint16_t topic_id,
+                                   std::uint64_t* bytes_total,
+                                   std::uint64_t* samples_dropped_total);
+
 // One entry in the registry publish_subscribed_topics() walks: which topic,
 // and the NodeNamedFillFn that fills a sample of it. Registered with
 // on_publish(); plain data otherwise, no invariant of its own to protect --
@@ -713,6 +726,30 @@ public:
     void enable_status(std::uint32_t period_ms) noexcept;
     bool status_enabled() const noexcept { return status_period_ms_ != 0U; }
 
+    // ---- STATUS v2 per-topic block (opt-in, library 2.41.0) ----------------
+    // Upgrades emit_status()'s output from plain v1 to v2 (docs/commands.md
+    // section 5.2): one TopicStatusRecord per topic of the SERVED catalog
+    // (serve_catalog()) that currently has at least one active subscriber
+    // (enable_subscriptions()) -- source_id (this node's own),
+    // subscriber_count and effective_rate_millihz all come from
+    // subscriptions_ directly, the same introspection calls a hand-rolled
+    // reporter would otherwise duplicate; `callback` is asked only for the
+    // two fields genuinely outside this layer's own state (see
+    // NodeStatusTopicFn above). At most kMaxStatusTopics topics are reported
+    // per emission, in the served catalog's own order -- a catalog with more
+    // than that concurrently subscribed has the rest silently left out of
+    // THIS message (no error, no partial-record marker; commands.md places
+    // no lower bound on how many records one STATUS carries).
+    //
+    // Falls back to v1 with no code on either side needing to know: no
+    // callback attached, no served catalog, no subscription table, or simply
+    // nothing subscribed at emit time. nullptr `callback` detaches.
+    static constexpr std::size_t kMaxStatusTopics = 8U;
+    void enable_status_topics(NodeStatusTopicFn callback, void* ctx) noexcept {
+        on_status_topics_ = callback;
+        on_status_topics_ctx_ = ctx;
+    }
+
     // Logical messages sent through send() / send_with() since construction
     // (see the STATUS note above for what this does not count).
     std::uint64_t frames_tx() const noexcept { return frames_tx_; }
@@ -982,6 +1019,8 @@ private:
     std::uint32_t status_period_ms_;  // 0 == disabled
     std::uint64_t status_last_ms_;
     std::uint64_t status_started_ms_;
+    NodeStatusTopicFn on_status_topics_;  // nullptr until enable_status_topics()
+    void* on_status_topics_ctx_;
 
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;

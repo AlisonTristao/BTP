@@ -45,6 +45,8 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       status_period_ms_(0U),
       status_last_ms_(0U),
       status_started_ms_(0U),
+      on_status_topics_(nullptr),
+      on_status_topics_ctx_(nullptr),
       learn_catalog_(nullptr),
       on_sample_(nullptr),
       on_sample_ctx_(nullptr),
@@ -695,11 +697,43 @@ void Node::emit_status(std::uint64_t now_ms) noexcept {
         commands_ != nullptr ? commands_->stats().replayed : 0U;
     status.telemetry_dropped = 0U;  // not tracked separately yet
 
-    std::size_t written = 0U;
-    if (encode_status_v1(status, scratch_buffer_, scratch_capacity_, &written) !=
-        MessageError::Ok) {
-        return;
+    // v2 per-topic block (2.41.0): only when a callback is attached AND both
+    // the served catalog and the subscription table are up -- any one of the
+    // three missing falls back to plain v1 below, same as nothing being
+    // subscribed right now does.
+    TopicStatusRecord topics[kMaxStatusTopics];
+    std::size_t topic_count = 0U;
+    if (on_status_topics_ != nullptr && serve_catalog_ != nullptr &&
+        subscriptions_ != nullptr) {
+        const std::size_t catalog_topics = serve_catalog_->topic_count();
+        for (std::size_t i = 0U;
+             i < catalog_topics && topic_count < kMaxStatusTopics; ++i) {
+            const CatalogTopic* topic = serve_catalog_->topic_at(i);
+            if (topic == nullptr) continue;
+            const std::size_t subs = subscriptions_->subscriber_count(topic->topic_id);
+            if (subs == 0U) continue;
+
+            TopicStatusRecord& record = topics[topic_count];
+            record.source_id = cfg_.source_id;
+            record.topic_id = topic->topic_id;
+            record.subscriber_count = static_cast<std::uint16_t>(subs);
+            record.effective_rate_millihz =
+                subscriptions_->aggregate_rate_millihz(topic->topic_id);
+            record.bytes_total = 0U;
+            record.samples_dropped_total = 0U;
+            on_status_topics_(on_status_topics_ctx_, *this, topic->topic_id,
+                              &record.bytes_total, &record.samples_dropped_total);
+            ++topic_count;
+        }
     }
+
+    std::size_t written = 0U;
+    const MessageError err =
+        topic_count > 0U
+            ? encode_status_v2(status, topics, topic_count, scratch_buffer_,
+                               scratch_capacity_, &written)
+            : encode_status_v1(status, scratch_buffer_, scratch_capacity_, &written);
+    if (err != MessageError::Ok) return;
     send(MessageType::Control, object_id::kStatus, scratch_buffer_, written,
         now_ms * 1000ULL);
 }

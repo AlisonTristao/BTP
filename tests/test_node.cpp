@@ -1949,6 +1949,113 @@ void test_status_sends_after_the_period_and_counts_frames_tx() {
     CHECK(status.frames_tx == 1U);
 }
 
+struct StatusTopicCalls {
+    int calls = 0;
+    std::uint16_t last_topic_id = 0U;
+};
+
+void fill_status_topic_counters(void* ctx, btp::Node& /*node*/,
+                                std::uint16_t topic_id, std::uint64_t* bytes_total,
+                                std::uint64_t* samples_dropped_total) {
+    StatusTopicCalls* calls = static_cast<StatusTopicCalls*>(ctx);
+    ++calls->calls;
+    calls->last_topic_id = topic_id;
+    *bytes_total = 4096U;
+    *samples_dropped_total = 3U;
+}
+
+// enable_status_topics() upgrades emit_status() to v2 the moment a served
+// catalog topic has an active subscriber: subscriber_count / effective_rate
+// come from the SubscriptionTable itself, bytes_total / samples_dropped_total
+// from the callback -- the two counters this layer genuinely does not keep.
+void test_status_v2_reports_subscribed_topics() {
+    Sink prod_tx;
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
+    btp::StaticCatalog<> served;
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.begin());
+    StatusTopicCalls topic_calls;
+    producer.enable_status_topics(&fill_status_topic_counters, &topic_calls);
+    producer.enable_status(500U);
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    ClientSubscription client_slots[4];
+    SubscriptionClient client(client_slots, 4);
+    consumer.enable_subscription_client(&client);
+    CHECK(consumer.begin());
+
+    CHECK(consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 60000U) != 0U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+
+    prod_tx.clear();
+    producer.tick(500U);
+    CHECK(prod_tx.count() == 1U);  // just the STATUS
+    CHECK(topic_calls.calls == 1);
+    CHECK(topic_calls.last_topic_id == 0x0101U);
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(prod_tx.frames[0].data(), prod_tx.frames[0].size(),
+                      kEspNowTransport, &frame) == btp::Error::Ok);
+    btp::StatusV1 status = {};
+    btp::TopicStatusRecord topics[4] = {};
+    std::size_t topics_written = 0U;
+    CHECK(btp::decode_status(frame.payload.data, frame.payload.size, &status, topics,
+                             4U, &topics_written) == btp::MessageError::Ok);
+    CHECK(status.status_version == 2U);
+    CHECK(topics_written == 1U);
+    CHECK(topics[0].source_id == kSenderId);
+    CHECK(topics[0].topic_id == 0x0101U);
+    CHECK(topics[0].subscriber_count == 1U);
+    CHECK(topics[0].effective_rate_millihz == 10000U);
+    CHECK(topics[0].bytes_total == 4096U);
+    CHECK(topics[0].samples_dropped_total == 3U);
+}
+
+// The same node, but nobody ever subscribed: the callback is never even
+// asked (nothing to report), and emit_status() falls back to plain v1 --
+// unchanged wire behavior from before enable_status_topics() existed.
+void test_status_v2_falls_back_to_v1_with_no_subscribers() {
+    Sink tx;
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode producer(producer_cfg);
+    btp::StaticCatalog<> served;
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           nullptr, "example-robot");
+    SubscriptionRecord table_slots[4];
+    SubscriptionTable table(table_slots, 4);
+    producer.enable_subscriptions(&table);
+    CHECK(producer.begin());
+    StatusTopicCalls topic_calls;
+    producer.enable_status_topics(&fill_status_topic_counters, &topic_calls);
+    producer.enable_status(500U);
+
+    tx.clear();
+    producer.tick(500U);
+    CHECK(tx.count() == 1U);
+    CHECK(topic_calls.calls == 0);
+
+    btp::DecodedFrame frame{};
+    CHECK(btp::decode(tx.frames[0].data(), tx.frames[0].size(), kEspNowTransport,
+                      &frame) == btp::Error::Ok);
+    btp::StatusV1 status = {};
+    std::size_t topics_written = 0U;
+    CHECK(btp::decode_status(frame.payload.data, frame.payload.size, &status, nullptr,
+                             0U, &topics_written) == btp::MessageError::Ok);
+    CHECK(status.status_version == 1U);
+}
+
 void test_subscribe_renews_before_the_lease_runs_out() {
     Sink prod_tx;
     TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
@@ -2081,6 +2188,8 @@ int main() {
 
     test_status_disabled_by_default();
     test_status_sends_after_the_period_and_counts_frames_tx();
+    test_status_v2_reports_subscribed_topics();
+    test_status_v2_falls_back_to_v1_with_no_subscribers();
 
     test_subscribe_grant_publish_cadence_and_unsubscribe();
     test_subscribe_renews_before_the_lease_runs_out();
