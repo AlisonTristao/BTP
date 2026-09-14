@@ -54,29 +54,28 @@ The library implements the wire: the frame, the fragmentation, the COBS
 framing, the optional AEAD, the byte layout of every `COMMAND` and `CONTROL`
 payload (`btp::messages`, [The message layer](#12-the-message-layer)) and the
 `TELEMETRY` sample body against a schema (`btp::telemetry`,
-[§12.4](#124-decoding-and-encoding-telemetry-samples)). One stateful mechanism
-sits just above that line because getting it wrong is a safety fault, not a
-parse fault: `btp::DedupCache`, the command-deduplication cache
-([The session layer](#13-the-session-layer)).
+[§12.4](#124-decoding-and-encoding-telemetry-samples)).
 
-It deliberately stops below the rest of the mechanisms that carry *state*:
+The higher layers also implement stateful protocol behaviour:
 
-* the session state machine and its watchdog;
-* command *execution* (`btp::DedupCache` remembers the result; running the
-  action and sending the reply stay the integration's);
-* the manifest catalogue a consumer keeps;
-* telemetry schema storage (which schemas a consumer caches, and for how long);
-* the priority scheduler.
+* `btp::Session` and `btp::SessionInitiator` manage sessions and their inactivity watchdog;
+* `btp::DedupCache` and `btp::CommandClient` track command results and requests;
+* `btp::Catalog` stores manifest metadata and telemetry schemas;
+* `btp::SubscriptionTable` and `btp::SubscriptionClient` manage subscriptions;
+* `btp::Node` connects these layers, routes messages, sends automatic replies,
+  publishes due topics and emits STATUS reports.
 
-Those use the BTP frame and payload formats the library defines, but their
-application state is owned by the integration above it. This distinction is
-important when considering memory usage.
+The application supplies transport I/O, command actions, sample values,
+terminal handling, key selection and any transport priority scheduler.
+Storage remains caller-owned: the library uses supplied buffers and tables,
+or the storage bundled in `StaticNode` / `SizedNode`, without allocating it
+from the heap. See [The node layer](#16-the-node-layer) for integration.
 
 ---
 
 ## 1. The headers
 
-The public API is divided into eleven headers.
+The public API is divided into thirteen headers, including version constants.
 
 | Header                  | Responsibility                                              |
 | ----------------------- | ---------------------------------------------------------- |
@@ -85,14 +84,16 @@ The public API is divided into eleven headers.
 | `btp/stream.hpp`        | COBS and incremental serial decoding                        |
 | `btp/messages.hpp`      | Struct ⇄ bytes for every `COMMAND` / `CONTROL` payload      |
 | `btp/telemetry.hpp`     | A `TELEMETRY` sample ⇄ values against a schema              |
-| `btp/session.hpp`       | `btp::DedupCache` — the command-deduplication cache         |
+| `btp/session.hpp`       | Session lifecycle, watchdog, command deduplication and command client |
 | `btp/endpoint.hpp`      | `btp::Endpoint` — identity, sequencing and the transmit pipeline |
 | `btp/receiver.hpp`      | `btp::Receiver` — decode, CRC and reassembly on the receive path |
 | `btp/catalog.hpp`       | `btp::Catalog` — the schema catalogue behind `MANIFEST_DATA` |
+| `btp/subscription.hpp` | Subscription responder and client lifecycle                |
+| `btp/version.hpp`      | Library version and supported wire-version constants       |
 | `btp/node.hpp`          | `btp::Node` — endpoint + receiver + session + catalogue in one object |
 | `btp/aead.hpp`          | Optional version-2 authenticated encryption                 |
 
-The implementation is exposed through nine CMake targets.
+The implementation is exposed through ten CMake targets (including optional `btp::aead`).
 
 ### `btp::codec`
 
@@ -232,7 +233,7 @@ It is `btp::Node`: `btp::Endpoint`, `btp::Receiver` and — opt-in —
 identity, one `now_ms` notion and one set of caller-owned buffers, with every
 external dependency (`send`, `clock`, `seal`, `open`, ...) a virtual method on
 `NodeConfig`, an abstract class a consumer inherits from once. It adds no wire
-field and holds no new state — the members stay reachable for a caller that
+field; it coordinates the state of its layers — the members stay reachable for a caller that
 wants a layer directly. [The node layer](#16-the-node-layer) covers it.
 
 ### `btp::catalog`
@@ -2719,21 +2720,26 @@ The **key never enters BTP** — `seal()` / `open()` select it from
 `btp::aead_seal` / `btp::aead_open`. The nonce (`source_id ‖ boot_id ‖
 sequence`) and the AAD (the canonical header) are `btp::aead`'s.
 
-`Node` holds `cfg` by **reference**, reading it live at each call rather than
-copying it in at construction — a caller whose identity is only known after
-something else exists (a `TxScheduler` configured later than the `Node`
-itself) just mutates `source_id` / `boot_id` / `transport` directly, any time
-before `begin()`. (This is also what replaced the short-lived
-`Node::reconfigure()` method — see the [README](../README.md)'s version
-history.) The usual shape both inherits `NodeConfig` and owns its
-`Node` as a member ([`example/sender.cpp`](../example/sender.cpp),
-[`example/receiver.cpp`](../example/receiver.cpp), via
-[`example/node_config.hpp`](../example/node_config.hpp)): base-before-member
-construction order means `*this` is already a live `NodeConfig` by the time
-the `Node` member's own constructor runs, and a member outlives the object it
-is declared in, so the reference stays valid for the `Node`'s whole lifetime
-with no manual bookkeeping. Don't call any method on the `Node` you're
-mid-constructing from your own mem-initializers or constructor body.
+`Node` holds `cfg` by **reference**, so the config object must outlive it.
+Initialize `transport` **before constructing the node** and keep it unchanged
+for that node's lifetime. The receiver copies the limits at construction,
+while transmit and session decoding consult `cfg.transport`; `begin()` does
+not synchronize those copies. A config with its default zero transport limits
+cannot be repaired by assigning a transport after node construction.
+Construct a new node if the transport limits must change.
+
+`source_id` and `boot_id` may be assigned before the first `begin()`, which
+copies them into the endpoint. Keep them unchanged while the node is running.
+Virtual callbacks such as `send()`, `seal()` and `open()` use the referenced
+config; terminal callback registration is selected at construction.
+
+A config may be a separate object declared before the node, as in the next
+example. When a class inherits `NodeConfig` and owns a node member, initialize
+transport in a base constructor that runs before the node member is built.
+Assignment in the enclosing constructor body is too late. The config base
+outlives the node member because members are destroyed before base classes.
+See [`example/node_config.hpp`](../example/node_config.hpp) for the shared
+producer and consumer config classes.
 
 Storage stays caller-owned, exactly as `btp::Receiver` and `btp::Endpoint`
 expect: the reassembly slots and their byte regions, a buffer `receive()`
@@ -2805,11 +2811,10 @@ for (;;) {
 }
 ```
 
-If identity/`send`/`seal`/... is only known after something else exists (say,
-a `TxScheduler` configured later than the config object itself), there is no
-placeholder-then-reconfigure dance to do: `cfg` is read live at each call
-(§16.1), so a caller in that shape just assigns `link.source_id = ...` /
-`link.transport = ...` directly, any time before `begin()`.
+If identity is only known after another component is initialized, assign
+`link.source_id` and `link.boot_id` before the first `begin()`. Set
+`link.transport` before constructing `node`, as shown above; changing it
+later does not update the receiver's stored limits.
 
 `send()` reserves a sequence, seals once over the whole payload when
 `cfg.has_seal()`, fragments, and hands each frame to `cfg.send()` — a `false`

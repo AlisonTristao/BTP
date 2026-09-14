@@ -1,162 +1,96 @@
-# BTP — Binary Telemetry Protocol
+# BTP - Binary Telemetry Protocol
 
-BTP moves telemetry, logs, commands and terminal traffic between an embedded
-producer and a consumer, across links with opposite characteristics: a
-low-bandwidth radio with short datagrams and high loss, and a local bus with
-more bandwidth and a byte-stream shape. Every message carries an identity and
-an instant created at the source, and no intermediary rewrites either.
+BTP carries telemetry, logs, commands and terminal traffic between embedded
+systems and desktop applications over ESP-NOW, serial and USB HID.
+It defines a shared binary format with source identity, sequencing and
+source timestamps. Relays are required to preserve that identity and timestamp.
 
-This repository is the canonical source of three things that ship as one
-version: the wire specification, the C++11 library that implements it, and the
-binary vectors that prove an implementation is correct.
+This repository contains the wire specification, a C++11 library and
+conformance vectors. The library provides framing, optional authenticated
+encryption, sessions, schema discovery, subscriptions and command handling.
+Your application supplies transport I/O and owns the storage; BTP creates no
+threads and performs no heap allocation.
 
-> **You are on `main`** — the current major, `2.x`. The `1.x` line is
-> maintained on branch [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x).
-> See [Versioning and branches](#versioning-and-branches).
+[Documentation](https://alisontristao.github.io/BTP/) |
+[Examples](example/README.md) | [Changelog](CHANGELOG.md)
 
-**📖 [Read the book](https://alisontristao.github.io/BTP/)** — the full
-documentation, from why the protocol exists down to the octets on the wire.
+## Minimal example
 
-## What it looks like
+Use `btp::codec` to encode individual frames. Each frame contains a 36-byte
+header, a payload and a 4-byte CRC-32; multi-byte values are little-endian.
+Fields are serialized explicitly, without relying on C++ struct layout.
 
-A frame is a 36-octet header, a payload, and a CRC-32:
-
-```text
-+---------------------------+------------------------+------------+
-| header (36 octets)        | payload (N octets)     | CRC32 (4)  |
-+---------------------------+------------------------+------------+
-```
-
-Everything multi-octet is little-endian, including the CRC. No struct is ever
-put on the wire, so there is no ABI to negotiate between a microcontroller and
-a desktop.
+This function encodes one byte of opaque telemetry and passes the frame to
+your transport callback:
 
 ```cpp
 #include "btp/codec.hpp"
 
-btp::Header header = {};
-header.type = btp::MessageType::Telemetry;
-header.source_id = 0x11223344U;   // non-zero
-header.boot_id = 0xA1B2C3D4U;     // non-zero, changes every boot
-header.sequence = 1U;
-header.timestamp_us = now_us();
-header.object_id = 0x0101U;       // the topic id
-header.fragment_count = 1U;       // 1, not 0, when unfragmented
+bool send_sample(std::uint32_t source_id, std::uint32_t boot_id,
+                 std::uint32_t sequence, std::uint64_t timestamp_us,
+                 std::uint8_t value,
+                 bool (*send_frame)(const std::uint8_t*, std::size_t)) {
+    btp::Header header = {};
+    header.type = btp::MessageType::Telemetry;
+    header.source_id = source_id;
+    header.boot_id = boot_id;
+    header.sequence = sequence;
+    header.timestamp_us = timestamp_us;
+    header.object_id = 0x0101U;  // topic ID
+    header.fragment_count = 1U;
 
-const btp::Frame frame = {header, {payload, payload_size}};
-
-std::uint8_t buffer[btp::kEspNowMaxFrameSize];
-std::size_t written = 0U;
-if (btp::encode(frame, btp::kEspNowTransport,
-                buffer, sizeof(buffer), &written) == btp::Error::Ok) {
-    send(buffer, written);
+    const btp::Frame frame = {header, {&value, 1U}};
+    std::uint8_t buffer[btp::kEspNowMaxFrameSize];
+    std::size_t written = 0U;
+    return send_frame != nullptr &&
+           btp::encode(frame, btp::kEspNowTransport, buffer, sizeof(buffer),
+                       &written) == btp::Error::Ok &&
+           send_frame(buffer, written);
 }
 ```
 
-## Why
+Use nonzero source and boot IDs, change the boot ID on each boot, and supply
+a new nonzero sequence for each logical message. The receiver must know the
+topic's encoding; this example assumes an `OpaqueBytes` topic. The callback
+must consume or copy the frame before returning.
 
-Four things it fixes at once, each of which breaks the obvious alternative:
+For a complete producer or consumer, use **`btp::Node`** to manage identity,
+sequencing, receive processing, sessions, discovery and subscriptions.
+`SizedNode` supplies buffer presets; `StaticNode` lets you size the storage.
+See the [producer/consumer examples](example/README.md) and
+[Node guide](docs/library.md#16-the-node-layer) for setup, callbacks and memory
+sizing. Set `NodeConfig.transport` before constructing the node and keep the
+config alive for the node's lifetime.
 
-- **Text over serial** breaks on the first payload containing `0x0A`.
-- **Shipping the struct** breaks on the first different compiler or alignment
-  flag.
-- **Timestamping on arrival** measures transport latency instead of the
-  phenomenon.
-- **One format per link** turns every gateway into a translator.
+## Transports and limits
 
-What it costs, stated up front: no anti-replay, no key rotation, no per-peer
-identity, telemetry is best-effort by design, and there is no legacy mode — so
-migration is coordinated rather than incremental.
-[Why BTP exists](https://alisontristao.github.io/BTP/why-btp/) covers the whole
-trade, and it is the one chapter that stands on its own.
-
-## Transports
-
-A transport is described to the codec as a plain
-`btp::TransportLimits{max_frame_size, allow_encrypted}` — not a fixed, closed
-list. Three presets cover the links below; a caller with a different one
-builds its own, there is no enum to extend.
+The codec accepts `btp::TransportLimits{max_frame_size, allow_encrypted}`.
+These are its built-in presets, with sizes in bytes:
 
 | | ESP-NOW | Serial | USB HID |
 | --- | ---: | ---: | ---: |
-| Max frame | 250 | 4096 | 62 |
-| Max payload | 210 | 4056 | 22 |
-| Link framing | one datagram per frame | `00` + COBS(frame) + `00` | 64-octet report |
-| Encryption allowed | yes | yes | no |
+| Maximum BTP frame | 250 | 4096 | 62 |
+| Maximum frame payload, including any AEAD tag | 210 | 4056 | 22 |
+| Link framing | One datagram per frame | `00` + COBS(frame) + `00` | 64-byte report |
+| Encryption allowed | Yes | Yes | No |
 
-Between transports only the numbers change, never the semantics.
+**`Node` / `Endpoint` transmission currently uses a 250-byte frame buffer.**
+The codec's 4096-byte Serial limit does not extend to those transmit helpers:
+a larger encoded frame fails. For Serial links using these helpers, configure
+a frame limit of 250 bytes or less on both ends and apply COBS in the transport
+integration. Logical messages can still be fragmented within the configured
+limits and storage capacity. Use the lower-level codec with caller-provided
+buffers when larger individual frames are needed.
 
-## The node layer
+Telemetry is best-effort. BTP does not provide anti-replay protection, key
+rotation or routing; the integration supplies key management and peer routing.
+See [protocol tradeoffs](docs/why-btp.md),
+[transports](docs/fragmentation-and-transports.md) and
+[encryption](docs/encryption.md) for the full contracts.
 
-The codec above is the wire; most consumers don't hand-roll frames at all --
-they build a `btp::Node` (target `btp::node`) and get identity, sequencing,
-receive, an optional responder session and a schema catalogue wired into one
-object. Every external dependency -- the link, encryption, terminal, commands
--- is a virtual method on `btp::NodeConfig`, an abstract class a consumer
-**inherits from once**; `send()` is the only one required, everything else
-defaults to "this axis is off":
+## Build and install
 
-```cpp
-#include "btp/node.hpp"
-
-class RobotLink : public btp::NodeConfig {
-public:
-    RobotLink() {
-        source_id = 0x00CAFE01U;          // non-zero, usually the MAC
-        boot_id   = 0x0000B001U;          // non-zero, changes every boot
-        transport = btp::kEspNowTransport;
-    }
-    bool send(const std::uint8_t* frame, std::size_t n) override {
-        return esp_now_send(peer_mac_, frame, n) == ESP_OK;
-    }
-    // has_seal()/seal(), has_open()/open(), has_terminal()/terminal(),
-    // has_command()/command() -- override only the axes this node needs.
-};
-
-RobotLink link;
-btp::SizedNode<btp::NodeSize::Medium> node(link);  // owns every buffer, see below
-node.begin("example-robot",
-          btp::HelloBuilder(btp::Role::Producer, my_uuid).build());
-
-std::uint64_t now_ms = 0U;
-for (;;) {
-    const std::size_t n = link_poll(datagram, sizeof datagram);
-    node.routine(datagram, n, now_ms);  // receive + due topics + session watchdog
-    now_ms = read_clock();
-}
-```
-
-Storage -- reassembly slots, seal scratch, the schema catalogue, subscription
-and command tables -- is caller-owned, never allocated by BTP. Reasoning
-about the ten template parameters that size it by hand is exactly the kind of
-thing worth naming once, so `btp::SizedNode<NodeSize::Low | Medium | High>`
-picks all ten together, as one of three memory tiers:
-
-| tier | `sizeof()` | fits |
-| --- | ---: | --- |
-| `Low` | ~7.2 KiB | one small topic -- a battery-powered sensor, or a memory-starved corner of a bigger deployment |
-| `Medium` | ~17.4 KiB | the ESP32-class robot this library was sized for -- identical to `StaticNode<>`'s bare defaults |
-| `High` | ~67.7 KiB | a hub or desktop aggregator: many topics, many subscribers, several concurrent large reassemblies |
-
-`btp::StaticNode<Slots, SlotBytes, SealBytes, ScratchBytes, CatalogTopics,
-CatalogFields, CatalogStringBytes, MaxSubscriptions, MaxCommands,
-CommandBytes>` is the same storage with every dimension spelled out by hand --
-`SizedNode`'s own alias target, and the escape hatch for a node that needs one
-dimension off that curve: a desktop hub with a huge catalogue but few
-concurrent reassemblies, say.
-
-[`example/sender.cpp`](example/sender.cpp) /
-[`example/receiver.cpp`](example/receiver.cpp) are a producer and a consumer
-built on `btp::Node` end to end; [`example/node_config.hpp`](example/node_config.hpp)
-holds the `NodeConfig` subclass each one inherits from -- `ProducerLink` /
-`ConsumerLink` -- with the `send()` / `seal()` / `open()` / `terminal()` /
-`command()` overrides BTP calls out to, kept in one file since the two
-programs are one demo split across two processes sharing one AEAD key.
-[`example/README.md`](example/README.md) walks the whole pair; [docs/library.md
-§16](https://alisontristao.github.io/BTP/library/#16-the-node-layer) covers
-the rest of the contract -- sessions, subscriptions, commands, STATUS.
-
-## Building
+For a host build, use CMake, a C++11 compiler and Python 3 for the tests:
 
 ```bash
 cmake -S . -B build
@@ -164,57 +98,42 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Ten targets: **`btp::codec`** (envelope, fragmentation, COBS) has zero
-dependencies. **`btp::messages`** (the `COMMAND` / `CONTROL` payload layouts),
-**`btp::endpoint`** (`btp::Endpoint` — local identity, sequencing and the
-seal → fragment → encode transmit pipeline) and **`btp::receiver`**
-(`btp::Receiver` — decode + CRC + reassembly on the way in) each link
-`btp::codec` and nothing else. **`btp::telemetry`** (a `TELEMETRY` sample
-against a schema — `PACKED_LE` / `TLV_LE`) and **`btp::session`**
-(`btp::DedupCache`, the command-deduplication cache, and `btp::Session` /
-`btp::SessionInitiator`, the session state machine on each end) each link
-`btp::messages`. **`btp::catalog`** (`btp::Catalog` — the `MANIFEST_DATA`
-schema catalogue, caller-owned storage) links `btp::telemetry`;
-**`btp::subscription`** (`btp::SubscriptionTable` / `btp::SubscriptionClient`)
-links `btp::catalog` on top of that. **`btp::node`** (`btp::Node` /
-`btp::StaticNode` / `btp::SizedNode` — endpoint, receiver, session, catalogue
-and subscriptions wired into one object, every external dependency a virtual
-method on the `NodeConfig` you inherit from) links all five.
-**`btp::aead`** (wire v2 encryption) links mbedcrypto and is behind
-`-DBTP_ENABLE_AEAD=OFF` if you do not want it.
+Optional `btp::aead` uses mbedcrypto. To build without it, add
+`-DBTP_ENABLE_AEAD=OFF` to the configure command.
 
-To consume it as an installed package:
+Install to a prefix of your choice:
 
 ```bash
-cmake --install build --prefix /usr/local
+cmake --install build --prefix /path/to/install
 ```
+
+Point your application's `CMAKE_PREFIX_PATH` at that prefix, then link the
+layer you need:
 
 ```cmake
 find_package(btp 2.0 REQUIRED)
-target_link_libraries(app PRIVATE btp::codec)
+target_link_libraries(app PRIVATE btp::codec)  # or btp::node
 ```
 
-It also works as an `add_subdirectory()`/`FetchContent` subproject, where tests
-and install rules switch themselves off. For PlatformIO the repository is a
-library as-is. See [Using the library](https://alisontristao.github.io/BTP/library/)
-for the full option list. The embedded compile target:
+The repository also supports `add_subdirectory()`, `FetchContent` and
+PlatformIO. The [library guide](docs/library.md) lists all targets and build
+options. To compile the embedded test target:
 
 ```bash
 pio run -d tests/embedded
 ```
 
-## Conformance vectors
+## Documentation and tests
 
-`test-vectors/v1/` and `test-vectors/v2/` are the machine-checkable half of the
-contract: a `.json` describing each frame beside the `.bin` it produces, split
-into valid cases and invalid ones that each name the exact error they must
-provoke.
+* [Protocol overview](docs/index.md): frame, payload and session specifications.
+* [Library guide](docs/library.md): APIs, storage, integration and build options.
+* [Examples](example/README.md): producer, consumer and hybrid nodes.
+* [Frame vectors](test-vectors/v2/README.md): valid and invalid frame cases.
+* [Message vectors](test-vectors/v2/messages/README.md) and
+  [telemetry vectors](test-vectors/v2/telemetry/README.md): payload conformance.
 
-`test-vectors/v2/messages/` extends this to the payload layer: the same
-`.json`/`.bin` convention, but the `.bin` is a logical `COMMAND` / `CONTROL`
-payload with no frame around it, checked against `btp::messages`.
-`test-vectors/v2/telemetry/` does the same for a `TELEMETRY` sample body,
-carrying the schema it is decoded against.
+CTest runs the host suites and independent Python vector checks. To run the
+vector checks separately:
 
 ```bash
 python tools/test_vectors.py --root test-vectors/v1 --check
@@ -223,88 +142,16 @@ python tools/test_messages.py --root test-vectors/v2/messages --check
 python tools/test_telemetry.py --root test-vectors/v2/telemetry --check
 ```
 
-An implementation is not finished when its author believes they understood the
-prose. It is finished when it produces and consumes these octets. Changing a
-vector is changing the contract.
-
-## Layout
-
-```text
-include/btp/    codec, fragmentation, stream, messages, telemetry, session,
-                 endpoint, receiver, catalog, subscription, node, aead
-src/            the implementation
-example/        sender.cpp / receiver.cpp -- a producer and a consumer built
-                 on btp::Node; by_hand_{sender,receiver}.cpp -- the same pair
-                 with every layer called directly, no Node; hybrid.cpp -- one
-                 node that is both a producer and a consumer at once
-tests/          host suites plus an embedded compile target
-test-vectors/   canonical vectors: wire v1, wire v2, message and telemetry payloads
-tools/          independent Python reference decoders
-docs/           the book
-```
-
 ## Versioning and branches
 
-**BTP is one SemVer line, `MAJOR.MINOR.PATCH`.** The number lives in one file,
-[`include/btp/version.hpp`](include/btp/version.hpp); `CMakeLists.txt` parses it
-and `library.json` is checked against it on every configure, so nothing is kept
-in step by hand.
+The specification, library and vectors share the version declared in
+[`include/btp/version.hpp`](include/btp/version.hpp). `main` carries the `2.x`
+line; branch [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) maintains
+the earlier line. The 2.x library accepts both wire 1 (base frames) and wire 2
+(AEAD-sealed payloads).
 
-| Part | Bumps when | Also is |
-| --- | --- | --- |
-| `MAJOR` | the wire format changes incompatibly | the newest wire-version byte ([`docs/frame.md`](docs/frame.md)), and the branch name `MAJOR.x` |
-| `MINOR` | a backward-compatible addition — a new library layer, an optional field | — |
-| `PATCH` | a fix with no effect on the wire or the API | — |
-
-The git tag is `vMAJOR.MINOR.PATCH` — the same number. There is no separate
-"library version"; the tag, the release and `version.hpp` are one thing. So
-`2.x` and `wire 2` now say the same thing, and the only term to keep distinct is
-the header byte itself — write `wire 2`, not a bare `v2`, when you mean that.
-
-### Branches
-
-**`main` always carries the newest major.** A superseded one is cut to its own
-`MAJOR.x` branch and maintained there.
-
-| Branch | Holds | Newest wire byte |
-| --- | --- | --- |
-| `main` | current development, the `2.x` line — **this branch** | `0x02` (AEAD-sealed payload) |
-| [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) | maintenance of the `1.x` line, `v1.1.0-beta` | `0x01` (base frame) |
-
-A `2.x` library still decodes a `0x01` frame — `0x01` is the base frame, `0x02`
-just marks an AEAD-sealed payload. The `1.x` branch is for deployments that
-cannot take the whole `2.x` library, not a sign `main` dropped wire 1. When wire
-3 arrives, a `2.x` branch is cut and `main` moves to `3.0`; a branch is named
-after the major it holds, never the one still coming.
-
-To cut a release: `python tools/version.py X.Y.Z`, commit, `git tag vX.Y.Z`.
-A pre-release suffix (`-beta`) is only for a still-settling `MAJOR.x` line and
-only in `library.json` — CMake's `project(VERSION)` is numeric-only.
-
-### What each 2.x minor added (no wire change)
-
-`2.2` `btp::messages` · `2.3` verbatim manifest relay · `2.4` `btp::telemetry` ·
-`2.5` body-only sample mode · `2.6` `btp::DedupCache` · `2.7` `btp::Endpoint` ·
-`2.8` `btp::Receiver` · `2.9` `btp::Session` · `2.10` `priority_class()` ·
-`2.11` `btp::Node` (endpoint + receiver + session, one object) ·
-`2.12` `btp::Catalog` (consumer-side discovery) ·
-`2.13` telemetry schema-declaration helpers, one line per field ·
-`2.14` `connect()` (`SessionInitiator`) + `publish_named()` ·
-`2.15` subscriptions (`SubscriptionTable` / `SubscriptionClient`) ·
-`2.16` commands (`DedupCache` / `CommandClient`) + `STATUS` reporting ·
-`2.21` `on_publish()` + `publish_subscribed_topics()` ·
-`2.22` producer/consumer setup + loop boilerplate folded into `Node` ·
-`2.23` `on_terminal()`; `StaticNode<>` bundles commands ·
-`2.24` `NodeTerminalFn` gets `Node&` / `now_ms` ·
-`2.25` `NodeConfig.terminal` / `.command` wire at construction ·
-`2.26` `routine()` — one call covers a whole loop pass ·
-`2.27` `reply_seal` — per-reply seal selection ·
-`2.28` a catalogue field's unit and description ·
-`2.29` `Node::reconfigure()` (removed again in 2.34 — see below) ·
-`2.30` `publish_with()` / `publish_named_with()` ·
-`2.31` `TransportLimits` — generic, replaces the closed `TransportProfile` enum ·
-`2.32` `TransportLimits` drops `max_payload_size` (derived, not set) ·
-`2.33` `SizedNode<NodeSize>` — Low / Medium / High memory tiers ·
-`2.34` `NodeConfig` becomes an abstract class, replacing `reconfigure()`
-(mutate the config object's fields directly instead); `HelloBuilder`
-
+Payload compatibility also depends on the manifest format: the format-3
+layout changed between 2.44 and 2.45, so producers and consumers using it
+must be upgraded together. See the [changelog](CHANGELOG.md) for changes and
+migration notes, and [versioning policy](docs/library.md#10-versioning-and-branches)
+for release instructions.

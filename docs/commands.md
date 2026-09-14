@@ -672,9 +672,11 @@ bit 2 -> HAS_RANGE (manifest_format_version >= 3 only)
 `min_value` and `max_value` are present only when `manifest_format_version >=
 3` (see [MANIFEST_DATA](#32-manifest_data)) AND the field's `HAS_RANGE` flag
 bit is set -- a field with nothing to declare (the common case) costs nothing
-extra, even in a format-3 manifest. A field record ends at `offset` whenever
-either condition is false. `HAS_RANGE` is derived by the writer from whether
-either value is declared, not an independent choice: build `min_value`/
+extra, even in a format-3 manifest. When either condition is false,
+`enum_count` follows `offset` directly; otherwise it follows `max_value`.
+The enum entries follow `enum_count` in either case. `HAS_RANGE` is derived
+by the writer from whether either value is declared, not an independent
+choice: build `min_value`/
 `max_value` and the bit follows. Each present value is a finite `float64` or
 `NaN` -- `NaN` means "no bound on this side" (so `HAS_RANGE` can be set with
 only one side actually bounded). When both are finite, `min_value` must be <=
@@ -682,6 +684,11 @@ only one side actually bounded). When both are finite, `min_value` must be <=
 `scale` / `offset` are applied -- the same space `unit` describes.
 
 The field types and serialization rules are defined in [Telemetry payloads](telemetry.md).
+
+Compatibility note: library 2.44 wrote both bounds unconditionally in every
+format-3 field record. Library 2.45 uses the `HAS_RANGE` layout above without
+changing the manifest format number. Producers and consumers using format 3
+must therefore be upgraded together. Formats 1 and 2 retain their layout.
 
 ---
 

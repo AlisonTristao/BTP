@@ -25,7 +25,7 @@ is correct. They ship as one version.
 | The `MANIFEST_DATA` schema catalogue | Implemented in `btp::catalog` (`btp::Catalog`), covered by `tests/test_catalog.cpp` (behaviour, no vector tree). |
 | Subscriptions (`SUBSCRIBE` / `SUBSCRIBE_RESULT` / `UNSUBSCRIBE`) | Implemented in `btp::subscription` (`btp::SubscriptionTable` / `btp::SubscriptionClient`), covered by `tests/test_subscription.cpp` (behaviour, no vector tree). |
 | Endpoint + receiver + session + catalogue + subscriptions, wired into one object | Implemented in `btp::node` (`btp::Node`, `btp::StaticNode` / `btp::SizedNode`), covered by `tests/test_node.cpp` (orchestration, no vector tree). |
-| Version | `2.34.0` — one number, in [`include/btp/version.hpp`](../include/btp/version.hpp); `CMakeLists.txt` parses it and `library.json` is checked against it. |
+| Version | `2.45.0` — one number, in [`include/btp/version.hpp`](../include/btp/version.hpp); `CMakeLists.txt` parses it and `library.json` is checked against it. |
 | Branches | `main` carries the newest major (introduced wire `0x02`); [`1.x`](https://github.com/AlisonTristao/BTP/tree/1.x) keeps the wire `0x01` line alive. |
 
 BTP is **one** SemVer line, `MAJOR.MINOR.PATCH`. `MAJOR` is also the newest
