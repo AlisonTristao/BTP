@@ -1020,10 +1020,11 @@ bool is_finite_or_nan_f64(double value) noexcept {
 // Reads the content of one field record from `reader` (already bounded to the
 // record's content). Leftover octets in the reader are the enum run.
 // `format_version` is the enclosing MANIFEST_DATA's manifest_format_version --
-// min_value/max_value are only on the wire for >= 3; `out` is always given a
-// definite value for both (the caller's FieldRecord is reused across a
-// field-record run, so a format < 3 record must reset them, not leave
-// whatever the previous field left behind).
+// min_value/max_value are only on the wire for >= 3 AND flags bit
+// kFieldHasRange set; `out` is always given a definite value for both (the
+// caller's FieldRecord is reused across a field-record run, so a field with
+// no declared range must reset them, not leave whatever the previous field
+// left behind).
 MessageError read_field_content(Reader& reader, FieldRecord* out,
                                 ByteView* enum_entries,
                                 std::uint16_t format_version) noexcept {
@@ -1035,7 +1036,7 @@ MessageError read_field_content(Reader& reader, FieldRecord* out,
     out->max_element_count = reader.u16();
     out->scale = reader.f64();
     out->offset = reader.f64();
-    if (format_version >= 3U) {
+    if (format_version >= 3U && (out->flags & kFieldHasRange) != 0U) {
         out->min_value = reader.f64();
         out->max_value = reader.f64();
     } else {
@@ -2028,6 +2029,18 @@ MessageError ManifestWriter::add_field_common(const FieldRecord& field) noexcept
         error_ = MessageError::InvalidValue;
         return error_;
     }
+    // kFieldHasRange is derived, never taken from field.flags directly: a
+    // field with nothing declared (both NaN) costs 16 wire bytes for every
+    // consumer otherwise, most of which have no range to report (see
+    // FieldRecord's own comment).
+    const bool has_range = manifest_format_version_ >= 3U &&
+                           (!is_nan_f64(field.min_value) ||
+                            !is_nan_f64(field.max_value));
+    const std::uint8_t wire_flags = has_range
+                                        ? (field.flags | kFieldHasRange)
+                                        : static_cast<std::uint8_t>(
+                                              field.flags & ~kFieldHasRange);
+
     field_record_start_ = cursor_;
     Writer writer(out_ + cursor_, capacity_ - cursor_);
     writer.u32(0U);  // field record_size placeholder
@@ -2036,12 +2049,12 @@ MessageError ManifestWriter::add_field_common(const FieldRecord& field) noexcept
     writer.u16(field.field_id);
     writer.u16(field.order);
     writer.u8(field.type);
-    writer.u8(field.flags);
+    writer.u8(wire_flags);
     writer.u16(field.element_count);
     writer.u16(field.max_element_count);
     writer.f64(field.scale);
     writer.f64(field.offset);
-    if (manifest_format_version_ >= 3U) {
+    if (has_range) {
         writer.f64(field.min_value);
         writer.f64(field.max_value);
     }

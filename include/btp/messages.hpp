@@ -246,6 +246,10 @@ static const std::uint8_t kSourceOnline = 0x01U;              // source_flags bi
 static const std::uint8_t kTopicSubscribable = 0x01U;         // topic flags bit 0
 static const std::uint8_t kFieldNullable = 0x01U;             // field flags bit 0
 static const std::uint8_t kFieldVariableCount = 0x02U;        // field flags bit 1
+// field flags bit 2 -- min_value/max_value follow offset on the wire
+// (manifest_format_version >= 3 only). Derived by ManifestWriter itself from
+// whether either value is non-NaN; never set it by hand (see FieldRecord).
+static const std::uint8_t kFieldHasRange = 0x04U;
 
 // FieldRecord::min_value / max_value sentinel: "no bound declared on this
 // side" (manifest_format_version >= 3 only -- see FieldRecord).
@@ -483,17 +487,21 @@ struct FieldRecord {
     std::uint16_t field_id;          // non-zero
     std::uint16_t order;             // contiguous from zero, ascending
     std::uint8_t type;
-    std::uint8_t flags;              // kFieldNullable | kFieldVariableCount
+    std::uint8_t flags;              // kFieldNullable | kFieldVariableCount | kFieldHasRange
     std::uint16_t element_count;
     std::uint16_t max_element_count;
     double scale;                    // float64_le, finite
     double offset;                   // float64_le, finite
-    // manifest_format_version >= 3 only (messages.cpp read_field_content /
-    // add_field_common gate on it); absent on the wire for format 1/2, and
-    // this struct then leaves them at their default-constructed NaN.
-    // Engineering-unit space (post scale/offset), same as `unit` describes.
-    // NaN means "no bound on that side"; if both are finite, min_value <=
-    // max_value.
+    // On the wire only when manifest_format_version >= 3 AND flags bit
+    // kFieldHasRange is set (messages.cpp read_field_content / add_field_common
+    // gate on both -- most fields have nothing to declare, and per-field
+    // presence keeps a manifest with 20+ fields from paying 16 bytes each for
+    // it). ManifestWriter derives the flag itself from these two values --
+    // set min_value/max_value (btp::range() / TopicBuilder::range()) and it
+    // follows; the flag bit in a FieldRecord you built by hand is ignored on
+    // write. Engineering-unit space (post scale/offset), same as `unit`
+    // describes. NaN means "no bound on that side"; if both are finite,
+    // min_value <= max_value.
     double min_value = kNoRangeBound;   // float64_le, finite or NaN
     double max_value = kNoRangeBound;   // float64_le, finite or NaN
     std::uint16_t enum_count;

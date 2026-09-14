@@ -2171,7 +2171,7 @@ while (r.next_source_info(&si) == btp::ManifestStep::Item) { /* ... */ }
 btp::TopicRecord t;
 btp::ByteView field_bytes;
 while (r.next_topic(&t, &field_bytes) == btp::ManifestStep::Item) {
-    // h.manifest_format_version >= 3: f.min_value / f.max_value are set too.
+    // h.manifest_format_version >= 3 and f.flags & btp::kFieldHasRange: f.min_value / f.max_value are set too.
     btp::FieldRecordReader fr(field_bytes, t.field_count, h.manifest_format_version);
     btp::FieldRecord f;
     btp::ByteView enum_bytes;

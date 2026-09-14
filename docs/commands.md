@@ -477,8 +477,9 @@ inserts the `source_info` block defined in [Source info](#312-source-info)
 before the topic records. Format `1` has no `source_info` block.
 
 Format `3` also carries the `source_info` block (as format `2` does), and
-additionally adds `min_value` / `max_value` to every field record -- see
-[Field records](#37-field-records).
+additionally lets a field record declare `min_value` / `max_value` (only when
+that field's `HAS_RANGE` flag is set -- most fields have nothing to declare
+and cost nothing extra) -- see [Field records](#37-field-records).
 
 A responder sends the highest format it implements. There is no format
 negotiation in `MANIFEST_REQUEST`, so a requester that only implements format
@@ -646,8 +647,8 @@ max_element_count:uint16_le
 scale:float64_le
 offset:float64_le
 
-min_value:float64_le  (manifest_format_version >= 3 only)
-max_value:float64_le  (manifest_format_version >= 3 only)
+min_value:float64_le  (manifest_format_version >= 3 AND flags bit 2 set)
+max_value:float64_le  (manifest_format_version >= 3 AND flags bit 2 set)
 
 enum_count:uint16_le
 
@@ -663,16 +664,22 @@ Field flags currently define:
 ```text
 bit 0 -> NULLABLE
 bit 1 -> VARIABLE_COUNT
+bit 2 -> HAS_RANGE (manifest_format_version >= 3 only)
 ```
 
 `scale` and `offset` must be finite IEEE-754 `float64` values.
 
-`min_value` and `max_value` are present only in `manifest_format_version >= 3`
-(see [MANIFEST_DATA](#32-manifest_data)); a format `1` or `2` field record ends
-at `offset`. Each is a finite `float64` or `NaN` -- `NaN` means "no bound on
-this side". When both are finite, `min_value` must be <= `max_value`. Both are
-in the field's engineering-unit space, i.e. after `scale` / `offset` are
-applied -- the same space `unit` describes.
+`min_value` and `max_value` are present only when `manifest_format_version >=
+3` (see [MANIFEST_DATA](#32-manifest_data)) AND the field's `HAS_RANGE` flag
+bit is set -- a field with nothing to declare (the common case) costs nothing
+extra, even in a format-3 manifest. A field record ends at `offset` whenever
+either condition is false. `HAS_RANGE` is derived by the writer from whether
+either value is declared, not an independent choice: build `min_value`/
+`max_value` and the bit follows. Each present value is a finite `float64` or
+`NaN` -- `NaN` means "no bound on this side" (so `HAS_RANGE` can be set with
+only one side actually bounded). When both are finite, `min_value` must be <=
+`max_value`. Both are in the field's engineering-unit space, i.e. after
+`scale` / `offset` are applied -- the same space `unit` describes.
 
 The field types and serialization rules are defined in [Telemetry payloads](telemetry.md).
 

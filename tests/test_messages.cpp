@@ -895,7 +895,7 @@ void test_vector_manifest_field_range() {
     btp::TopicRecord topic = {};
     btp::ByteView field_bytes = {};
     CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::Item);
-    CHECK(topic.field_count == 2U);
+    CHECK(topic.field_count == 3U);
 
     btp::FieldRecordReader fields(field_bytes, topic.field_count,
                                  header.manifest_format_version);
@@ -903,15 +903,26 @@ void test_vector_manifest_field_range() {
     btp::ByteView enum_bytes = {};
     CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
     CHECK(field.field_id == 1U);
+    CHECK((field.flags & btp::kFieldHasRange) != 0U);
     CHECK(field.min_value == 0.0);
     CHECK(field.max_value == 5.0);
     CHECK(std::memcmp(field.name.data, "current_a", field.name.size) == 0);
 
     CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
     CHECK(field.field_id == 2U);
+    CHECK((field.flags & btp::kFieldHasRange) != 0U);
     CHECK(field.min_value == 3.0);
     CHECK(field.max_value == 4.2);
     CHECK(std::memcmp(field.name.data, "voltage_v", field.name.size) == 0);
+
+    // Third field declares no range at all -- kFieldHasRange is unset, no
+    // extra bytes are on the wire for it, and it reads back "unset" (NaN).
+    CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+    CHECK(field.field_id == 3U);
+    CHECK((field.flags & btp::kFieldHasRange) == 0U);
+    CHECK(is_nan(field.min_value));
+    CHECK(is_nan(field.max_value));
+    CHECK(std::memcmp(field.name.data, "gyro_z", field.name.size) == 0);
 
     CHECK(fields.next(&field, &enum_bytes) == ManifestStep::End);
     CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::End);

@@ -2,7 +2,7 @@
   "format": "btp-test-vector-msg-v2",
   "id": "manifest_data_field_range",
   "object": "manifest_data",
-  "description": "Format 3 with one subscribable topic; both fields declare a min_value/max_value range.",
+  "description": "Format 3 with one subscribable topic; two fields declare a min_value/max_value range (flags bit 2, kFieldHasRange), one declares none.",
   "payload_model": {
     "request": {
       "request_source_id": "0x11223344",
@@ -36,7 +36,7 @@
             "field_id": 1,
             "order": 0,
             "type": 9,
-            "flags": 0,
+            "flags": 4,
             "element_count": 1,
             "max_element_count": 0,
             "scale": 1.0,
@@ -51,7 +51,7 @@
             "field_id": 2,
             "order": 1,
             "type": 9,
-            "flags": 0,
+            "flags": 4,
             "element_count": 1,
             "max_element_count": 0,
             "scale": 1.0,
@@ -60,6 +60,19 @@
             "max_value": 4.2,
             "name": "voltage_v",
             "unit": "V",
+            "description": ""
+          },
+          {
+            "field_id": 3,
+            "order": 2,
+            "type": 9,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "name": "gyro_z",
+            "unit": "rad/s",
             "description": ""
           }
         ]

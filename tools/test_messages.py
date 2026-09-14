@@ -602,20 +602,30 @@ MAX_NAME = 128
 # max_value (manifest_format_version >= 3 only).
 NO_RANGE_BOUND = float("nan")
 
+# btp::kFieldHasRange (field flags bit 2) -- derived, like the C++ writer
+# does, from whether either value is non-NaN; a payload_model's own "flags"
+# never needs to (and should not) set this bit by hand.
+FIELD_HAS_RANGE = 0x04
+
 
 def _field_bytes(f, fmt):
     body = bytearray()
     body += _u16(integer(f["field_id"]))
     body += _u16(integer(f["order"]))
     body.append(integer(f["type"]))
-    body.append(integer(f["flags"]))
+    min_value = float(f.get("min_value", NO_RANGE_BOUND))
+    max_value = float(f.get("max_value", NO_RANGE_BOUND))
+    has_range = fmt >= 3 and not (math.isnan(min_value) and math.isnan(max_value))
+    flags = integer(f["flags"])
+    flags = (flags | FIELD_HAS_RANGE) if has_range else (flags & ~FIELD_HAS_RANGE)
+    body.append(flags)
     body += _u16(integer(f["element_count"]))
     body += _u16(integer(f["max_element_count"]))
     body += struct.pack("<d", float(f["scale"]))
     body += struct.pack("<d", float(f["offset"]))
-    if fmt >= 3:
-        body += struct.pack("<d", float(f.get("min_value", NO_RANGE_BOUND)))
-        body += struct.pack("<d", float(f.get("max_value", NO_RANGE_BOUND)))
+    if has_range:
+        body += struct.pack("<d", min_value)
+        body += struct.pack("<d", max_value)
     enums = f.get("enums", [])
     body += _u16(len(enums))
     body += _utf8_u16(f.get("name", ""))
@@ -721,7 +731,7 @@ def _read_field(r, fmt):
         "scale": fr.f64(),
         "offset": fr.f64(),
     }
-    if fmt >= 3:
+    if fmt >= 3 and (f["flags"] & FIELD_HAS_RANGE) != 0:
         min_value = fr.f64()
         max_value = fr.f64()
         for value in (min_value, max_value):
