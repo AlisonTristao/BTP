@@ -469,17 +469,23 @@ The payload begins with:
 | variable | variable | topic records             |
 | variable | variable | action records            |
 
-`manifest_format_version` is `1` or `2`.
+`manifest_format_version` is `1`, `2`, or `3`. Each format is a strict,
+cumulative extension of the one before it.
 
 Format `2` is identical to format `1` up to and including `source_name`, then
 inserts the `source_info` block defined in [Source info](#312-source-info)
 before the topic records. Format `1` has no `source_info` block.
 
+Format `3` also carries the `source_info` block (as format `2` does), and
+additionally adds `min_value` / `max_value` to every field record -- see
+[Field records](#37-field-records).
+
 A responder sends the highest format it implements. There is no format
 negotiation in `MANIFEST_REQUEST`, so a requester that only implements format
-`1` rejects a format `2` response, and a deployment moves both ends together.
-A requester that implements format `2` also accepts format `1` and treats its
-`source_info` as empty.
+`1` rejects a format `2` or `3` response, and a deployment moves both ends
+together. A requester that implements format `2` rejects format `3` but
+accepts format `1` (treating its `source_info` as empty); one that implements
+format `3` accepts formats `1` and `2` the same way.
 
 `source_name` is encoded as `utf8_u16`.
 
@@ -640,6 +646,9 @@ max_element_count:uint16_le
 scale:float64_le
 offset:float64_le
 
+min_value:float64_le  (manifest_format_version >= 3 only)
+max_value:float64_le  (manifest_format_version >= 3 only)
+
 enum_count:uint16_le
 
 name:utf8_u16
@@ -657,6 +666,13 @@ bit 1 -> VARIABLE_COUNT
 ```
 
 `scale` and `offset` must be finite IEEE-754 `float64` values.
+
+`min_value` and `max_value` are present only in `manifest_format_version >= 3`
+(see [MANIFEST_DATA](#32-manifest_data)); a format `1` or `2` field record ends
+at `offset`. Each is a finite `float64` or `NaN` -- `NaN` means "no bound on
+this side". When both are finite, `min_value` must be <= `max_value`. Both are
+in the field's engineering-unit space, i.e. after `scale` / `offset` are
+applied -- the same space `unit` describes.
 
 The field types and serialization rules are defined in [Telemetry payloads](telemetry.md).
 

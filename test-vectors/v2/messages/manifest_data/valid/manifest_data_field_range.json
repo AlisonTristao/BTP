@@ -1,0 +1,69 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_data_field_range",
+  "object": "manifest_data",
+  "description": "Format 3 with one subscribable topic; both fields declare a min_value/max_value range.",
+  "payload_model": {
+    "request": {
+      "request_source_id": "0x11223344",
+      "request_boot_id": "0x55667788",
+      "reply_to_sequence": 9
+    },
+    "status": 0,
+    "flags": 0,
+    "error_code": 0,
+    "manifest_format_version": 3,
+    "config_revision": 1,
+    "source_uuid_hex": "112233445566778899aabbccddeeff00",
+    "described_source_id": "0x0C0D0E0F",
+    "described_boot_id": "0x10203040",
+    "source_role": 1,
+    "source_flags": 1,
+    "catalog_index": 0,
+    "catalog_count": 1,
+    "source_name": "battery-node",
+    "topics": [
+      {
+        "topic_id": "0x0201",
+        "schema_version": 1,
+        "encoding": 5,
+        "flags": 1,
+        "max_rate_millihz": 10000,
+        "name": "battery_state",
+        "description": "",
+        "fields": [
+          {
+            "field_id": 1,
+            "order": 0,
+            "type": 9,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": 0.0,
+            "max_value": 5.0,
+            "name": "current_a",
+            "unit": "A",
+            "description": ""
+          },
+          {
+            "field_id": 2,
+            "order": 1,
+            "type": 9,
+            "flags": 0,
+            "element_count": 1,
+            "max_element_count": 0,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": 3.0,
+            "max_value": 4.2,
+            "name": "voltage_v",
+            "unit": "V",
+            "description": ""
+          }
+        ]
+      }
+    ]
+  }
+}

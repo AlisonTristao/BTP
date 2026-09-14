@@ -8,18 +8,23 @@
 //     the same payload_model by an independent implementation.
 
 #include "btp/messages.hpp"
+#include "btp/telemetry.hpp"  // btp::f32/range -- FieldRecord builder helpers
 
 #include "../src/messages_detail.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace {
+
+bool is_nan(double value) { return std::isnan(value); }
 
 int failures = 0;
 
@@ -681,7 +686,8 @@ void check_manifest_roundtrip(const std::vector<std::uint8_t>& bytes) {
     for (ManifestStep s = reader.next_topic(&topic, &field_bytes);
          s == ManifestStep::Item; s = reader.next_topic(&topic, &field_bytes)) {
         CHECK(writer.begin_topic(topic) == btp::MessageError::Ok);
-        btp::FieldRecordReader fields(field_bytes, topic.field_count);
+        btp::FieldRecordReader fields(field_bytes, topic.field_count,
+                                     header.manifest_format_version);
         btp::FieldRecord field = {};
         btp::ByteView enum_bytes = {};
         for (ManifestStep fs = fields.next(&field, &enum_bytes);
@@ -709,7 +715,8 @@ void check_manifest_roundtrip(const std::vector<std::uint8_t>& bytes) {
          s = reader.next_action(&action, &params, &results, &errors)) {
         CHECK(writer.begin_action(action) == btp::MessageError::Ok);
 
-        btp::FieldRecordReader param_fields(params, action.parameter_field_count);
+        btp::FieldRecordReader param_fields(params, action.parameter_field_count,
+                                           header.manifest_format_version);
         btp::FieldRecord field = {};
         btp::ByteView enum_bytes = {};
         for (ManifestStep fs = param_fields.next(&field, &enum_bytes);
@@ -726,7 +733,8 @@ void check_manifest_roundtrip(const std::vector<std::uint8_t>& bytes) {
         }
         CHECK(param_fields.error() == btp::MessageError::Ok);
 
-        btp::FieldRecordReader result_fields(results, action.result_field_count);
+        btp::FieldRecordReader result_fields(results, action.result_field_count,
+                                             header.manifest_format_version);
         for (ManifestStep fs = result_fields.next(&field, &enum_bytes);
              fs == ManifestStep::Item;
              fs = result_fields.next(&field, &enum_bytes)) {
@@ -825,7 +833,8 @@ void test_vector_manifest_full() {
     CHECK(topic.field_count == 2U);
     CHECK(std::memcmp(topic.name.data, "motor_state", topic.name.size) == 0);
 
-    btp::FieldRecordReader fields(field_bytes, topic.field_count);
+    btp::FieldRecordReader fields(field_bytes, topic.field_count,
+                                 header.manifest_format_version);
     btp::FieldRecord field = {};
     btp::ByteView enum_bytes = {};
     CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
@@ -870,6 +879,184 @@ void test_vector_manifest_full() {
     check_manifest_roundtrip(bytes);
 }
 
+// Format 3: FieldRecord::min_value / max_value round-trip through the wire.
+void test_vector_manifest_field_range() {
+    const std::vector<std::uint8_t> bytes =
+        read_vector("manifest_data/valid/manifest_data_field_range.bin");
+    btp::ManifestReader reader(bytes.data(), bytes.size());
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+    CHECK(header.manifest_format_version == 3U);
+    CHECK(header.topic_count == 1U);
+
+    btp::SourceInfoEntry si = {};
+    CHECK(reader.next_source_info(&si) == ManifestStep::End);  // none declared
+
+    btp::TopicRecord topic = {};
+    btp::ByteView field_bytes = {};
+    CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::Item);
+    CHECK(topic.field_count == 2U);
+
+    btp::FieldRecordReader fields(field_bytes, topic.field_count,
+                                 header.manifest_format_version);
+    btp::FieldRecord field = {};
+    btp::ByteView enum_bytes = {};
+    CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+    CHECK(field.field_id == 1U);
+    CHECK(field.min_value == 0.0);
+    CHECK(field.max_value == 5.0);
+    CHECK(std::memcmp(field.name.data, "current_a", field.name.size) == 0);
+
+    CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+    CHECK(field.field_id == 2U);
+    CHECK(field.min_value == 3.0);
+    CHECK(field.max_value == 4.2);
+    CHECK(std::memcmp(field.name.data, "voltage_v", field.name.size) == 0);
+
+    CHECK(fields.next(&field, &enum_bytes) == ManifestStep::End);
+    CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::End);
+    CHECK(reader.finish() == btp::MessageError::Ok);
+
+    check_manifest_roundtrip(bytes);
+}
+
+// A field record with no declared range (format < 3, or format >= 3 with both
+// sides NaN) always reads back min_value/max_value as NaN -- never whatever a
+// reused FieldRecord happened to hold from a previous field in the same walk.
+void test_manifest_field_range_defaults_and_reuse() {
+    // format 1: no min_value/max_value on the wire at all.
+    {
+        std::uint8_t buffer[512] = {};
+        btp::ManifestHeader header = {};
+        header.manifest_format_version = 1U;
+        header.status = 0U;
+        header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+        header.topic_count = 1U;
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        btp::TopicRecord topic = {};
+        topic.topic_id = 1U;
+        topic.schema_version = 1U;
+        topic.field_count = 1U;
+        CHECK(writer.begin_topic(topic) == btp::MessageError::Ok);
+        btp::FieldRecord fr = btp::range(btp::f32("x"), 1.0, 2.0);
+        fr.field_id = 1U;
+        CHECK(writer.add_field(fr) == btp::MessageError::Ok);
+        CHECK(writer.end_topic() == btp::MessageError::Ok);
+        std::size_t written = 0U;
+        CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+        btp::ManifestReader reader(buffer, written);
+        btp::ManifestHeader parsed = {};
+        CHECK(reader.header(&parsed) == btp::MessageError::Ok);
+        btp::TopicRecord t = {};
+        btp::ByteView field_bytes = {};
+        CHECK(reader.next_topic(&t, &field_bytes) == ManifestStep::Item);
+        btp::FieldRecordReader fields(field_bytes, t.field_count,
+                                     parsed.manifest_format_version);
+        btp::FieldRecord field = {};
+        btp::ByteView enum_bytes = {};
+        CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+        // format 1 never carries min_value/max_value -- the range set above
+        // never reached the wire, so this must read back as "unset".
+        CHECK(is_nan(field.min_value));
+        CHECK(is_nan(field.max_value));
+    }
+
+    // format 3: two fields, only the first has a declared range -- the second
+    // must read back NaN, not the first field's leftover values.
+    {
+        std::uint8_t buffer[512] = {};
+        btp::ManifestHeader header = {};
+        header.manifest_format_version = 3U;
+        header.status = 0U;
+        header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+        header.topic_count = 1U;
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(header) == btp::MessageError::Ok);
+        btp::TopicRecord topic = {};
+        topic.topic_id = 1U;
+        topic.schema_version = 1U;
+        topic.field_count = 2U;
+        CHECK(writer.begin_topic(topic) == btp::MessageError::Ok);
+        btp::FieldRecord fr1 = btp::range(btp::f32("a"), 1.0, 2.0);
+        fr1.field_id = 1U;
+        fr1.order = 0U;
+        CHECK(writer.add_field(fr1) == btp::MessageError::Ok);
+        btp::FieldRecord fr2 = btp::f32("b");  // no .range(): NaN/NaN
+        fr2.field_id = 2U;
+        fr2.order = 1U;
+        CHECK(writer.add_field(fr2) == btp::MessageError::Ok);
+        CHECK(writer.end_topic() == btp::MessageError::Ok);
+        std::size_t written = 0U;
+        CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+        btp::ManifestReader reader(buffer, written);
+        btp::ManifestHeader parsed = {};
+        CHECK(reader.header(&parsed) == btp::MessageError::Ok);
+        btp::TopicRecord t = {};
+        btp::ByteView field_bytes = {};
+        CHECK(reader.next_topic(&t, &field_bytes) == ManifestStep::Item);
+        btp::FieldRecordReader fields(field_bytes, t.field_count,
+                                     parsed.manifest_format_version);
+        btp::FieldRecord field = {};
+        btp::ByteView enum_bytes = {};
+        CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+        CHECK(field.min_value == 1.0);
+        CHECK(field.max_value == 2.0);
+        CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Item);
+        CHECK(is_nan(field.min_value));
+        CHECK(is_nan(field.max_value));
+    }
+}
+
+// A finite min_value greater than max_value is rejected by both the reader
+// (via the checked-in invalid vector) and the writer (constructed directly).
+void test_manifest_field_range_invalid() {
+    const std::vector<std::uint8_t> bytes =
+        read_vector("manifest_data/invalid/manifest_range_inverted.bin");
+    btp::ManifestReader reader(bytes.data(), bytes.size());
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+    btp::SourceInfoEntry si = {};
+    while (reader.next_source_info(&si) == ManifestStep::Item) {
+    }
+    btp::TopicRecord topic = {};
+    btp::ByteView field_bytes = {};
+    CHECK(reader.next_topic(&topic, &field_bytes) == ManifestStep::Item);
+    btp::FieldRecordReader fields(field_bytes, topic.field_count,
+                                 header.manifest_format_version);
+    btp::FieldRecord field = {};
+    btp::ByteView enum_bytes = {};
+    CHECK(fields.next(&field, &enum_bytes) == ManifestStep::Error);
+    CHECK(fields.error() == btp::MessageError::InvalidValue);
+
+    // Same rejection, writer side: a directly-built FieldRecord with
+    // min_value > max_value (both finite) is refused.
+    std::uint8_t buffer[256] = {};
+    btp::ManifestHeader h = {};
+    h.manifest_format_version = 3U;
+    h.status = 0U;
+    h.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+    h.topic_count = 1U;
+    btp::ManifestWriter writer(buffer, sizeof(buffer));
+    CHECK(writer.begin(h) == btp::MessageError::Ok);
+    btp::TopicRecord topic_out = {};
+    topic_out.topic_id = 1U;
+    topic_out.schema_version = 1U;
+    topic_out.field_count = 1U;
+    CHECK(writer.begin_topic(topic_out) == btp::MessageError::Ok);
+    btp::FieldRecord bad = btp::range(btp::f32("x"), 5.0, 0.0);
+    bad.field_id = 1U;
+    CHECK(writer.add_field(bad) == btp::MessageError::InvalidValue);
+
+    // A non-finite (infinite) bound is refused too, independent of ordering.
+    btp::FieldRecord inf_bound =
+        btp::range(btp::f32("y"), -std::numeric_limits<double>::infinity(), 0.0);
+    inf_bound.field_id = 2U;
+    CHECK(writer.add_field(inf_bound) == btp::MessageError::InvalidValue);
+}
+
 void test_vector_manifest_not_modified() {
     const std::vector<std::uint8_t> bytes =
         read_vector("manifest_data/valid/manifest_data_not_modified.bin");
@@ -896,6 +1083,9 @@ void test_invalid_manifest_vectors() {
         {"manifest_data/invalid/manifest_bad_source_role.bin", btp::MessageError::InvalidValue},
         {"manifest_data/invalid/manifest_trailing_byte.bin", btp::MessageError::TrailingBytes},
     };
+    // manifest_range_inverted is checked separately (test_manifest_field_range_invalid):
+    // its error only surfaces while walking the topic's field records, past
+    // what this loop's header()/next_source_info()/finish() sequence reaches.
     for (std::size_t index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
         const std::vector<std::uint8_t> bytes = read_vector(cases[index].file);
         btp::ManifestReader reader(bytes.data(), bytes.size());
@@ -982,12 +1172,12 @@ void check_manifest_verbatim_roundtrip(const std::vector<std::uint8_t>& bytes) {
     btp::ByteView topics = {};
     btp::ByteView actions = {};
     CHECK(reader.raw_records(&topics, &actions) == btp::MessageError::Ok);
-    CHECK((header.manifest_format_version == 2U) == (info.size >= 2U));
+    CHECK((header.manifest_format_version >= 2U) == (info.size >= 2U));
 
     std::vector<std::uint8_t> out(bytes.size() + 64U, 0xCCU);
     btp::ManifestWriter writer(out.data(), out.size());
     CHECK(writer.begin(header) == btp::MessageError::Ok);
-    if (header.manifest_format_version == 2U) {
+    if (header.manifest_format_version >= 2U) {
         CHECK(writer.put_raw_source_info(info) == btp::MessageError::Ok);
     }
     CHECK(writer.put_raw_records(topics, actions) == btp::MessageError::Ok);
@@ -1004,6 +1194,8 @@ void test_manifest_verbatim_roundtrip() {
         read_vector("manifest_data/valid/manifest_data_source_info_only.bin"));
     check_manifest_verbatim_roundtrip(
         read_vector("manifest_data/valid/manifest_data_not_modified.bin"));
+    check_manifest_verbatim_roundtrip(
+        read_vector("manifest_data/valid/manifest_data_field_range.bin"));
 }
 
 void test_manifest_verbatim_truncates() {
@@ -1319,6 +1511,9 @@ int main() {
     test_invalid_status_vectors();
     test_vector_manifest_source_info_only();
     test_vector_manifest_full();
+    test_vector_manifest_field_range();
+    test_manifest_field_range_defaults_and_reuse();
+    test_manifest_field_range_invalid();
     test_vector_manifest_not_modified();
     test_invalid_manifest_vectors();
     test_manifest_writer_count_mismatch();

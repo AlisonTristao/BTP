@@ -2165,13 +2165,14 @@ btp::ManifestReader r(payload, size);
 btp::ManifestHeader h;
 r.header(&h);
 
-btp::SourceInfoEntry si;                              // format 2 only
+btp::SourceInfoEntry si;                              // format 2+ only
 while (r.next_source_info(&si) == btp::ManifestStep::Item) { /* ... */ }
 
 btp::TopicRecord t;
 btp::ByteView field_bytes;
 while (r.next_topic(&t, &field_bytes) == btp::ManifestStep::Item) {
-    btp::FieldRecordReader fr(field_bytes, t.field_count);
+    // h.manifest_format_version >= 3: f.min_value / f.max_value are set too.
+    btp::FieldRecordReader fr(field_bytes, t.field_count, h.manifest_format_version);
     btp::FieldRecord f;
     btp::ByteView enum_bytes;
     while (fr.next(&f, &enum_bytes) == btp::ManifestStep::Item) {

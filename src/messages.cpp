@@ -1002,10 +1002,31 @@ bool is_finite_f64(double value) noexcept {
     return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
 }
 
+// True for a quiet or signalling NaN (all exponent bits set, non-zero
+// mantissa) -- the sentinel FieldRecord::min_value/max_value use for "no
+// bound on this side" (docs/commands.md section 3.7).
+bool is_nan_f64(double value) noexcept {
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint64_t exponent = bits & 0x7FF0000000000000ULL;
+    const std::uint64_t mantissa = bits & 0x000FFFFFFFFFFFFFULL;
+    return exponent == 0x7FF0000000000000ULL && mantissa != 0U;
+}
+
+bool is_finite_or_nan_f64(double value) noexcept {
+    return is_finite_f64(value) || is_nan_f64(value);
+}
+
 // Reads the content of one field record from `reader` (already bounded to the
 // record's content). Leftover octets in the reader are the enum run.
+// `format_version` is the enclosing MANIFEST_DATA's manifest_format_version --
+// min_value/max_value are only on the wire for >= 3; `out` is always given a
+// definite value for both (the caller's FieldRecord is reused across a
+// field-record run, so a format < 3 record must reset them, not leave
+// whatever the previous field left behind).
 MessageError read_field_content(Reader& reader, FieldRecord* out,
-                                ByteView* enum_entries) noexcept {
+                                ByteView* enum_entries,
+                                std::uint16_t format_version) noexcept {
     out->field_id = reader.u16();
     out->order = reader.u16();
     out->type = reader.u8();
@@ -1014,6 +1035,13 @@ MessageError read_field_content(Reader& reader, FieldRecord* out,
     out->max_element_count = reader.u16();
     out->scale = reader.f64();
     out->offset = reader.f64();
+    if (format_version >= 3U) {
+        out->min_value = reader.f64();
+        out->max_value = reader.f64();
+    } else {
+        out->min_value = kNoRangeBound;
+        out->max_value = kNoRangeBound;
+    }
     out->enum_count = reader.u16();
     out->name = reader.utf8_u16(kMaxNameOrUnit);
     out->unit = reader.utf8_u16(kMaxNameOrUnit);
@@ -1028,6 +1056,14 @@ MessageError read_field_content(Reader& reader, FieldRecord* out,
         return MessageError::CountTooLarge;
     }
     if (!is_finite_f64(out->scale) || !is_finite_f64(out->offset)) {
+        return MessageError::InvalidValue;
+    }
+    if (!is_finite_or_nan_f64(out->min_value) ||
+        !is_finite_or_nan_f64(out->max_value)) {
+        return MessageError::InvalidValue;
+    }
+    if (is_finite_f64(out->min_value) && is_finite_f64(out->max_value) &&
+        out->min_value > out->max_value) {
         return MessageError::InvalidValue;
     }
     *enum_entries = ByteView{nullptr, reader.remaining()};  // data patched by caller
@@ -1135,7 +1171,8 @@ MessageError ManifestReader::header(ManifestHeader* out) noexcept {
         error_ = reader.error();
         return error_;
     }
-    if (header.manifest_format_version != 1U && header.manifest_format_version != 2U) {
+    if (header.manifest_format_version != 1U && header.manifest_format_version != 2U &&
+        header.manifest_format_version != 3U) {
         error_ = MessageError::UnsupportedFormat;
         return error_;
     }
@@ -1517,9 +1554,10 @@ MessageError ManifestReader::raw_records(ByteView* topic_records,
 
 // --- FieldRecordReader / EnumEntryReader / ActionErrorReader -------------
 
-FieldRecordReader::FieldRecordReader(ByteView run, std::uint16_t count) noexcept
+FieldRecordReader::FieldRecordReader(ByteView run, std::uint16_t count,
+                                     std::uint16_t format_version) noexcept
     : data_(run.data), size_(run.size), cursor_(0U), left_(count),
-      error_(MessageError::Ok) {}
+      format_version_(format_version), error_(MessageError::Ok) {}
 
 FieldRecordReader::Step FieldRecordReader::next(FieldRecord* out,
                                                ByteView* enum_entries) noexcept {
@@ -1550,7 +1588,7 @@ FieldRecordReader::Step FieldRecordReader::next(FieldRecord* out,
     }
     Reader reader(data_ + content_start, record_size);
     ByteView enums = {nullptr, 0U};
-    const MessageError rc = read_field_content(reader, out, &enums);
+    const MessageError rc = read_field_content(reader, out, &enums, format_version_);
     if (rc != MessageError::Ok) {
         error_ = rc;
         return Step::Error;
@@ -1673,7 +1711,8 @@ MessageError ManifestWriter::begin(const ManifestHeader& header) noexcept {
         error_ = MessageError::WrongOrder;
         return error_;
     }
-    if (header.manifest_format_version != 1U && header.manifest_format_version != 2U) {
+    if (header.manifest_format_version != 1U && header.manifest_format_version != 2U &&
+        header.manifest_format_version != 3U) {
         error_ = MessageError::UnsupportedFormat;
         return error_;
     }
@@ -1723,7 +1762,7 @@ MessageError ManifestWriter::begin(const ManifestHeader& header) noexcept {
     manifest_format_version_ = header.manifest_format_version;
     topic_count_ = header.topic_count;
     action_count_ = header.action_count;
-    if (manifest_format_version_ == 2U) {
+    if (manifest_format_version_ >= 2U) {
         source_info_slot_ = cursor_;
         Writer slot(out_ + cursor_, capacity_ - cursor_);
         slot.u16(0U);  // info_count placeholder
@@ -1979,6 +2018,16 @@ MessageError ManifestWriter::add_field_common(const FieldRecord& field) noexcept
         error_ = MessageError::InvalidValue;
         return error_;
     }
+    if (!is_finite_or_nan_f64(field.min_value) ||
+        !is_finite_or_nan_f64(field.max_value)) {
+        error_ = MessageError::InvalidValue;
+        return error_;
+    }
+    if (is_finite_f64(field.min_value) && is_finite_f64(field.max_value) &&
+        field.min_value > field.max_value) {
+        error_ = MessageError::InvalidValue;
+        return error_;
+    }
     field_record_start_ = cursor_;
     Writer writer(out_ + cursor_, capacity_ - cursor_);
     writer.u32(0U);  // field record_size placeholder
@@ -1992,6 +2041,10 @@ MessageError ManifestWriter::add_field_common(const FieldRecord& field) noexcept
     writer.u16(field.max_element_count);
     writer.f64(field.scale);
     writer.f64(field.offset);
+    if (manifest_format_version_ >= 3U) {
+        writer.f64(field.min_value);
+        writer.f64(field.max_value);
+    }
     writer.u16(field.enum_count);
     writer.utf8_u16(field.name, kMaxNameOrUnit);
     writer.utf8_u16(field.unit, kMaxNameOrUnit);

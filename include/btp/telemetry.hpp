@@ -205,6 +205,19 @@ inline FieldRecord nullable(FieldRecord f) noexcept {
     return f;
 }
 
+// Declare the field's valid value range (engineering units, the same space
+// `unit` describes) -- only takes effect when the Catalog this field ends up
+// in is written/ingested at manifest_format_version >= 3; earlier consumers
+// never see it. Wraps any of the helpers above:
+// btp::range(btp::f32("current_a", "A"), 0.0, 5.0). Pass kNoRangeBound (the
+// default) for a side with no bound.
+inline FieldRecord range(FieldRecord f, double min_value,
+                         double max_value) noexcept {
+    f.min_value = min_value;
+    f.max_value = max_value;
+    return f;
+}
+
 // ---------------------------------------------------------------------------
 // Decoded value
 // ---------------------------------------------------------------------------

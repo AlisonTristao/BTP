@@ -1,5 +1,6 @@
 #include "btp/catalog.hpp"
 
+#include <cstdint>
 #include <cstring>
 
 namespace btp {
@@ -11,6 +12,17 @@ namespace {
 // never has to null-check before printing.
 const char* const kEmptyName = "";
 
+// True for a quiet or signalling NaN -- btp::kNoRangeBound, the "no bound
+// declared" sentinel for a min_pool_/max_pool_ entry. Bit-level, like
+// messages.cpp's own is_nan_f64, rather than a self-comparison.
+bool is_nan_f64(double value) noexcept {
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint64_t exponent = bits & 0x7FF0000000000000ULL;
+    const std::uint64_t mantissa = bits & 0x000FFFFFFFFFFFFFULL;
+    return exponent == 0x7FF0000000000000ULL && mantissa != 0U;
+}
+
 }  // namespace
 
 Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
@@ -21,7 +33,9 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
                  const char** description_ptr_pool,
                  std::size_t description_ptr_capacity,
                  SourceInfoEntry* source_info_pool,
-                 std::size_t source_info_capacity) noexcept
+                 std::size_t source_info_capacity, double* min_pool,
+                 std::size_t min_pool_capacity, double* max_pool,
+                 std::size_t max_pool_capacity) noexcept
     : topics_(topics),
       topic_capacity_(topic_capacity),
       topic_count_(0U),
@@ -37,6 +51,12 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
       description_ptr_pool_(description_ptr_pool),
       description_ptr_capacity_(description_ptr_capacity),
       description_ptr_used_(0U),
+      min_pool_(min_pool),
+      min_pool_capacity_(min_pool_capacity),
+      min_pool_used_(0U),
+      max_pool_(max_pool),
+      max_pool_capacity_(max_pool_capacity),
+      max_pool_used_(0U),
       string_pool_(string_pool),
       string_pool_capacity_(string_pool_capacity),
       string_pool_used_(0U),
@@ -53,6 +73,8 @@ void Catalog::clear() noexcept {
     name_ptr_used_ = 0U;
     unit_ptr_used_ = 0U;
     description_ptr_used_ = 0U;
+    min_pool_used_ = 0U;
+    max_pool_used_ = 0U;
     string_pool_used_ = 0U;
     // source_info interns into the same string pool this just reset -- dropping
     // the count is what keeps its ByteViews from dangling into reused bytes.
@@ -77,6 +99,20 @@ const CatalogTopic* Catalog::topic(std::uint16_t topic_id) const noexcept {
 
 const CatalogTopic* Catalog::topic_at(std::size_t index) const noexcept {
     return index < topic_count_ ? &topics_[index] : nullptr;
+}
+
+bool Catalog::has_field_ranges() const noexcept {
+    if (min_pool_ != nullptr) {
+        for (std::size_t i = 0U; i < field_pool_used_; ++i) {
+            if (!is_nan_f64(min_pool_[i])) return true;
+        }
+    }
+    if (max_pool_ != nullptr) {
+        for (std::size_t i = 0U; i < field_pool_used_; ++i) {
+            if (!is_nan_f64(max_pool_[i])) return true;
+        }
+    }
+    return false;
 }
 
 const char* Catalog::intern(const char* s) noexcept {
@@ -124,6 +160,22 @@ const char* Catalog::field_description(const CatalogTopic& t,
     return t.field_descriptions[index];
 }
 
+double Catalog::field_min(const CatalogTopic& t,
+                          std::size_t index) const noexcept {
+    if (t.field_mins == nullptr || index >= t.field_count) {
+        return kNoRangeBound;
+    }
+    return t.field_mins[index];
+}
+
+double Catalog::field_max(const CatalogTopic& t,
+                          std::size_t index) const noexcept {
+    if (t.field_maxs == nullptr || index >= t.field_count) {
+        return kNoRangeBound;
+    }
+    return t.field_maxs[index];
+}
+
 // ---------------------------------------------------------------------------
 // Producer: fill by hand
 // ---------------------------------------------------------------------------
@@ -160,10 +212,14 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
     const bool keep_names = name_ptr_pool_ != nullptr;
     const bool keep_units = unit_ptr_pool_ != nullptr;
     const bool keep_descriptions = description_ptr_pool_ != nullptr;
+    const bool keep_mins = min_pool_ != nullptr;
+    const bool keep_maxs = max_pool_ != nullptr;
     if ((keep_names && name_ptr_used_ + field_count > name_ptr_capacity_) ||
         (keep_units && unit_ptr_used_ + field_count > unit_ptr_capacity_) ||
         (keep_descriptions &&
-         description_ptr_used_ + field_count > description_ptr_capacity_)) {
+         description_ptr_used_ + field_count > description_ptr_capacity_) ||
+        (keep_mins && min_pool_used_ + field_count > min_pool_capacity_) ||
+        (keep_maxs && max_pool_used_ + field_count > max_pool_capacity_)) {
         return MessageError::BufferTooSmall;
     }
 
@@ -183,6 +239,8 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
     t.field_descriptions =
         keep_descriptions ? &description_ptr_pool_[description_ptr_used_]
                           : nullptr;
+    t.field_mins = keep_mins ? &min_pool_[min_pool_used_] : nullptr;
+    t.field_maxs = keep_maxs ? &max_pool_[max_pool_used_] : nullptr;
 
     for (std::size_t i = 0U; i < field_count; ++i) {
         FieldSpec spec = field_spec(fields[i]);
@@ -203,11 +261,19 @@ MessageError Catalog::add_topic(std::uint16_t topic_id,
             description_ptr_pool_[description_ptr_used_ + i] =
                 intern(fields[i].description.data, fields[i].description.size);
         }
+        if (keep_mins) {
+            min_pool_[min_pool_used_ + i] = fields[i].min_value;
+        }
+        if (keep_maxs) {
+            max_pool_[max_pool_used_ + i] = fields[i].max_value;
+        }
     }
     field_pool_used_ += field_count;
     if (keep_names) name_ptr_used_ += field_count;
     if (keep_units) unit_ptr_used_ += field_count;
     if (keep_descriptions) description_ptr_used_ += field_count;
+    if (keep_mins) min_pool_used_ += field_count;
+    if (keep_maxs) max_pool_used_ += field_count;
     ++topic_count_;
     return MessageError::Ok;
 }
@@ -263,6 +329,8 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
     const bool keep_names = name_ptr_pool_ != nullptr;
     const bool keep_units = unit_ptr_pool_ != nullptr;
     const bool keep_descriptions = description_ptr_pool_ != nullptr;
+    const bool keep_mins = min_pool_ != nullptr;
+    const bool keep_maxs = max_pool_ != nullptr;
     TopicRecord topic = {};
     ByteView field_bytes = {};
     while (reader.next_topic(&topic, &field_bytes) == ManifestStep::Item) {
@@ -273,7 +341,11 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
             (keep_units &&
              unit_ptr_used_ + topic.field_count > unit_ptr_capacity_) ||
             (keep_descriptions && description_ptr_used_ + topic.field_count >
-                                      description_ptr_capacity_)) {
+                                      description_ptr_capacity_) ||
+            (keep_mins &&
+             min_pool_used_ + topic.field_count > min_pool_capacity_) ||
+            (keep_maxs &&
+             max_pool_used_ + topic.field_count > max_pool_capacity_)) {
             clear();
             return MessageError::BufferTooSmall;
         }
@@ -298,8 +370,11 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
         t.field_descriptions =
             keep_descriptions ? &description_ptr_pool_[description_ptr_used_]
                               : nullptr;
+        t.field_mins = keep_mins ? &min_pool_[min_pool_used_] : nullptr;
+        t.field_maxs = keep_maxs ? &max_pool_[max_pool_used_] : nullptr;
 
-        FieldRecordReader fields(field_bytes, topic.field_count);
+        FieldRecordReader fields(field_bytes, topic.field_count,
+                                 header.manifest_format_version);
         FieldRecord record = {};
         ByteView enum_bytes = {};
         std::size_t n = 0U;
@@ -317,6 +392,12 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
                 description_ptr_pool_[description_ptr_used_ + n] =
                     intern(record.description.data, record.description.size);
             }
+            if (keep_mins) {
+                min_pool_[min_pool_used_ + n] = record.min_value;
+            }
+            if (keep_maxs) {
+                max_pool_[max_pool_used_ + n] = record.max_value;
+            }
             ++n;
         }
         if (fields.error() != MessageError::Ok) {
@@ -330,6 +411,8 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
         if (keep_names) name_ptr_used_ += n;
         if (keep_units) unit_ptr_used_ += n;
         if (keep_descriptions) description_ptr_used_ += n;
+        if (keep_mins) min_pool_used_ += n;
+        if (keep_maxs) max_pool_used_ += n;
         ++topic_count_;
     }
 
@@ -390,6 +473,8 @@ MessageError Catalog::write_topics(ManifestWriter* writer) const noexcept {
             fr.max_element_count = spec.max_element_count;
             fr.scale = spec.scale;
             fr.offset = spec.offset;
+            fr.min_value = field_min(t, fi);
+            fr.max_value = field_max(t, fi);
             fr.enum_count = 0U;
             fr.name = ByteView{reinterpret_cast<const std::uint8_t*>(fname),
                                std::strlen(fname)};

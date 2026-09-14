@@ -17,6 +17,7 @@ The frame around it is test_vectors*.py's concern.
 
 import argparse
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -597,8 +598,12 @@ def decode_status(data):
 
 MAX_NAME = 128
 
+# btp::kNoRangeBound -- "no bound on this side" for a field's min_value /
+# max_value (manifest_format_version >= 3 only).
+NO_RANGE_BOUND = float("nan")
 
-def _field_bytes(f):
+
+def _field_bytes(f, fmt):
     body = bytearray()
     body += _u16(integer(f["field_id"]))
     body += _u16(integer(f["order"]))
@@ -608,6 +613,9 @@ def _field_bytes(f):
     body += _u16(integer(f["max_element_count"]))
     body += struct.pack("<d", float(f["scale"]))
     body += struct.pack("<d", float(f["offset"]))
+    if fmt >= 3:
+        body += struct.pack("<d", float(f.get("min_value", NO_RANGE_BOUND)))
+        body += struct.pack("<d", float(f.get("max_value", NO_RANGE_BOUND)))
     enums = f.get("enums", [])
     body += _u16(len(enums))
     body += _utf8_u16(f.get("name", ""))
@@ -619,7 +627,7 @@ def _field_bytes(f):
     return _u32(len(body)) + bytes(body)
 
 
-def _topic_bytes(t):
+def _topic_bytes(t, fmt):
     body = bytearray()
     body += _u16(integer(t["topic_id"]))
     body += _u16(integer(t["schema_version"]))
@@ -631,11 +639,11 @@ def _topic_bytes(t):
     body += _utf8_u16(t.get("name", ""))
     body += _utf8_u16(t.get("description", ""))
     for f in fields:
-        body += _field_bytes(f)
+        body += _field_bytes(f, fmt)
     return _u32(len(body)) + bytes(body)
 
 
-def _action_bytes(a):
+def _action_bytes(a, fmt):
     body = bytearray()
     body += _u16(integer(a["action_id"]))
     body += _u16(integer(a["action_version"]))
@@ -652,9 +660,9 @@ def _action_bytes(a):
     body += _utf8_u16(a.get("description", ""))
     body += _utf8_u16(a.get("confirmation_text", ""))
     for f in params:
-        body += _field_bytes(f)
+        body += _field_bytes(f, fmt)
     for f in results:
-        body += _field_bytes(f)
+        body += _field_bytes(f, fmt)
     body += _u16(len(errors))
     for e in errors:
         body += _u16(integer(e["error_code"]))
@@ -684,7 +692,7 @@ def encode_manifest_data(m):
     out += _u16(len(topics))
     out += _u16(len(actions))
     out += _utf8_u16(m.get("source_name", ""))
-    if fmt == 2:
+    if fmt >= 2:
         entries = m.get("source_info", [])
         out += _u16(len(entries))
         for e in entries:
@@ -692,13 +700,13 @@ def encode_manifest_data(m):
             out += _utf8_u16(e.get("label", ""))
             out += _utf8_u16(e["value"])
     for t in topics:
-        out += _topic_bytes(t)
+        out += _topic_bytes(t, fmt)
     for a in actions:
-        out += _action_bytes(a)
+        out += _action_bytes(a, fmt)
     return bytes(out)
 
 
-def _read_field(r):
+def _read_field(r, fmt):
     size = r.u32()
     end = r.pos + size
     fr = Reader(r.data[r.pos:end])
@@ -713,6 +721,17 @@ def _read_field(r):
         "scale": fr.f64(),
         "offset": fr.f64(),
     }
+    if fmt >= 3:
+        min_value = fr.f64()
+        max_value = fr.f64()
+        for value in (min_value, max_value):
+            if math.isinf(value):
+                raise ValueError("InvalidValue")
+        if (not math.isnan(min_value) and not math.isnan(max_value) and
+                min_value > max_value):
+            raise ValueError("InvalidValue")
+        f["min_value"] = min_value
+        f["max_value"] = max_value
     enum_count = fr.u16()
     f["name"] = fr.utf8_u16(MAX_NAME).decode("utf-8")
     f["unit"] = fr.utf8_u16(MAX_NAME).decode("utf-8")
@@ -752,7 +771,7 @@ def decode_manifest_data(data):
     m["source_name"] = r.utf8_u16().decode("utf-8")
     if r.error != OK:
         return None, r.error
-    if m["manifest_format_version"] not in (1, 2):
+    if m["manifest_format_version"] not in (1, 2, 3):
         return None, "UnsupportedFormat"
     if m["status"] > 6:
         return None, "InvalidValue"
@@ -761,7 +780,8 @@ def decode_manifest_data(data):
     # descriptor must name a valid role.
     if m["status"] == 0 and not 1 <= m["source_role"] <= 4:
         return None, "InvalidValue"
-    if m["manifest_format_version"] == 2:
+    fmt = m["manifest_format_version"]
+    if fmt >= 2:
         info_count = r.u16()
         entries = []
         for _ in range(info_count):
@@ -773,8 +793,8 @@ def decode_manifest_data(data):
         if entries:
             m["source_info"] = entries
     try:
-        topics = [_read_topic(r) for _ in range(topic_count)]
-        actions = [_read_action(r) for _ in range(action_count)]
+        topics = [_read_topic(r, fmt) for _ in range(topic_count)]
+        actions = [_read_action(r, fmt) for _ in range(action_count)]
     except ValueError as exc:
         return None, str(exc)
     if r.error != OK:
@@ -789,7 +809,7 @@ def decode_manifest_data(data):
     return m, OK
 
 
-def _read_topic(r):
+def _read_topic(r, fmt):
     size = r.u32()
     end = r.pos + size
     tr = Reader(r.data[r.pos:end])
@@ -804,7 +824,7 @@ def _read_topic(r):
     t["max_rate_millihz"] = tr.u32()
     t["name"] = tr.utf8_u16(MAX_NAME).decode("utf-8")
     t["description"] = tr.utf8_u16().decode("utf-8")
-    fields = [_read_field(tr) for _ in range(field_count)]
+    fields = [_read_field(tr, fmt) for _ in range(field_count)]
     tail = tr.require_exhausted()
     if tail != OK:
         raise ValueError(tail)
@@ -813,7 +833,7 @@ def _read_topic(r):
     return t
 
 
-def _read_action(r):
+def _read_action(r, fmt):
     size = r.u32()
     end = r.pos + size
     ar = Reader(r.data[r.pos:end])
@@ -831,8 +851,8 @@ def _read_action(r):
     a["name"] = ar.utf8_u16(MAX_NAME).decode("utf-8")
     a["description"] = ar.utf8_u16().decode("utf-8")
     a["confirmation_text"] = ar.utf8_u16().decode("utf-8")
-    params = [_read_field(ar) for _ in range(param_count)]
-    results = [_read_field(ar) for _ in range(result_count)]
+    params = [_read_field(ar, fmt) for _ in range(param_count)]
+    results = [_read_field(ar, fmt) for _ in range(result_count)]
     error_count = ar.u16()
     errors = []
     for _ in range(error_count):
@@ -900,6 +920,9 @@ def apply_mutations(data, mutations):
         elif op == "set_u32_le":
             off = integer(mutation["offset"])
             result[off:off + 4] = struct.pack("<I", integer(mutation["value"]))
+        elif op == "set_f64_le":
+            off = integer(mutation["offset"])
+            result[off:off + 8] = struct.pack("<d", float(mutation["value"]))
         else:
             raise ValueError("unknown mutation operation: " + op)
     return bytes(result)

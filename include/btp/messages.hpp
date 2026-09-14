@@ -29,6 +29,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace btp {
 
@@ -245,6 +246,10 @@ static const std::uint8_t kSourceOnline = 0x01U;              // source_flags bi
 static const std::uint8_t kTopicSubscribable = 0x01U;         // topic flags bit 0
 static const std::uint8_t kFieldNullable = 0x01U;             // field flags bit 0
 static const std::uint8_t kFieldVariableCount = 0x02U;        // field flags bit 1
+
+// FieldRecord::min_value / max_value sentinel: "no bound declared on this
+// side" (manifest_format_version >= 3 only -- see FieldRecord).
+static const double kNoRangeBound = std::numeric_limits<double>::quiet_NaN();
 static const std::uint16_t kActionIdempotent = 0x0001U;       // action flags bit 0
 static const std::uint16_t kActionDangerous = 0x0002U;        // action flags bit 1
 static const std::uint16_t kStatusDegraded = 0x0001U;         // STATUS flags bit 0
@@ -434,7 +439,9 @@ struct ManifestHeader {
     std::uint8_t status;                     // ResultStatus
     std::uint8_t flags;                       // kManifestNotModified | kManifestCatalogComplete
     std::uint16_t error_code;                 // ResultError
-    std::uint16_t manifest_format_version;    // 1 or 2 (2 adds the source_info block)
+    std::uint16_t manifest_format_version;    // 1, 2, or 3 (2 adds the source_info
+                                               // block; 3 adds FieldRecord::min_value
+                                               // / max_value)
     std::uint32_t config_revision;
     std::uint8_t source_uuid[16];
     std::uint32_t described_source_id;
@@ -481,6 +488,14 @@ struct FieldRecord {
     std::uint16_t max_element_count;
     double scale;                    // float64_le, finite
     double offset;                   // float64_le, finite
+    // manifest_format_version >= 3 only (messages.cpp read_field_content /
+    // add_field_common gate on it); absent on the wire for format 1/2, and
+    // this struct then leaves them at their default-constructed NaN.
+    // Engineering-unit space (post scale/offset), same as `unit` describes.
+    // NaN means "no bound on that side"; if both are finite, min_value <=
+    // max_value.
+    double min_value = kNoRangeBound;   // float64_le, finite or NaN
+    double max_value = kNoRangeBound;   // float64_le, finite or NaN
     std::uint16_t enum_count;
     ByteView name;                   // utf8_u16
     ByteView unit;                   // utf8_u16, "1" means dimensionless
@@ -692,10 +707,10 @@ MessageError encode_status_v2(const StatusV1& base,
 //   ManifestReader r(payload, size);
 //   ManifestHeader h;  r.header(&h);
 //   SourceInfoEntry si;
-//   while (r.next_source_info(&si) == Step::Item) { ... }        // format 2
+//   while (r.next_source_info(&si) == Step::Item) { ... }        // format 2+
 //   TopicRecord t;  ByteView field_bytes;
 //   while (r.next_topic(&t, &field_bytes) == Step::Item) {
-//       FieldRecordReader fr(field_bytes);
+//       FieldRecordReader fr(field_bytes, t.field_count, h.manifest_format_version);
 //       FieldRecord f;  ByteView enum_bytes;
 //       while (fr.next(&f, &enum_bytes) == Step::Item) {
 //           EnumEntryReader er(enum_bytes);
@@ -775,7 +790,10 @@ class FieldRecordReader {
 public:
     using Step = ManifestStep;
 
-    FieldRecordReader(ByteView run, std::uint16_t count) noexcept;
+    // `format_version` is the enclosing MANIFEST_DATA's manifest_format_version
+    // -- min_value/max_value are only on the wire (and only read) for >= 3.
+    FieldRecordReader(ByteView run, std::uint16_t count,
+                      std::uint16_t format_version) noexcept;
     Step next(FieldRecord* out, ByteView* enum_entries) noexcept;
     MessageError error() const noexcept { return error_; }
 
@@ -784,6 +802,7 @@ private:
     std::size_t size_;
     std::size_t cursor_;
     std::uint16_t left_;
+    std::uint16_t format_version_;
     MessageError error_;
 };
 

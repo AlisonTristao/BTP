@@ -87,6 +87,11 @@ struct CatalogTopic {
     // directly only to skip the per-call bounds check).
     const char* const* field_units;
     const char* const* field_descriptions;
+    // manifest_format_version >= 3 only. Both nullptr when their pool was not
+    // set (Catalog::field_min() / field_max() fold that into NaN); an entry is
+    // NaN when that field declared no bound on that side.
+    const double* field_mins;
+    const double* field_maxs;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,7 +107,9 @@ public:
     // `name_ptr_pool` and of each other -- keep names but not units, say, by
     // passing {nullptr, 0} for just the one not wanted. All interned strings
     // -- names, units, descriptions alike -- share the one `string_pool`.
-    // btp::StaticCatalog bundles all six regions.
+    // `min_pool` / `max_pool` are the same idea again but hold doubles
+    // directly (no interning) -- an unset entry reads back as NaN via
+    // field_min() / field_max(). btp::StaticCatalog bundles all these pools.
     Catalog(CatalogTopic* topics, std::size_t topic_capacity,
             FieldSpec* field_pool, std::size_t field_pool_capacity,
             const char** name_ptr_pool, std::size_t name_ptr_capacity,
@@ -112,7 +119,10 @@ public:
             const char** description_ptr_pool = nullptr,
             std::size_t description_ptr_capacity = 0U,
             SourceInfoEntry* source_info_pool = nullptr,
-            std::size_t source_info_capacity = 0U) noexcept;
+            std::size_t source_info_capacity = 0U,
+            double* min_pool = nullptr, std::size_t min_pool_capacity = 0U,
+            double* max_pool = nullptr,
+            std::size_t max_pool_capacity = 0U) noexcept;
 
     // True when the topic slots and the field pool are non-null and non-empty.
     // Check once after construction.
@@ -125,6 +135,12 @@ public:
     void set_config_revision(std::uint32_t revision) noexcept {
         config_revision_ = revision;
     }
+
+    // True when at least one stored field has a declared min_value or
+    // max_value (manifest_format_version >= 3 -- see field_min()/field_max()).
+    // btp::Node::emit_manifest() uses this to decide whether a served
+    // MANIFEST_DATA needs to be format 3.
+    bool has_field_ranges() const noexcept;
 
     std::size_t topic_count() const noexcept { return topic_count_; }
     // nullptr when no topic has that id (or index is out of range).
@@ -140,14 +156,20 @@ public:
                            std::size_t index) const noexcept;
     const char* field_description(const CatalogTopic& t,
                                   std::size_t index) const noexcept;
+    // The min/max value bound of field `index` of `t` -- NaN when that pool
+    // was not kept, the index is out of range, or the field declared no bound
+    // on that side (manifest_format_version >= 3 only).
+    double field_min(const CatalogTopic& t, std::size_t index) const noexcept;
+    double field_max(const CatalogTopic& t, std::size_t index) const noexcept;
 
     // ----- producer: fill the catalogue by hand -----------------------------
     // Copies the topic metadata, field_spec() of each FieldRecord, and (when
-    // the matching pool is set) the topic name and each field's name, unit and
-    // description -- `fields[i].unit` / `.description` come along automatically
-    // once the caller passes a non-empty one, whether built by hand, by
-    // btp::f32(name, unit) and friends, or by TopicBuilder (which only ever
-    // sets unit, never description -- see its own comment).
+    // the matching pool is set) the topic name and each field's name, unit,
+    // description, and min/max -- `fields[i].unit` / `.description` /
+    // `.min_value` / `.max_value` come along automatically once the caller
+    // sets a non-default one, whether built by hand, by btp::f32(name, unit)
+    // and friends, or by TopicBuilder (which only ever sets unit, never
+    // description -- see its own comment).
     //
     // field_count MAY be 0 -- a body-only topic (TelemetryEncoding::OpaqueBytes
     // / Utf8 / JsonUtf8 / CsvUtf8: a raw document, not field-structured
@@ -272,6 +294,14 @@ private:
     std::size_t description_ptr_capacity_;
     std::size_t description_ptr_used_;
 
+    double* min_pool_;
+    std::size_t min_pool_capacity_;
+    std::size_t min_pool_used_;
+
+    double* max_pool_;
+    std::size_t max_pool_capacity_;
+    std::size_t max_pool_used_;
+
     char* string_pool_;
     std::size_t string_pool_capacity_;
     std::size_t string_pool_used_;
@@ -370,6 +400,23 @@ public:
                         double offset = 0.0, bool is_nullable = false) noexcept {
         return add(btp::field(field_id, type, name, scale, unit, offset),
                    is_nullable);
+    }
+
+    // Sets the min/max value bound (engineering units, same space as the
+    // field's unit) on the field just added -- chain it right after that
+    // field's call: .f32("current_a", "A").range(0.0, 5.0). NaN for either
+    // bound means "no bound on that side" (btp::kNoRangeBound). Only takes
+    // effect when the Catalog this topic ends up in is written/ingested at
+    // manifest_format_version >= 3.
+    TopicBuilder& range(double min_value, double max_value) noexcept {
+        if (error_ != MessageError::Ok) return *this;
+        if (count_ == 0U) {
+            error_ = MessageError::WrongOrder;
+            return *this;
+        }
+        fields_[count_ - 1U].min_value = min_value;
+        fields_[count_ - 1U].max_value = max_value;
+        return *this;
     }
 
     // SubscriptionTable::handle_subscribe()'s local granting policy for this
@@ -564,6 +611,8 @@ struct CatalogStorage {
     const char* name_ptr_pool[Fields];
     const char* unit_ptr_pool[Fields];
     const char* description_ptr_pool[Fields];
+    double min_pool[Fields];
+    double max_pool[Fields];
     char string_pool[StringBytes];
     // A zero-length array is not standard C++; hold one slot when the feature
     // is off and hand back nullptr for the pointer so Catalog treats it as
@@ -598,7 +647,8 @@ public:
                   Storage::name_ptr_pool, Fields, Storage::string_pool,
                   StringBytes, Storage::unit_ptr_pool, Fields,
                   Storage::description_ptr_pool, Fields,
-                  Storage::source_info_pool(), SourceInfoEntries) {}
+                  Storage::source_info_pool(), SourceInfoEntries,
+                  Storage::min_pool, Fields, Storage::max_pool, Fields) {}
 };
 
 }  // namespace btp

@@ -11,6 +11,7 @@
 #include "btp/messages.hpp"
 #include "btp/telemetry.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -50,11 +51,12 @@ const FieldRecord kDriveStatus[] = {
 
 // Serialise `source` into a MANIFEST_DATA payload. Returns 0 on failure.
 std::size_t serialise(const Catalog& source, std::uint8_t* out,
-                      std::size_t capacity, std::uint8_t manifest_flags = 0U) {
+                      std::size_t capacity, std::uint8_t manifest_flags = 0U,
+                      std::uint16_t format_version = 1U) {
     btp::ManifestHeader header = {};
     header.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
     header.flags = manifest_flags;
-    header.manifest_format_version = 1U;
+    header.manifest_format_version = format_version;
     header.config_revision = source.config_revision();
     header.described_source_id = 0x00CAFE01U;
     header.described_boot_id = 0x0000B001U;
@@ -337,6 +339,74 @@ void test_field_unit_and_description() {
                       "Ground speed, forward positive") == 0);
 }
 
+void test_field_min_and_max() {
+    // Three fields: a declared range, a one-sided range (max only), and no
+    // range at all -- the last two exercise btp::kNoRangeBound (NaN).
+    FieldRecord fields[] = {
+        btp::range(btp::f32("current_a", "A"), 0.0, 5.0),
+        btp::range(btp::f32("headroom_a", "A"), btp::kNoRangeBound, 5.0),
+        btp::f32("gyro_z", "rad/s"),
+    };
+
+    btp::StaticCatalog<> producer;
+    CHECK(producer.has_field_ranges() == false);
+    CHECK(producer.add_topic(0x0401U, 1U, "battery", fields) == MessageError::Ok);
+    CHECK(producer.has_field_ranges() == true);
+    const CatalogTopic* pt = producer.topic(0x0401U);
+    CHECK(pt != nullptr);
+    CHECK(producer.field_min(*pt, 0) == 0.0);
+    CHECK(producer.field_max(*pt, 0) == 5.0);
+    CHECK(std::isnan(producer.field_min(*pt, 1)));
+    CHECK(producer.field_max(*pt, 1) == 5.0);
+    CHECK(std::isnan(producer.field_min(*pt, 2)));
+    CHECK(std::isnan(producer.field_max(*pt, 2)));
+    // Out of range -- "unset" (NaN), never a crash.
+    CHECK(std::isnan(producer.field_min(*pt, 99U)));
+
+    // Format 1/2: min/max never reach the wire, so a consumer sees no range at
+    // all -- has_field_ranges() driven the real producer path (btp::Node) to
+    // format 3 (see src/node.cpp), but a Catalog fed a format-1 payload by
+    // hand must still come back empty, not corrupted.
+    std::uint8_t wire1[512];
+    const std::size_t n1 = serialise(producer, wire1, sizeof(wire1), 0U, 1U);
+    CHECK(n1 != 0U);
+    btp::StaticCatalog<> consumer1;
+    CHECK(consumer1.ingest(wire1, n1) == MessageError::Ok);
+    const CatalogTopic* ct1 = consumer1.topic(0x0401U);
+    CHECK(ct1 != nullptr);
+    CHECK(std::isnan(consumer1.field_min(*ct1, 0)));
+    CHECK(std::isnan(consumer1.field_max(*ct1, 0)));
+    CHECK(consumer1.has_field_ranges() == false);
+
+    // Format 3: the real thing, round-tripped through a wire MANIFEST_DATA.
+    std::uint8_t wire3[512];
+    const std::size_t n3 = serialise(producer, wire3, sizeof(wire3), 0U, 3U);
+    CHECK(n3 != 0U);
+    btp::StaticCatalog<> consumer3;
+    CHECK(consumer3.ingest(wire3, n3) == MessageError::Ok);
+    const CatalogTopic* ct3 = consumer3.topic(0x0401U);
+    CHECK(ct3 != nullptr);
+    CHECK(consumer3.field_min(*ct3, 0) == 0.0);
+    CHECK(consumer3.field_max(*ct3, 0) == 5.0);
+    CHECK(std::isnan(consumer3.field_min(*ct3, 1)));
+    CHECK(consumer3.field_max(*ct3, 1) == 5.0);
+    CHECK(std::isnan(consumer3.field_min(*ct3, 2)));
+    CHECK(std::isnan(consumer3.field_max(*ct3, 2)));
+    CHECK(consumer3.has_field_ranges() == true);
+
+    // And once more out of the consumer -- write_topics() must serve back
+    // what it ingested (producer and consumer roles are symmetric).
+    std::uint8_t wire3b[512];
+    const std::size_t n3b = serialise(consumer3, wire3b, sizeof(wire3b), 0U, 3U);
+    CHECK(n3b != 0U);
+    btp::StaticCatalog<> consumer3b;
+    CHECK(consumer3b.ingest(wire3b, n3b) == MessageError::Ok);
+    const CatalogTopic* ct3b = consumer3b.topic(0x0401U);
+    CHECK(ct3b != nullptr);
+    CHECK(consumer3b.field_min(*ct3b, 0) == 0.0);
+    CHECK(consumer3b.field_max(*ct3b, 0) == 5.0);
+}
+
 void test_not_modified() {
     btp::StaticCatalog<> consumer;
     consumer.add_topic(0x0101U, 3U, TelemetryEncoding::PackedLe, true, 1000U,
@@ -404,6 +474,27 @@ void test_topic_builder_matches_the_array_form() {
         CHECK(std::strcmp(chained.field_name(*a, i), by_hand.field_name(*b, i)) ==
               0);
     }
+}
+
+void test_topic_builder_range() {
+    btp::StaticCatalog<> cat;
+    CHECK(cat.topic(0x0102U, 1U, "battery")
+             .f32("current_a", "A")
+             .range(0.0, 5.0)
+             .f32("gyro_z", "rad/s")  // no .range(): stays unset (NaN)
+             .end() == MessageError::Ok);
+    const CatalogTopic* t = cat.topic(0x0102U);
+    CHECK(t != nullptr);
+    CHECK(cat.field_min(*t, 0) == 0.0);
+    CHECK(cat.field_max(*t, 0) == 5.0);
+    CHECK(std::isnan(cat.field_min(*t, 1)));
+    CHECK(std::isnan(cat.field_max(*t, 1)));
+
+    // .range() before any field is added is WrongOrder, same as a chain call
+    // after an earlier error -- both are sticky and end() surfaces them.
+    btp::StaticCatalog<> empty_chain;
+    CHECK(empty_chain.topic(0x0103U, 1U, "nothing").range(0.0, 1.0).end() ==
+          MessageError::WrongOrder);
 }
 
 void test_topic_builder_propagates_add_topic_errors() {
@@ -574,11 +665,13 @@ int main() {
     test_schema_helpers();
     test_manifest_roundtrip();
     test_field_unit_and_description();
+    test_field_min_and_max();
     test_not_modified();
     test_capacity();
     test_bad_manifest();
 
     test_topic_builder_matches_the_array_form();
+    test_topic_builder_range();
     test_topic_builder_propagates_add_topic_errors();
     test_topic_builder_caps_fields_per_declaration();
     test_named_sample_writer_round_trips_by_name();
