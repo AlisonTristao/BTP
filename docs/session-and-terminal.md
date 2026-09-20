@@ -142,6 +142,12 @@ On a communication path containing an ESP-NOW hop:
 max_logical_payload <= 53550
 ```
 
+On a communication path containing a BLE hop:
+
+```text
+max_logical_payload <= 120360
+```
+
 because of the transport limits defined in [Getting it across the link](fragmentation-and-transports.md).
 
 ---
@@ -234,7 +240,7 @@ Its logical payload is:
 | Offset | Size | Field                       | Wire type                                                   |
 | -----: | ---: | --------------------------- | ----------------------------------------------------------- |
 |      0 |   12 | request reference           | [Commands and discovery](commands.md#13-request-references) |
-|     12 |    1 | `status`                    | `SUCCESS` or `UNSUPPORTED`                                  |
+|     12 |    1 | `status`                    | `SUCCESS`, `UNSUPPORTED`, or `BUSY`                          |
 |     13 |    1 | `selected_version`          | `uint8`                                                     |
 |     14 |    2 | `error_code`                | `uint16_le`                                                 |
 |     16 |    4 | `max_logical_payload`       | effective value                                             |
@@ -360,6 +366,25 @@ No application traffic follows an unsuccessful `HELLO_RESULT`.
 
 ---
 
+### 2.4 Second concurrent session (TCP)
+
+A responder that already has an active session for a given robot and receives a `HELLO` for a second, concurrent control session over TCP ([§3.4](#34-tcp-connections)) rejects it with:
+
+```text
+status     = BUSY
+error_code = CAPACITY_EXHAUSTED
+```
+
+reusing the existing generic result vocabulary ([Commands and discovery §1.4](commands.md#14-result-codes)) rather than defining a new one for this case.
+
+`selected_version` is set to the version the responder would otherwise have selected, since the rejection is about session admission, not version compatibility.
+
+As with [§2.3](#23-no-compatible-version), all negotiated limits are zero, no application traffic follows, and the session -- which never became active -- is closed immediately after the result is sent.
+
+This status value only applies where a transport can present the responder with more than one simultaneous connection attempt for the same robot in the first place. Serial has exactly one physical port, and BLE's single-peripheral role refuses a second link before it can reach `HELLO` ([Getting it across the link §8.6](fragmentation-and-transports.md#86-one-control-session-per-robot)); TCP is, at the time of writing, the only transport where this case is reachable at the BTP level.
+
+---
+
 ## 3. Entering protocol mode on serial
 
 Serial has an additional state because the same physical port may operate as a human-readable console before BTP begins.
@@ -480,11 +505,11 @@ This keeps console data and protocol framing unambiguous.
 
 ### 3.2 Other transports
 
-ESP-NOW and USB HID do not define the serial console state.
+ESP-NOW, USB HID, and TCP do not define the serial console state.
 
 They operate directly in protocol mode.
 
-Once the link becomes available, they must be ready to begin the BTP session with `HELLO`.
+Once the link becomes available -- for TCP, once the TCP connection completes -- they must be ready to begin the BTP session with `HELLO`. [§3.4](#34-tcp-connections) covers the TCP-specific details (default port, the connect-to-`HELLO` deadline, session admission, and reconnection); BLE ([§3.3](#33-ble)) is the one direct transport that does *not* fit this diagram, because it has GATT preconditions to satisfy first.
 
 Conceptually:
 
@@ -502,7 +527,7 @@ HELLO
 session
 
 
-ESP-NOW / USB HID
+ESP-NOW / USB HID / TCP
 
 link available
    |
@@ -512,6 +537,88 @@ HELLO
    v
 session
 ```
+
+---
+
+### 3.3 BLE
+
+BLE also has no `ENTER` / `READY` exchange -- there is no serial console state to leave, and once the underlying GATT connection exists the peer does not send `BTP/1 ENTER` text. However, "the link exists" means something narrower for BLE than it does for ESP-NOW or USB HID: a GATT connection being open does not by itself mean the RX and TX characteristics defined in [Getting it across the link §8.1](fragmentation-and-transports.md#81-the-btp-gatt-service) are usable yet.
+
+`HELLO` must not be sent until all of the following have completed, in order:
+
+```text
+GATT connection established
+        |
+        v
+BTP service discovered
+        |
+        v
+RX characteristic located
+        |
+        v
+TX characteristic located
+        |
+        v
+TX notifications enabled (CCCD written)
+        |
+        v
+HELLO
+        |
+        v
+session
+```
+
+The TX notification precondition is not a stylistic preference: if `HELLO` were sent before the central enables notifications on TX (by writing its Client Characteristic Configuration Descriptor), the peripheral's `HELLO_RESULT` notification could be generated while the peer is not yet subscribed and would then be silently dropped by the BLE stack rather than queued -- there is no BTP-level retransmission of `HELLO_RESULT` to recover from that. Once all four discovery/enablement steps are complete, `HELLO` is sent immediately, exactly as it would be over ESP-NOW or USB HID -- there is no additional BLE-specific delay or nonce exchange after that point, and no BLE-specific watchdog window distinct from the one described in [section 5](#5-the-watchdog).
+
+A BLE disconnection at the link layer always ends the session outright, the same way losing any other transport does ([section 5](#5-the-watchdog)); there is no partial or "console" state to fall back into. A subsequent connection -- reconnection by the same peer or a connection from another peer -- repeats the full sequence above and produces a new session; it does not resume the previous one. [Getting it across the link §8.6](fragmentation-and-transports.md#86-one-control-session-per-robot) defines the accompanying one-session-per-robot policy, and [§8.7](fragmentation-and-transports.md#87-disconnection-and-reconnection) defines what happens to any state held for the previous connection.
+
+#### Compatibility
+
+Version negotiation ([§1.4](#14-supported-versions), [§2.1](#21-version-selection)) is unchanged over BLE, for the same reason it is unchanged over TCP ([§3.4](#34-tcp-connections)): `HELLO` / `HELLO_RESULT` carry the supported and selected envelope versions the same way regardless of which transport carried them, and BLE adds no transport-level version of its own to negotiate. A future `bally_OS` or TraceView release continues to advertise its supported versions exactly as it would over any other transport, and [§2.3's "No compatible version"](#23-no-compatible-version) applies unchanged if an incompatible pairing is ever attempted.
+
+---
+
+### 3.4 TCP connections
+
+TCP also has no `ENTER` / `READY` exchange -- there is no serial console state to leave, and unlike BLE ([§3.3](#33-ble)) there is no GATT discovery step to wait for either. The moment the TCP three-way handshake completes, the connection is in BTP protocol mode. [Getting it across the link §9](fragmentation-and-transports.md#9-tcp) defines the transport itself -- roles, default port, framing, `kTcpTransport` limits, and the mandatory-encryption rule; this subsection defines what that means for session establishment.
+
+```text
+TCP connect completes
+        |
+        v
+HELLO
+        |
+        v
+session
+```
+
+The client must transmit `HELLO` immediately once the connection completes. If no valid `HELLO` arrives within:
+
+```text
+2000 ms
+```
+
+the server closes the socket without a reply -- the same bound already used after serial's `READY` response ([§5.1](#51-initial-serial-timeout)), applied here to the TCP connect event in place of `READY`. Because [every frame on a TCP connection, `HELLO` included, must be encrypted](fragmentation-and-transports.md#95-encryption-is-required-not-merely-supported), an unencrypted first frame never reaches this deadline at all -- it is dropped as a protocol violation on arrival.
+
+#### One control session per robot
+
+A `bally_OS` TCP server accepts only one active BTP control session per robot at a time. The TCP connection itself is still accepted at the socket level when a second one arrives -- the server does not refuse the `accept()` -- but if that second connection reaches `HELLO` while a session is already active for the same robot, the responder rejects it as defined in [§2.4](#24-second-concurrent-session-tcp): `HELLO_RESULT` with `status = BUSY`, no application traffic follows, and the server closes the TCP socket right after.
+
+Rejecting at the BTP session level, rather than refusing the TCP connection outright, is the deliberate choice here: it gives the second client (in practice, TraceView reporting "this robot already has an active session" to the user) a structured, versioned reason instead of an opaque connection refusal or timeout, and it keeps the policy expressed in BTP -- where `HELLO_RESULT` already has a place for it -- rather than adding new out-of-band TCP-level signaling, which is exactly what this transport otherwise avoids by skipping `ENTER` / `READY`.
+
+This differs from BLE's approach to the same rule ([§3.3](#33-ble), [Getting it across the link §8.6](fragmentation-and-transports.md#86-one-control-session-per-robot)), where the GAP layer itself prevents a second connection from forming at all. A TCP server socket has no equivalent single-connection primitive -- refusing the `accept()` would still leave the door open to a raw connection flood and would give the second client no diagnosable reason -- so TCP enforces the rule one layer up, in BTP, instead.
+
+#### Session end and reconnection
+
+Closing the TCP socket -- whether the client disconnects deliberately, the connection drops, or `bally_OS` reboots -- is transport loss for BTP purposes and ends the session exactly as [§5](#5-the-watchdog) already describes for any other transport loss; there is no TCP-specific close sequence beyond that. An orderly shutdown still uses `SESSION_CLOSE` / `SESSION_CLOSE_RESULT` ([§4](#4-leaving-protocol-mode)) before the socket closes, when time allows.
+
+A new TCP connection is always a new session: it repeats the full `HELLO` / `HELLO_RESULT` exchange and receives a freshly negotiated set of limits. It does not resume or inherit any state from a previous TCP connection to the same robot. This is the same rule already stated for session loss in general ([§5.3](#53-session-loss-and-command-deduplication)): command deduplication stays scoped to the executor's boot, not to the session or the TCP connection, so reconnecting does not -- and must not be used to -- retrigger execution of a command already accepted in a previous TCP session.
+
+A new connection also does not carry over trust in whatever peer answered last: TraceView must re-validate `peer_uuid` on every TCP connection, including a reconnect to a previously-known address, exactly as it does for BLE ([Getting it across the link §9.6](fragmentation-and-transports.md#96-identity-revalidate-on-every-connection)).
+
+#### Compatibility
+
+Version negotiation ([§1.4](#14-supported-versions), [§2.1](#21-version-selection)) is unchanged over TCP: a future `bally_OS` or TraceView release continues to advertise its supported envelope versions in `HELLO` / `HELLO_RESULT`, and the responder still selects the highest mutually supported version. TCP does not add a transport-level version of its own to negotiate.
 
 ---
 
@@ -1207,7 +1314,7 @@ cleanup
 console
 ```
 
-For ESP-NOW and USB HID, there is no console state:
+For ESP-NOW, USB HID, and TCP, there is no console state:
 
 ```text
 link available
@@ -1217,6 +1324,31 @@ HELLO
       |
       v
 session
+```
+
+For BLE, there is no console state either, but an additional GATT discovery/enablement step precedes `HELLO` ([section 3.3](#33-ble)), and a lost connection always ends the session -- reconnection never resumes it:
+
+```text
+GATT connection
+      |
+      v
+service + RX + TX discovery
+      |
+      v
+TX notifications enabled
+      |
+      v
+HELLO
+      |
+      v
+active session
+      |
+      | disconnect (any cause)
+      v
+session ended
+      |
+      v
+advertising resumes
 ```
 
 ---
@@ -1264,6 +1396,10 @@ READY
 ```
 
 exchange before binary protocol mode begins.
+
+BLE additionally requires completing GATT service/characteristic discovery and enabling TX notifications before `HELLO` may be sent ([section 3.3](#33-ble)); a BLE disconnection always ends the session outright, and reconnecting always starts a new one rather than resuming the previous session.
+
+TCP has neither a console state nor GATT preconditions: `HELLO` is sent immediately once the TCP connection completes, and every frame on that connection, `HELLO` included, must be encrypted ([section 3.4](#34-tcp-connections), [Getting it across the link §9](fragmentation-and-transports.md#9-tcp)). A second TCP connection attempted while a session is already active for the same robot is accepted at the socket level but rejected with `HELLO_RESULT` `status = BUSY`; closing the TCP socket always ends the session outright, and a new TCP connection always starts a new one.
 
 Protocol mode ends through:
 

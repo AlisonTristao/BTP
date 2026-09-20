@@ -14,6 +14,7 @@ static const std::size_t kV1MinimumFrameSize = kV1HeaderSize + kV1CrcSize;
 static const std::size_t kEspNowMaxFrameSize = 250U;
 static const std::size_t kSerialMaxFrameSize = 4096U;
 static const std::size_t kUsbHidMaxFrameSize = 62U;
+static const std::size_t kTcpMaxFrameSize = 8192U;
 // The payload ceiling is never independent of the frame ceiling -- it is
 // always exactly the 40-octet header+CRC floor (kV1MinimumFrameSize) less,
 // derived here rather than hand-typed so the two can never drift apart.
@@ -25,6 +26,8 @@ static const std::size_t kSerialMaxPayloadSize =
     kSerialMaxFrameSize - kV1MinimumFrameSize;
 static const std::size_t kUsbHidMaxPayloadSize =
     kUsbHidMaxFrameSize - kV1MinimumFrameSize;
+static const std::size_t kTcpMaxPayloadSize =
+    kTcpMaxFrameSize - kV1MinimumFrameSize;
 
 static const std::uint8_t kV1Version = 1U;
 static const std::uint8_t kV2Version = 2U;
@@ -72,6 +75,7 @@ struct TransportLimits {
 static const TransportLimits kEspNowTransport{kEspNowMaxFrameSize, true};
 static const TransportLimits kSerialTransport{kSerialMaxFrameSize, true};
 static const TransportLimits kUsbHidTransport{kUsbHidMaxFrameSize, false};
+static const TransportLimits kTcpTransport{kTcpMaxFrameSize, true};
 
 // transport.max_frame_size minus the 40-octet header+CRC floor
 // (kV1MinimumFrameSize) -- 0 if max_frame_size does not even reach that

@@ -60,7 +60,7 @@ finished when it produces and consumes the same octets as the vectors.
 | [Why BTP exists](why-btp.md) | The problem, what the design buys, what it costs, where it fits. |
 | [The model](model.md) | Roles, the five logical channels, identity, time, delivery. |
 | [The datagram](frame.md) | The 36-octet header octet by octet, flags, CRC, validation. |
-| [Getting it across the link](fragmentation-and-transports.md) | Fragmentation, reassembly, and `TransportLimits` -- the three ready-made presets, or a caller's own. |
+| [Getting it across the link](fragmentation-and-transports.md) | Fragmentation, reassembly, and `TransportLimits` -- the five ready-made presets (ESP-NOW, Serial, USB HID, BLE, TCP), or a caller's own. |
 | [Encryption](encryption.md) | Wire v2 AEAD: ciphers, nonce, the canonicalized AAD, and the limits. |
 | [Telemetry payloads](telemetry.md) | Topics, schemas, encodings, and how a client binds a field. |
 | [Commands and discovery](commands.md) | Requests, results, deduplication, the manifest, subscriptions, status. |

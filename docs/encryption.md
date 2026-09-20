@@ -755,6 +755,10 @@ A transport's `TransportLimits` may impose additional restrictions on encrypted 
 
 This restriction belongs to the transport's own `TransportLimits`, set by the caller, and does not change the general BTP encryption model.
 
+`btp::kBleTransport` sits at the other extreme: `allow_encrypted == true`, and a BLE session is expected to always carry `ENCRYPTED` frames rather than treating encryption as optional. BLE pairing/bonding authenticates the link between two BLE stacks, not the BTP application payload, so a direct BLE connection cannot rely on link-level Bluetooth security the way the existing ESP-NOW hub channels rely on their own keyed radio link. [Getting it across the link §8.9](fragmentation-and-transports.md#89-encryption-is-required-not-merely-supported) has the full rationale and the resulting requirement.
+
+`btp::kTcpTransport` has the same `allow_encrypted == true` and mandatory-`ENCRYPTED` requirement as BLE, for the same underlying reason: a direct TCP connection runs over local Wi-Fi and is reachable by anything on that network, so it cannot inherit the protection the existing ESP-NOW hub channels get from their own keyed radio link (`bally_channels.h`) either. Every frame on a `kTcpTransport` connection, including `HELLO`, is required to carry `ENCRYPTED`. [Getting it across the link §9.5](fragmentation-and-transports.md#95-encryption-is-required-not-merely-supported) has the full rationale.
+
 Transport-specific encryption support is defined in [Getting it across the link](fragmentation-and-transports.md).
 
 ---
