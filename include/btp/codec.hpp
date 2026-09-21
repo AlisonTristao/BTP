@@ -15,6 +15,14 @@ static const std::size_t kEspNowMaxFrameSize = 250U;
 static const std::size_t kSerialMaxFrameSize = 4096U;
 static const std::size_t kUsbHidMaxFrameSize = 62U;
 static const std::size_t kTcpMaxFrameSize = 8192U;
+// docs/fragmentation-and-transports.md section 8 (added for
+// TAREFAS_TCP_BLE_ANDROID.txt T03/T04's BLE contract): a conservative,
+// engineering-estimate ceiling rather than a measured one -- no real NimBLE
+// queue on the ESP32-S3 had been exercised yet when this was chosen (see the
+// TraceView/bally_OS task notes for T04/T05). Revisit alongside real
+// hardware measurement (T37) if it turns out to be wrong in either
+// direction.
+static const std::size_t kBleMaxFrameSize = 512U;
 // The payload ceiling is never independent of the frame ceiling -- it is
 // always exactly the 40-octet header+CRC floor (kV1MinimumFrameSize) less,
 // derived here rather than hand-typed so the two can never drift apart.
@@ -28,6 +36,8 @@ static const std::size_t kUsbHidMaxPayloadSize =
     kUsbHidMaxFrameSize - kV1MinimumFrameSize;
 static const std::size_t kTcpMaxPayloadSize =
     kTcpMaxFrameSize - kV1MinimumFrameSize;
+static const std::size_t kBleMaxPayloadSize =
+    kBleMaxFrameSize - kV1MinimumFrameSize;
 
 static const std::uint8_t kV1Version = 1U;
 static const std::uint8_t kV2Version = 2U;
@@ -69,13 +79,17 @@ struct TransportLimits {
     bool allow_encrypted;
 };
 
-// Presets for the three transports docs/fragmentation-and-transports.md
-// documents -- construct your own TransportLimits for anything else; there
-// is no enum to extend.
+// Presets for the transports docs/fragmentation-and-transports.md documents
+// -- construct your own TransportLimits for anything else; there is no enum
+// to extend.
 static const TransportLimits kEspNowTransport{kEspNowMaxFrameSize, true};
 static const TransportLimits kSerialTransport{kSerialMaxFrameSize, true};
 static const TransportLimits kUsbHidTransport{kUsbHidMaxFrameSize, false};
 static const TransportLimits kTcpTransport{kTcpMaxFrameSize, true};
+// allow_encrypted=true: BLE's own AEAD requirement is mandatory, not
+// optional, unlike UsbHid's (docs/fragmentation-and-transports.md section 8,
+// TAREFAS_TCP_BLE_ANDROID.txt T03/T06 -- "criptografia obrigatoria").
+static const TransportLimits kBleTransport{kBleMaxFrameSize, true};
 
 // transport.max_frame_size minus the 40-octet header+CRC floor
 // (kV1MinimumFrameSize) -- 0 if max_frame_size does not even reach that
