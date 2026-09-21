@@ -577,6 +577,15 @@ void test_tcp_transport_preset() {
     CHECK(btp::max_payload_size(btp::kTcpTransport) == btp::kTcpMaxPayloadSize);
 }
 
+void test_ble_transport_preset() {
+    CHECK(btp::kBleMaxFrameSize == 512U);
+    CHECK(btp::kBleMaxPayloadSize ==
+          btp::kBleMaxFrameSize - btp::kV1MinimumFrameSize);
+    CHECK(btp::kBleTransport.max_frame_size == btp::kBleMaxFrameSize);
+    CHECK(btp::kBleTransport.allow_encrypted);
+    CHECK(btp::max_payload_size(btp::kBleTransport) == btp::kBleMaxPayloadSize);
+}
+
 }  // namespace
 
 int main() {
@@ -598,6 +607,7 @@ int main() {
     test_decoder_rejects_reserved_cipher_id_with_encrypted();
     test_encrypted_is_rejected_on_usb_hid();
     test_tcp_transport_preset();
+    test_ble_transport_preset();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
