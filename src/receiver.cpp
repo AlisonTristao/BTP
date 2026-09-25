@@ -33,6 +33,15 @@ void Receiver::clear() noexcept {
     stats_ = Stats();
 }
 
+bool Receiver::configure(const TransportLimits& transport,
+                         std::uint64_t timeout_ms) noexcept {
+    transport_ = transport;
+    transport_valid_ = detail::valid_transport(transport);
+    reassembler_.set_timeout(timeout_ms);
+    clear();
+    return valid();
+}
+
 Receiver::Stats Receiver::stats() const noexcept {
     return stats_;
 }

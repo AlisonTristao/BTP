@@ -2459,6 +2459,368 @@ void test_large_send_on_wide_transports() {
     check_large_send_on(btp::kBleTransport, /*sealed=*/true);
 }
 
+// ---------------------------------------------------------------------------
+// btp::Node -- several links on one node (2.47.0)
+// ---------------------------------------------------------------------------
+
+// One extra link: a send() into its own Sink, nothing else -- cleartext, no
+// open, exactly like base_config()'s link 0.
+class TestLink : public btp::NodeLink {
+public:
+    explicit TestLink(Sink* sink) : sink_(sink) { transport = kEspNowTransport; }
+    bool send(const std::uint8_t* frame, std::size_t n) override {
+        return Sink::send(sink_, frame, n);
+    }
+
+private:
+    Sink* sink_;
+};
+
+// TestConfig that also records which link terminal_on() reported and how
+// often lock() / unlock() ran.
+class LinkAwareConfig : public TestConfig {
+public:
+    int locks = 0;
+    int unlocks = 0;
+    int terminal_calls = 0;
+    btp::LinkRef last_terminal_link{};
+
+    void terminal_on(btp::Node& node, const btp::LinkRef& from,
+                     const btp::Header& header, btp::ByteView payload,
+                     std::uint64_t now_ms) override {
+        ++terminal_calls;
+        last_terminal_link = from;
+        TestConfig::terminal_on(node, from, header, payload, now_ms);
+    }
+    void lock() override { ++locks; }
+    void unlock() override { ++unlocks; }
+};
+
+void link_aware_config(LinkAwareConfig* cfg, Sink* sink) {
+    cfg->source_id = kSenderId;
+    cfg->boot_id = kSenderBoot;
+    cfg->transport = kEspNowTransport;
+    cfg->send_fn = &Sink::send;
+    cfg->send_ctx = sink;
+}
+
+// Link 0 plus two extra links, every other capacity at StaticNode<>'s
+// defaults except the three TestNode already narrows.
+using MultiNode =
+    btp::StaticNode<4, 700, 1024, 512, 8, 64, 1536, 8, 4, 128, 0, /*Links=*/3>;
+
+// A HELLO from kPeerId, as one encoded frame -- the handshake a direct TCP /
+// BLE client opens its session with.
+std::vector<std::uint8_t> hello_frame() {
+    std::uint8_t body[64];
+    std::size_t n = 0;
+    CHECK(btp::encode_hello(make_hello(Role::Consumer), body, sizeof(body), &n) ==
+          MessageError::Ok);
+    Sink tx;
+    btp::Endpoint peer;
+    peer.configure(kPeerId, kPeerBoot);
+    const btp::LogicalMessage msg{MessageType::Control, btp::object_id::kHello,
+                                  1ULL, {body, n}};
+    CHECK(peer.send_logical(msg, kEspNowTransport, &Sink::send, &tx, nullptr, 0U));
+    return tx.frames.empty() ? std::vector<std::uint8_t>() : tx.frames[0];
+}
+
+NodeRx deliver_on(btp::Node& dst, std::uint8_t link, Sink& sink,
+                  std::uint64_t now_ms, ReceivedMessage* msg) {
+    NodeRx last = NodeRx::Pending;
+    for (std::size_t i = 0; i < sink.frames.size(); ++i) {
+        last = dst.receive_on(link, sink.frames[i].data(), sink.frames[i].size(),
+                              now_ms, msg);
+    }
+    return last;
+}
+
+std::uint32_t sequence_of(const std::vector<std::uint8_t>& frame) {
+    btp::DecodedFrame decoded{};
+    CHECK(btp::decode(frame.data(), frame.size(), kEspNowTransport, &decoded) ==
+          btp::Error::Ok);
+    return decoded.header.sequence;
+}
+
+// The whole point of a per-link session: link 1 waits for a HELLO while
+// link 0 (the ESP-NOW / dongle path, no session) keeps routing, and the
+// HELLO_RESULT leaves on link 1 only.
+void test_multi_link_session_gates_only_its_link() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    CHECK(node.link_attached(1U));
+    CHECK(!node.link_attached(2U));
+    node.enable_session_on(1U, make_hello(Role::Producer), 0U);
+    CHECK(node.begin());
+    node.arm_session_on(1U, 0U);
+    CHECK(node.session() == nullptr);  // link 0 has none
+    CHECK(node.link_session(1U) != nullptr);
+
+    Sink app_tx;
+    TestConfig sender_cfg = base_config(kPeerId, kPeerBoot, &app_tx);
+    TestNode sender(sender_cfg);
+    CHECK(sender.begin());
+    const std::vector<std::uint8_t> body = make_payload(12, 0x10);
+    CHECK(sender.send(MessageType::Telemetry, 0x0101U, body.data(), body.size(), 1ULL));
+    const std::vector<std::uint8_t> app = app_tx.frames[0];
+
+    ReceivedMessage msg{};
+    CHECK(node.receive(app.data(), app.size(), 10U, &msg) == NodeRx::Complete);
+    CHECK(node.receive_on(1U, app.data(), app.size(), 10U, &msg) == NodeRx::Ignored);
+
+    const std::vector<std::uint8_t> hello = hello_frame();
+    CHECK(node.receive_on(1U, hello.data(), hello.size(), 20U, &msg) ==
+          NodeRx::SessionHandled);
+    CHECK(node.link_session_event(1U) == SessionEvent::HelloAccepted);
+    CHECK(node.link_session(1U)->active());
+    CHECK(tx1.count() == 1U);  // HELLO_RESULT, on link 1 ...
+    CHECK(tx0.count() == 0U);  // ... and nothing on link 0
+
+    CHECK(node.receive_on(1U, app.data(), app.size(), 30U, &msg) == NodeRx::Complete);
+    CHECK(msg.payload.size == body.size());
+
+    // A link that was never attached drops everything.
+    CHECK(node.receive_on(2U, app.data(), app.size(), 30U, &msg) ==
+          NodeRx::DroppedFrame);
+}
+
+// MANIFEST_REQUEST / SUBSCRIBE are answered on the link they arrived on, each
+// link keeps its own subscription table, and publish_subscribed_topics()
+// publishes to every link that has a subscriber -- only to those.
+void test_multi_link_replies_and_publishes_on_the_origin_link() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    CHECK(node.topic(0x0101U, 2U, "drive_status", &fill_drive_by_name)
+              .f32("left_rpm")
+              .f32("right_rpm")
+              .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+              .end() == MessageError::Ok);
+    node.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    CHECK(node.begin());
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    CHECK(consumer.begin());
+
+    ReceivedMessage msg{};
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    CHECK(deliver_on(node, 1U, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(tx1.count() >= 1U);
+    CHECK(tx0.count() == 0U);
+    tx1.clear();
+    CHECK(deliver(node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(tx0.count() >= 1U);
+    CHECK(tx1.count() == 0U);
+    tx0.clear();
+    cons_tx.clear();
+
+    CHECK(consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U) != 0U);
+    CHECK(deliver_on(node, 1U, cons_tx, 0U, &msg) == NodeRx::SubscriptionServed);
+    CHECK(tx1.count() == 1U);  // SUBSCRIBE_RESULT
+    CHECK(tx0.count() == 0U);
+    CHECK(node.link_subscriptions(1U)->due(0x0101U, 0U));
+    CHECK(!node.subscriptions()->due(0x0101U, 0U));  // link 0's table untouched
+
+    tx1.clear();
+    CHECK(node.publish_subscribed_topics(0U) == 1U);
+    CHECK(tx1.count() == 1U);  // the TELEMETRY sample, on link 1 only
+    CHECK(tx0.count() == 0U);
+}
+
+// reset_link(): the link's subscriptions and session go, the others stay;
+// a LinkRef taken before the reset stops being current, so send_on() with
+// it sends nothing, while a fresh one works.
+void test_reset_link_isolates_the_link_and_bumps_its_epoch() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    CHECK(node.topic(0x0101U, 2U, "drive_status").f32("left_rpm").end() ==
+          MessageError::Ok);
+    node.serve_catalog(static_cast<std::uint8_t>(Role::Producer));
+    node.enable_session_on(1U, make_hello(Role::Producer), 0U);
+    CHECK(node.begin());
+    node.arm_session_on(1U, 0U);
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    CHECK(consumer.begin());
+    ReceivedMessage msg{};
+
+    const std::vector<std::uint8_t> hello = hello_frame();
+    CHECK(node.receive_on(1U, hello.data(), hello.size(), 0U, &msg) ==
+          NodeRx::SessionHandled);
+    CHECK(consumer.subscribe(kSenderId, kSenderBoot, 0x0101U, 10000U, 1000U) != 0U);
+    const std::vector<std::uint8_t> subscribe = cons_tx.frames[0];
+    CHECK(node.receive_on(1U, subscribe.data(), subscribe.size(), 1U, &msg) ==
+          NodeRx::SubscriptionServed);
+    CHECK(node.receive(subscribe.data(), subscribe.size(), 1U, &msg) ==
+          NodeRx::SubscriptionServed);
+    CHECK(node.link_subscriptions(1U)->due(0x0101U, 1U));
+    CHECK(node.subscriptions()->due(0x0101U, 1U));
+
+    const btp::LinkRef before = node.link_ref(1U);
+    CHECK(node.link_current(before));
+    node.reset_link(1U);
+    CHECK(!node.link_current(before));
+    CHECK(node.link_current(node.link_ref(1U)));
+    CHECK(!node.link_subscriptions(1U)->due(0x0101U, 2U));  // gone ...
+    CHECK(node.subscriptions()->due(0x0101U, 2U));          // ... link 0 kept its own
+    CHECK(!node.link_session(1U)->active());
+    CHECK(node.link_session(1U)->state() == btp::SessionState::Idle);
+
+    tx1.clear();
+    const std::uint8_t body[2] = {1, 2};
+    CHECK(!node.send_on(before, MessageType::Log, 0x0001U, body, sizeof(body), 0U,
+                        nullptr, nullptr));
+    CHECK(tx1.count() == 0U);
+    CHECK(node.send_on(node.link_ref(1U), MessageType::Log, 0x0001U, body,
+                       sizeof(body), 0U, nullptr, nullptr));
+    CHECK(tx1.count() == 1U);
+
+    // The next peer starts from a fresh HELLO.
+    node.arm_session_on(1U, 3U);
+    CHECK(node.link_session(1U)->state() == btp::SessionState::AwaitingHello);
+}
+
+// One identity, one sequence space: sends on different links draw from the
+// same counter, so the sequence keeps growing across them.
+void test_links_share_one_sequence_counter() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    CHECK(node.begin());
+
+    const std::uint8_t body[2] = {1, 2};
+    CHECK(node.send(MessageType::Log, 0x0001U, body, sizeof(body), 0U));
+    CHECK(node.send_on(node.link_ref(1U), MessageType::Log, 0x0001U, body,
+                       sizeof(body), 0U, nullptr, nullptr));
+    CHECK(node.send(MessageType::Log, 0x0001U, body, sizeof(body), 0U));
+    CHECK(tx0.count() == 2U);
+    CHECK(tx1.count() == 1U);
+    const std::uint32_t a = sequence_of(tx0.frames[0]);
+    const std::uint32_t b = sequence_of(tx1.frames[0]);
+    const std::uint32_t c = sequence_of(tx0.frames[1]);
+    CHECK(a < b);
+    CHECK(b < c);
+}
+
+// terminal_on() names the link a TERMINAL frame arrived on (and the plain
+// terminal() still runs through its default); lock() / unlock() are called,
+// always in pairs.
+void test_terminal_on_names_the_link_and_lock_is_balanced() {
+    Sink tx0, tx1;
+    LinkAwareConfig cfg;
+    link_aware_config(&cfg, &tx0);
+    TerminalCapture capture = {};
+    cfg.terminal_fn = &capture_terminal;
+    cfg.terminal_ctx = &capture;
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    CHECK(node.begin());
+
+    Sink src_tx;
+    TestConfig source_cfg = base_config(kPeerId, kPeerBoot, &src_tx);
+    TestNode source(source_cfg);
+    CHECK(source.begin());
+    const std::uint8_t bytes[] = {'h', 'i'};
+    CHECK(source.send(MessageType::Terminal, btp::object_id::kTerminalIn, bytes,
+                      sizeof(bytes), 0ULL));
+
+    ReceivedMessage msg{};
+    CHECK(deliver_on(node, 1U, src_tx, 0U, &msg) == NodeRx::TerminalDelivered);
+    CHECK(cfg.terminal_calls == 1);
+    CHECK(cfg.last_terminal_link.link == 1U);
+    CHECK(cfg.last_terminal_link.epoch == node.link_ref(1U).epoch);
+    CHECK(capture.calls == 1);  // terminal() reached through the default
+
+    CHECK(deliver(node, src_tx, 0U, &msg) == NodeRx::TerminalDelivered);
+    CHECK(cfg.last_terminal_link.link == 0U);
+
+    CHECK(node.send(MessageType::Log, 0x0001U, bytes, sizeof(bytes), 0U));
+    CHECK(cfg.locks > 0);
+    CHECK(cfg.locks == cfg.unlocks);
+}
+
+// An asynchronous command keeps the link it came in on. If that link is
+// reset before the action finishes, complete_command() records the result
+// (a retransmission is replayed, never re-executed) but sends nothing to
+// whoever took the link over.
+void test_async_command_on_a_reset_link_is_recorded_but_not_sent() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link1(&tx1);
+    CHECK(node.attach_link(1U, link1));
+    AsyncCall async{};
+    node.enable_commands(&defer_action, &async);
+    CHECK(node.begin());
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    ClientCommand cmd_slots[2];
+    CommandClient client(cmd_slots, 2);
+    initiator.enable_command_client(&client);
+    CHECK(initiator.begin());
+    const std::uint8_t params[2] = {7, 8};
+    CHECK(initiator.command(kSenderId, kSenderBoot, 5U, 1U, params, sizeof(params)) !=
+          0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver_on(node, 1U, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(async.got_ticket);
+    CHECK(async.ticket.link.link == 1U);
+    CHECK(tx1.count() == 0U);
+
+    node.reset_link(1U);
+    NodeActionOutcome outcome = {};
+    outcome.status = static_cast<std::uint8_t>(btp::ResultStatus::Success);
+    CHECK(!node.complete_command(async.ticket, outcome));
+    CHECK(tx1.count() == 0U);
+    CHECK(tx0.count() == 0U);
+
+    // The same request retransmitted on link 0 replays the recorded result.
+    CHECK(deliver(node, init_tx, 10U, &msg) == NodeRx::CommandServed);
+    CHECK(async.calls == 1);
+    CHECK(tx0.count() == 1U);
+}
+
+// Link indices are bounded by the StaticNode's own Links, and link 0 is never
+// "attached" (it is the NodeConfig the node was built with). Links == 1 --
+// every StaticNode written before 2.47.0 -- has no extra link to attach.
+void test_attach_link_bounds() {
+    Sink tx0, tx1;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx0);
+    MultiNode node(cfg);
+    TestLink link(&tx1);
+    CHECK(!node.attach_link(0U, link));
+    CHECK(!node.attach_link(3U, link));
+    CHECK(node.attach_link(2U, link));
+
+    TestNode single(cfg);
+    CHECK(!single.attach_link(1U, link));
+    CHECK(single.link_attached(0U));
+    CHECK(!single.link_attached(1U));
+
+    // A link whose transport does not validate is refused.
+    TestLink bad(&tx1);
+    bad.transport = btp::TransportLimits{};
+    CHECK(!node.attach_link(1U, bad));
+}
+
 int main() {
     test_begin();
     test_reconfigure_before_begin();
@@ -2521,6 +2883,14 @@ int main() {
     test_sized_node_medium_matches_static_node_defaults();
     test_sized_node_low_round_trips_a_topic();
     test_sized_node_high_begins();
+
+    test_multi_link_session_gates_only_its_link();
+    test_multi_link_replies_and_publishes_on_the_origin_link();
+    test_reset_link_isolates_the_link_and_bumps_its_epoch();
+    test_links_share_one_sequence_counter();
+    test_terminal_on_names_the_link_and_lock_is_balanced();
+    test_async_command_on_a_reset_link_is_recorded_but_not_sent();
+    test_attach_link_bounds();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

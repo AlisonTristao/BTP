@@ -173,6 +173,12 @@ void SubscriptionTable::expire(std::uint64_t now_ms) noexcept {
     }
 }
 
+void SubscriptionTable::clear() noexcept {
+    for (std::size_t i = 0U; i < slot_count_; ++i) {
+        slots_[i] = SubscriptionRecord();
+    }
+}
+
 bool SubscriptionTable::due(std::uint16_t topic_id, std::uint64_t now_ms) const noexcept {
     for (std::size_t i = 0U; i < slot_count_; ++i) {
         const SubscriptionRecord& s = slots_[i];

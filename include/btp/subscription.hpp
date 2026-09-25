@@ -128,6 +128,11 @@ public:
     // tick(); no reply is sent (nobody asked).
     void expire(std::uint64_t now_ms) noexcept;
 
+    // Frees every slot at once -- the link its requesters reached this table
+    // through is gone (a closed TCP connection, say). No reply is sent.
+    // subscription_ids keep counting up, so an id is never reused.
+    void clear() noexcept;
+
     // True when `topic_id` has at least one active (unexpired) subscription
     // whose cadence is due at now_ms -- the fastest granted rate among this
     // topic's local subscribers wins when more than one wants it. Call

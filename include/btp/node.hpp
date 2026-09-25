@@ -65,12 +65,36 @@
 #include "btp/subscription.hpp"  // SubscriptionTable, SubscriptionClient
 #include "btp/telemetry.hpp"  // SampleReader
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 namespace btp {
 
 class Node;  // NodeTerminalFn below needs the name before the class itself.
+
+// ---------------------------------------------------------------------------
+// Links (library 2.47.0)
+// ---------------------------------------------------------------------------
+//
+// A Node has one identity, one sequence counter and one served catalogue,
+// and up to kMaxNodeLinks LINKS: independent paths to peers (an ESP-NOW
+// radio, a TCP connection, a BLE central...). Link 0 is the NodeConfig the
+// Node is built with; links 1.. are attached later (Node::attach_link()).
+// Each link has its own send() / transport / key policy, reassembly,
+// optional responder session and subscription table -- see NodeLinkSlot.
+// Every request is answered on the link it arrived on.
+static const std::size_t kMaxNodeLinks = 4U;
+
+// "This link, as it was when I took this reference". The epoch is bumped by
+// Node::reset_link() (a connection went away), so a reference taken before
+// a reset no longer matches afterwards -- Node::link_current() / send_on()
+// refuse it, and a reply that outlived its connection is dropped instead of
+// reaching whoever connected next. Plain data, cheap to copy.
+struct LinkRef {
+    std::uint8_t link;
+    std::uint32_t epoch;
+};
 
 // ---------------------------------------------------------------------------
 // Callbacks the node calls out to (independent of NodeConfig -- these stay
@@ -172,6 +196,9 @@ struct NodeCommandTicket {
     std::uint16_t action_version;
     std::size_t slot;             // this request's reserved DedupCache slot
     bool armed;
+    // The link the request arrived on (2.47.0): complete_command() answers
+    // there, and sends nothing if that link was reset in the meantime.
+    LinkRef link;
 
     bool valid() const noexcept { return armed; }
 };
@@ -385,6 +412,26 @@ public:
         (void)now_ms;
     }
 
+    // Same, plus the link the frame arrived on (2.47.0) -- a node with
+    // several links answers TERMINAL_IN on the link it came from
+    // (Node::send_on(from, ...)). The default forwards to terminal() above,
+    // so a single-link node overrides only that one, as before.
+    virtual void terminal_on(Node& node, const LinkRef& from, const Header& header,
+                             ByteView payload, std::uint64_t now_ms) {
+        (void)from;
+        terminal(node, header, payload, now_ms);
+    }
+
+    // Mutual exclusion for the state every link shares (2.47.0): the seal /
+    // manifest / command scratch buffers, the command dedup cache and the
+    // frames_tx counter. The node calls lock() / unlock() around every use
+    // of them. Only needed when several links are driven from different
+    // tasks / threads (each link's own receive path stays one context, as
+    // always); the default no-op is right for everyone else. MUST be
+    // recursive: a command handler already running under it may send.
+    virtual void lock() {}
+    virtual void unlock() {}
+
     // Runs a Fresh COMMAND_REQUEST's action -- synchronously or not, see
     // NodeActionFn's own comment for the parameters (this is that same
     // signature). has_command() false (the default) means COMMAND_REQUEST
@@ -486,6 +533,9 @@ private:
     std::uint32_t dropped_cleartext_;
     std::uint32_t dropped_open_failed_;
     SubscriptionTable* subscriptions_;  // nullptr until enable_subscriptions()
+    // Bumped by Node::reset_link(). Atomic: read by whoever holds a LinkRef
+    // (a task finishing a command) while the link's own task resets it.
+    std::atomic<std::uint32_t> epoch_;
 };
 
 // ---------------------------------------------------------------------------
@@ -682,6 +732,65 @@ public:
 
     // The session event the most recent receive() / tick() produced.
     SessionEvent session_event() const noexcept { return link0_.last_session_event_; }
+
+    // ---- several links (2.47.0) ---------------------------------------------
+    // Everything above without a link argument is link 0 (the NodeConfig the
+    // node was built with) -- a single-link node never needs this section.
+    //
+    // Links 1..kMaxNodeLinks-1 are attached with their own NodeLink and
+    // storage; StaticNode<..., Links> owns that storage and has an
+    // attach_link(link, cfg, timeout) overload that needs none. Attaching
+    // (re)configures the slot for cfg.transport / reassembly_timeout_ms and
+    // resets it. Returns false for link 0, an index past kMaxNodeLinks or a
+    // slot whose receiver does not validate (bad transport / storage).
+    // `subscriptions` (optional) is the table SUBSCRIBE / UNSUBSCRIBE on this
+    // link are served from; nullptr leaves them unanswered on this link.
+    bool attach_link(std::uint8_t link, NodeLink& cfg, NodeLinkSlot& slot,
+                     std::uint64_t reassembly_timeout_ms,
+                     SubscriptionTable* subscriptions = nullptr) noexcept;
+    bool link_attached(std::uint8_t link) const noexcept;
+
+    // receive() for one link: decode, reassemble, that link's session and
+    // open(), then the same managed outcomes -- every reply leaves through
+    // this link. NodeRx::DroppedFrame for a link that is not attached. The
+    // initiator (connect()) lives on link 0 only.
+    NodeRx receive_on(std::uint8_t link, const std::uint8_t* datagram,
+                      std::size_t size, std::uint64_t now_ms,
+                      ReceivedMessage* out) noexcept;
+    NodeRx receive_on(std::uint8_t link, const DecodedFrame& frame,
+                      std::uint64_t now_ms, ReceivedMessage* out) noexcept;
+
+    // enable_session() / arm_session() for one link: only frames on THIS link
+    // wait for a HELLO -- the others keep routing as before.
+    void enable_session_on(std::uint8_t link, const Hello& local,
+                           std::uint64_t hello_deadline_ms) noexcept;
+    void arm_session_on(std::uint8_t link, std::uint64_t now_ms) noexcept;
+    const Session* link_session(std::uint8_t link) const noexcept;
+    SessionEvent link_session_event(std::uint8_t link) const noexcept;
+
+    // The link's peer went away: drops its partial reassemblies, returns its
+    // session (if enabled) to Idle -- arm it again for the next peer --,
+    // frees its subscriptions, zeroes its counters and bumps its epoch so
+    // every LinkRef taken before this call stops being current. The command
+    // dedup cache is NOT touched: it is scoped to this node's boot, not to a
+    // connection (docs/session-and-terminal.md section 5.3).
+    void reset_link(std::uint8_t link) noexcept;
+
+    // {link, its current epoch}; {link, 0} for a link that is not attached.
+    LinkRef link_ref(std::uint8_t link) const noexcept;
+    bool link_current(const LinkRef& ref) const noexcept;
+
+    // send_with() through one link, refused (nothing sent) when `to` is not
+    // current any more -- see LinkRef.
+    bool send_on(const LinkRef& to, MessageType type, std::uint16_t object_id,
+                 const std::uint8_t* payload, std::size_t size,
+                 std::uint64_t timestamp_us, EndpointSealFn seal,
+                 void* seal_ctx) noexcept;
+
+    // The subscription table peers on this link subscribe through (nullptr
+    // when the link has none). Link 0's is subscriptions().
+    SubscriptionTable* link_subscriptions(std::uint8_t link) noexcept;
+    const SubscriptionTable* link_subscriptions(std::uint8_t link) const noexcept;
 
     // ---- session initiator (opt-in via connect()) -------------------------
     // The OTHER end of a session from enable_session() above: this node
@@ -1044,7 +1153,7 @@ public:
     const SessionInitiator& initiator() const noexcept { return initiator_; }
 
     struct Stats {
-        Receiver::Stats rx;
+        Receiver::Stats rx;  // stats(): link 0's; link_stats(): that link's
         // btp::decode failures seen on the session path (the DecodedFrame the
         // session needs is decoded here, not inside btp::Receiver, so these
         // would otherwise go uncounted).
@@ -1058,6 +1167,7 @@ public:
         std::uint32_t dropped_open_failed;
     };
     Stats stats() const noexcept;
+    Stats link_stats(std::uint8_t link) const noexcept;
 
 private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
@@ -1115,10 +1225,16 @@ private:
     // repeated ticket. The Fresh path in serve_command() below never sees
     // false in practice (its slot is always freshly Reserved), but checks
     // the same way for the one code path either caller goes through.
+    // `deliver` false records the result for replay but sends nothing -- the
+    // link the request came from was reset meanwhile (complete_command()).
     bool emit_command_result(NodeLinkSlot& link, const Header& request,
                              std::uint16_t action_id, std::uint16_t action_version,
-                             const NodeActionOutcome& outcome,
-                             std::size_t slot) noexcept;
+                             const NodeActionOutcome& outcome, std::size_t slot,
+                             bool deliver = true) noexcept;
+    bool publish_named_on(NodeLinkSlot& link, std::uint16_t topic_id,
+                          NodeNamedFillFn fill, void* ctx,
+                          std::uint64_t timestamp_us, EndpointSealFn seal,
+                          void* seal_ctx) noexcept;
     void emit_command_reject(NodeLinkSlot& link, const Header& request,
                              std::uint16_t action_id, std::uint16_t action_version,
                              ResultStatus status, ResultError error) noexcept;
@@ -1163,6 +1279,13 @@ private:
     static EndpointSealFn current_seal(const NodeLinkSlot& link) noexcept;
     static void* current_seal_ctx(const NodeLinkSlot& link) noexcept;
 
+    NodeLinkSlot* slot(std::uint8_t link) noexcept;
+    const NodeLinkSlot* slot(std::uint8_t link) const noexcept;
+    static LinkRef ref_of(std::uint8_t link, const NodeLinkSlot& s) noexcept;
+    std::uint8_t index_of(const NodeLinkSlot& link) const noexcept;
+    void deliver_terminal(NodeLinkSlot& link, const Header& header,
+                          ByteView payload, std::uint64_t now_ms) noexcept;
+
     NodeConfig& cfg_;
     std::uint8_t* seal_scratch_;
     std::size_t seal_scratch_cap_;
@@ -1171,6 +1294,7 @@ private:
 
     Endpoint endpoint_;
     NodeLinkSlot link0_;  // the link cfg_ describes
+    NodeLinkSlot* links_[kMaxNodeLinks];  // [0] == &link0_, the rest attach_link()
 
     SessionInitiator initiator_;  // Idle until connect()
     InitiatorEvent last_initiator_event_;
@@ -1263,6 +1387,63 @@ struct CommandStorage {
     }
 };
 
+// The storage of ONE extra link of a StaticNode<..., Links> (2.47.0): its
+// reassembly slots and buffers, its subscription table and the NodeLinkSlot
+// over them. Same sizes as link 0's -- a StaticNode's links are symmetric.
+// Everything is wired in this constructor, member by member in declaration
+// order, before the slot that points into it is built; the transport and
+// timeout are only known at Node::attach_link(), which reconfigures them.
+template <std::size_t Slots, std::size_t SlotBytes, std::size_t MaxSubscriptions>
+struct ExtraLinkStorage {
+    ReassemblySlot slot_array[Slots];
+    std::uint8_t storage_bytes[Slots][SlotBytes];
+    ReassemblyStorage storage[Slots];
+    std::uint8_t rx_buffer[SlotBytes];
+    std::uint8_t open_buffer[SlotBytes];
+    SubscriptionRecord subscription_slots[MaxSubscriptions];
+    SubscriptionTable subscriptions;
+    NodeLinkSlot link;
+
+    static ReassemblyStorage* wire(ReassemblyStorage* s,
+                                   std::uint8_t (*bytes)[SlotBytes]) noexcept {
+        for (std::size_t i = 0; i < Slots; ++i) {
+            s[i].data = bytes[i];
+            s[i].capacity = SlotBytes;
+        }
+        return s;
+    }
+
+    ExtraLinkStorage() noexcept
+        : slot_array(),
+          storage_bytes(),
+          storage(),
+          rx_buffer(),
+          open_buffer(),
+          subscription_slots(),
+          subscriptions(subscription_slots, MaxSubscriptions),
+          link(slot_array, wire(storage, storage_bytes), Slots,
+               kNodeDefaultReassemblyTimeoutMs, TransportLimits{}, rx_buffer,
+               SlotBytes, open_buffer, SlotBytes) {}
+};
+
+// N extra links; the N == 0 specialisation (Links == 1, every existing
+// StaticNode) holds nothing.
+template <std::size_t N, std::size_t Slots, std::size_t SlotBytes,
+          std::size_t MaxSubscriptions>
+struct ExtraLinks {
+    ExtraLinkStorage<Slots, SlotBytes, MaxSubscriptions> items[N];
+    NodeLinkSlot* slot(std::size_t i) noexcept { return &items[i].link; }
+    SubscriptionTable* subscriptions(std::size_t i) noexcept {
+        return &items[i].subscriptions;
+    }
+};
+
+template <std::size_t Slots, std::size_t SlotBytes, std::size_t MaxSubscriptions>
+struct ExtraLinks<0, Slots, SlotBytes, MaxSubscriptions> {
+    NodeLinkSlot* slot(std::size_t) noexcept { return nullptr; }
+    SubscriptionTable* subscriptions(std::size_t) noexcept { return nullptr; }
+};
+
 }  // namespace detail
 
 // Defaults: 4 concurrent reassemblies, 600 octets each (a fragmented
@@ -1290,12 +1471,19 @@ template <std::size_t Slots = 4, std::size_t SlotBytes = 600,
           std::size_t CatalogTopics = 8, std::size_t CatalogFields = 64,
           std::size_t CatalogStringBytes = 1536,
           std::size_t MaxSubscriptions = 8, std::size_t MaxCommands = 4,
-          std::size_t CommandBytes = 128, std::size_t CatalogSourceInfo = 0>
+          std::size_t CommandBytes = 128, std::size_t CatalogSourceInfo = 0,
+          std::size_t Links = 1>
 class StaticNode
     : private detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>,
       public Node {
     using Storage =
         detail::NodeStorage<Slots, SlotBytes, SealBytes, ScratchBytes>;
+
+    // Links last (2.47.0), after every other capacity, for the same reason
+    // CatalogSourceInfo is: every existing StaticNode<...> keeps compiling and
+    // keeps its size (Links == 1 adds no storage at all).
+    static_assert(Links >= 1U && Links <= kMaxNodeLinks,
+                  "StaticNode: Links must be 1..kMaxNodeLinks");
 
     // CatalogSourceInfo last (after every other capacity) so an existing
     // StaticNode<...> spelled out to CommandBytes still compiles -- it is only
@@ -1352,6 +1540,12 @@ class StaticNode
     ClientCommand client_command_slots_[MaxCommands];
     CommandClient client_commands_;
 
+    // Links 1..Links-1 -- each a full per-link slot (reassembly, rx/open
+    // buffers, subscription table) the same size as link 0's. Everything
+    // else (catalogue, scratch buffers, dedup cache, identity, sequence) is
+    // the node's and shared. See Node::attach_link().
+    detail::ExtraLinks<Links - 1U, Slots, SlotBytes, MaxSubscriptions> extra_links_;
+
 public:
     explicit StaticNode(
         NodeConfig& cfg,
@@ -1374,7 +1568,8 @@ public:
           commands_cache_(command_slots_, command_storage_.storage, MaxCommands,
                          command_requesters_, MaxCommands),
           client_command_slots_(),
-          client_commands_(client_command_slots_, MaxCommands) {
+          client_commands_(client_command_slots_, MaxCommands),
+          extra_links_() {
         // Ready for on_publish() / a peer's SUBSCRIBE / this node's own
         // subscribe() or command() with no separate setup call --
         // StaticNode<> owns all of its storage, same as catalog_.
@@ -1405,6 +1600,18 @@ public:
     using Node::learn_catalog;
     using Node::begin;
     using Node::enable_commands;
+    using Node::attach_link;
+
+    // Node::attach_link() with this node's own storage for `link`
+    // (1..Links-1) and its own subscription table. False past Links.
+    bool attach_link(std::uint8_t link, NodeLink& cfg,
+                     std::uint64_t reassembly_timeout_ms =
+                         kNodeDefaultReassemblyTimeoutMs) noexcept {
+        if (link == 0U || link >= Links) return false;
+        return Node::attach_link(link, cfg, *extra_links_.slot(link - 1U),
+                                 reassembly_timeout_ms,
+                                 extra_links_.subscriptions(link - 1U));
+    }
 
     // Sugar for enable_commands(&cache, handler, ctx) -- StaticNode<>
     // already owns the DedupCache and its storage (commands_cache_ above),

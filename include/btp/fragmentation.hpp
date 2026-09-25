@@ -94,6 +94,10 @@ public:
     std::size_t expire(std::uint64_t now_ms) noexcept;
     void clear() noexcept;
 
+    // Replaces the timeout given to the constructor. Partials already in
+    // flight are judged against the new value from the next expire() on.
+    void set_timeout(std::uint64_t timeout_ms) noexcept { timeout_ms_ = timeout_ms; }
+
 private:
     void reset_slot(std::size_t slot_index) noexcept;
     bool is_received(const ReassemblySlot& slot,

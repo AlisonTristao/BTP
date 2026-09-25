@@ -179,6 +179,12 @@ public:
     // connection, or test isolation.
     void clear() noexcept;
 
+    // Replaces the transport limits and reassembly timeout given to the
+    // constructor, then clear()s -- for storage built before its link is
+    // known (a Node's extra links, library 2.47.0). Returns the new valid().
+    bool configure(const TransportLimits& transport,
+                   std::uint64_t timeout_ms) noexcept;
+
     struct Stats {
         std::uint32_t completed;            // Complete outcomes
         std::uint32_t fragments_accepted;   // FragmentAccepted

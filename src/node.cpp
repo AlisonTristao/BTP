@@ -4,6 +4,22 @@
 
 namespace btp {
 
+namespace {
+
+// NodeConfig::lock() / unlock() for one scope -- see NodeConfig::lock().
+class SharedLock {
+public:
+    explicit SharedLock(NodeConfig& cfg) noexcept : cfg_(cfg) { cfg_.lock(); }
+    ~SharedLock() { cfg_.unlock(); }
+    SharedLock(const SharedLock&) = delete;
+    SharedLock& operator=(const SharedLock&) = delete;
+
+private:
+    NodeConfig& cfg_;
+};
+
+}  // namespace
+
 NodeLinkSlot::NodeLinkSlot(ReassemblySlot* slot_array,
                            const ReassemblyStorage* storage,
                            std::size_t slot_count,
@@ -26,7 +42,8 @@ NodeLinkSlot::NodeLinkSlot(ReassemblySlot* slot_array,
       session_path_dropped_decode_(0U),
       dropped_cleartext_(0U),
       dropped_open_failed_(0U),
-      subscriptions_(nullptr) {}
+      subscriptions_(nullptr),
+      epoch_(0U) {}
 
 Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
            const ReassemblyStorage* storage, std::size_t slot_count,
@@ -72,6 +89,149 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       publish_slot_capacity_(0U),
       publish_slot_count_(0U) {
     link0_.cfg_ = &cfg_;
+    links_[0] = &link0_;
+    for (std::size_t i = 1U; i < kMaxNodeLinks; ++i) links_[i] = nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Links
+// ---------------------------------------------------------------------------
+
+NodeLinkSlot* Node::slot(std::uint8_t link) noexcept {
+    return link < kMaxNodeLinks ? links_[link] : nullptr;
+}
+
+const NodeLinkSlot* Node::slot(std::uint8_t link) const noexcept {
+    return link < kMaxNodeLinks ? links_[link] : nullptr;
+}
+
+LinkRef Node::ref_of(std::uint8_t link, const NodeLinkSlot& s) noexcept {
+    LinkRef ref{};
+    ref.link = link;
+    ref.epoch = s.epoch_.load(std::memory_order_acquire);
+    return ref;
+}
+
+bool Node::attach_link(std::uint8_t link, NodeLink& cfg, NodeLinkSlot& s,
+                       std::uint64_t reassembly_timeout_ms,
+                       SubscriptionTable* subscriptions) noexcept {
+    if (link == 0U || link >= kMaxNodeLinks) return false;
+    s.cfg_ = &cfg;
+    s.subscriptions_ = subscriptions;
+    const bool ok = s.receiver_.configure(cfg.transport, reassembly_timeout_ms);
+    links_[link] = &s;
+    reset_link(link);
+    return ok;
+}
+
+bool Node::link_attached(std::uint8_t link) const noexcept {
+    return slot(link) != nullptr;
+}
+
+NodeRx Node::receive_on(std::uint8_t link, const std::uint8_t* datagram,
+                        std::size_t size, std::uint64_t now_ms,
+                        ReceivedMessage* out) noexcept {
+    NodeLinkSlot* s = slot(link);
+    if (s == nullptr) return NodeRx::DroppedFrame;
+    return receive_datagram(*s, datagram, size, now_ms, out);
+}
+
+NodeRx Node::receive_on(std::uint8_t link, const DecodedFrame& frame,
+                        std::uint64_t now_ms, ReceivedMessage* out) noexcept {
+    NodeLinkSlot* s = slot(link);
+    if (s == nullptr) return NodeRx::DroppedFrame;
+    return receive_frame(*s, frame, now_ms, out);
+}
+
+void Node::enable_session_on(std::uint8_t link, const Hello& local,
+                             std::uint64_t hello_deadline_ms) noexcept {
+    NodeLinkSlot* s = slot(link);
+    if (s == nullptr) return;
+    s->session_ = Session(local, hello_deadline_ms);
+    s->session_on_ = true;
+}
+
+void Node::arm_session_on(std::uint8_t link, std::uint64_t now_ms) noexcept {
+    NodeLinkSlot* s = slot(link);
+    if (s != nullptr && s->session_on_) s->session_.arm(now_ms);
+}
+
+const Session* Node::link_session(std::uint8_t link) const noexcept {
+    const NodeLinkSlot* s = slot(link);
+    return s != nullptr && s->session_on_ ? &s->session_ : nullptr;
+}
+
+SessionEvent Node::link_session_event(std::uint8_t link) const noexcept {
+    const NodeLinkSlot* s = slot(link);
+    return s != nullptr ? s->last_session_event_ : SessionEvent::None;
+}
+
+void Node::reset_link(std::uint8_t link) noexcept {
+    NodeLinkSlot* s = slot(link);
+    if (s == nullptr) return;
+    s->receiver_.clear();
+    if (s->session_on_) s->session_.reset();
+    if (s->subscriptions_ != nullptr) s->subscriptions_->clear();
+    s->last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
+    s->last_session_event_ = SessionEvent::None;
+    s->session_path_dropped_crc_ = 0U;
+    s->session_path_dropped_decode_ = 0U;
+    s->dropped_cleartext_ = 0U;
+    s->dropped_open_failed_ = 0U;
+    s->epoch_.fetch_add(1U, std::memory_order_acq_rel);
+}
+
+LinkRef Node::link_ref(std::uint8_t link) const noexcept {
+    const NodeLinkSlot* s = slot(link);
+    if (s == nullptr) {
+        LinkRef none{};
+        none.link = link;
+        return none;
+    }
+    return ref_of(link, *s);
+}
+
+bool Node::link_current(const LinkRef& ref) const noexcept {
+    const NodeLinkSlot* s = slot(ref.link);
+    return s != nullptr && s->epoch_.load(std::memory_order_acquire) == ref.epoch;
+}
+
+bool Node::send_on(const LinkRef& to, MessageType type, std::uint16_t object_id,
+                   const std::uint8_t* payload, std::size_t size,
+                   std::uint64_t timestamp_us, EndpointSealFn seal,
+                   void* seal_ctx) noexcept {
+    NodeLinkSlot* s = slot(to.link);
+    if (s == nullptr || !link_current(to)) return false;
+    return transmit(*s, type, object_id, payload, size, timestamp_us, seal,
+                    seal_ctx);
+}
+
+SubscriptionTable* Node::link_subscriptions(std::uint8_t link) noexcept {
+    NodeLinkSlot* s = slot(link);
+    return s != nullptr ? s->subscriptions_ : nullptr;
+}
+
+const SubscriptionTable* Node::link_subscriptions(std::uint8_t link) const noexcept {
+    const NodeLinkSlot* s = slot(link);
+    return s != nullptr ? s->subscriptions_ : nullptr;
+}
+
+std::uint8_t Node::index_of(const NodeLinkSlot& link) const noexcept {
+    for (std::size_t i = 0U; i < kMaxNodeLinks; ++i) {
+        if (links_[i] == &link) return static_cast<std::uint8_t>(i);
+    }
+    return 0U;
+}
+
+void Node::deliver_terminal(NodeLinkSlot& link, const Header& header,
+                            ByteView payload, std::uint64_t now_ms) noexcept {
+    if (on_terminal_ == &Node::terminal_thunk && on_terminal_ctx_ == &cfg_) {
+        // The NodeConfig handler: tell it which link, so it can answer there.
+        cfg_.terminal_on(*this, ref_of(index_of(link), link), header, payload,
+                         now_ms);
+        return;
+    }
+    on_terminal_(on_terminal_ctx_, *this, header, payload, now_ms);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +311,7 @@ bool Node::transmit(NodeLinkSlot& link, MessageType type, std::uint16_t object_i
                     const std::uint8_t* payload, std::size_t size,
                     std::uint64_t timestamp_us, EndpointSealFn seal,
                     void* seal_ctx) noexcept {
+    SharedLock guard(cfg_);
     const LogicalMessage message{type, object_id, timestamp_us,
                                  {payload, size}};
     const bool ok = endpoint_.send_logical(message, link.cfg_->transport,
@@ -165,6 +326,7 @@ bool Node::transmit_reserved(NodeLinkSlot& link, std::uint32_t sequence,
                              MessageType type, std::uint16_t object_id,
                              const std::uint8_t* payload, std::size_t size,
                              std::uint64_t timestamp_us) noexcept {
+    SharedLock guard(cfg_);
     const LogicalMessage message{type, object_id, timestamp_us, {payload, size}};
     return endpoint_.send_logical_reserved(sequence, message, link.cfg_->transport,
                                           &Node::send_thunk, link.cfg_,
@@ -317,6 +479,7 @@ NodeRx Node::route_decoded(NodeLinkSlot& link, const DecodedFrame& decoded,
         const LogicalMessage reply_msg{
             MessageType::Control, reply_object, resolve_now(0U) * 1000ULL,
             {reply, outcome.reply_size}};
+        SharedLock guard(cfg_);
         endpoint_.send_logical(reply_msg, link.cfg_->transport, &Node::send_thunk,
                                link.cfg_, seal_scratch_, seal_scratch_cap_, nullptr,
                                nullptr);
@@ -446,7 +609,7 @@ NodeRx Node::finish(NodeLinkSlot& link, ReceiveOutcome outcome,
 
     // ----- terminal -----
     if (on_terminal_ != nullptr && out->header.type == MessageType::Terminal) {
-        on_terminal_(on_terminal_ctx_, *this, out->header, out->payload, now_ms);
+        deliver_terminal(link, out->header, out->payload, now_ms);
         return NodeRx::TerminalDelivered;
     }
 
@@ -584,6 +747,7 @@ void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
 
 void Node::serve_command(NodeLinkSlot& link, const Header& request,
                          ByteView payload) noexcept {
+    SharedLock guard(cfg_);  // commands_ and scratch_buffer_ are shared
     if (commands_ == nullptr || on_command_ == nullptr ||
         scratch_buffer_ == nullptr) {
         return;
@@ -609,8 +773,13 @@ void Node::serve_command(NodeLinkSlot& link, const Header& request,
         case DedupVerdict::Fresh: {
             NodeActionOutcome outcome = {};
             outcome.status = static_cast<std::uint8_t>(ResultStatus::Success);
-            const NodeCommandTicket ticket{request, req.action_id,
-                                          req.action_version, slot, true};
+            NodeCommandTicket ticket{};
+            ticket.request = request;
+            ticket.action_id = req.action_id;
+            ticket.action_version = req.action_version;
+            ticket.slot = slot;
+            ticket.armed = true;
+            ticket.link = ref_of(index_of(link), link);
             on_command_(on_command_ctx_, req.action_id, req.action_version,
                        req.parameters, &outcome, ticket);
             // pending: the handler kept the ticket for later -- nothing to
@@ -653,7 +822,8 @@ bool Node::emit_command_result(NodeLinkSlot& link, const Header& request,
                                std::uint16_t action_id,
                                std::uint16_t action_version,
                                const NodeActionOutcome& outcome,
-                               std::size_t slot) noexcept {
+                               std::size_t slot, bool deliver) noexcept {
+    SharedLock guard(cfg_);
     CommandResult result = {};
     result.request.request_source_id = request.source_id;
     result.request.request_boot_id = request.boot_id;
@@ -684,6 +854,7 @@ bool Node::emit_command_result(NodeLinkSlot& link, const Header& request,
     if (commands_->record_result(slot, scratch_buffer_, written) != MessageError::Ok) {
         return false;
     }
+    if (!deliver) return false;
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
     reply_seal_for(link, request, &seal, &seal_ctx);
@@ -695,14 +866,21 @@ bool Node::emit_command_result(NodeLinkSlot& link, const Header& request,
 bool Node::complete_command(const NodeCommandTicket& ticket,
                             const NodeActionOutcome& outcome) noexcept {
     if (!ticket.valid() || commands_ == nullptr) return false;
-    return emit_command_result(link0_, ticket.request, ticket.action_id,
-                               ticket.action_version, outcome, ticket.slot);
+    NodeLinkSlot* link = slot(ticket.link.link);
+    if (link == nullptr) return false;
+    // A reset link still records the result -- a retransmission reaching this
+    // node on another link must replay it, not run the action twice -- but
+    // the reply is not sent to whoever took that link over.
+    return emit_command_result(*link, ticket.request, ticket.action_id,
+                               ticket.action_version, outcome, ticket.slot,
+                               link_current(ticket.link));
 }
 
 void Node::emit_command_reject(NodeLinkSlot& link, const Header& request,
                                std::uint16_t action_id,
                                std::uint16_t action_version, ResultStatus status,
                                ResultError error) noexcept {
+    SharedLock guard(cfg_);
     CommandResult result = {};
     result.request.request_source_id = request.source_id;
     result.request.request_boot_id = request.boot_id;
@@ -731,6 +909,7 @@ std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boo
     if (command_client_ == nullptr || scratch_buffer_ == nullptr) {
         return 0U;
     }
+    SharedLock guard(cfg_);
     std::uint32_t sequence = 0U;
     if (!endpoint_.reserve_sequence(&sequence)) return 0U;
 
@@ -762,6 +941,7 @@ void Node::enable_status(std::uint32_t period_ms) noexcept {
 
 void Node::emit_status(std::uint64_t now_ms) noexcept {
     if (scratch_buffer_ == nullptr) return;
+    SharedLock guard(cfg_);
 
     const Receiver::Stats rx = link0_.receiver_.stats();
     StatusV1 status = {};
@@ -879,6 +1059,7 @@ void Node::emit_manifest(NodeLinkSlot& link, const Header& request,
     if (serve_catalog_ == nullptr || scratch_buffer_ == nullptr) {
         return;
     }
+    SharedLock guard(cfg_);
 
     // Format 2 whenever there is a source_info block to carry on a SUCCESS
     // reply -- a full response AND a NOT_MODIFIED one (commands.md 3.3:
@@ -1005,6 +1186,7 @@ bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
     const CatalogTopic* topic = serve_catalog_->topic(topic_id);
     if (topic == nullptr) return false;
 
+    SharedLock guard(cfg_);
     SampleWriter writer(scratch_buffer_, scratch_capacity_, topic->fields,
                         topic->field_count);
     if (writer.begin(topic->schema_version) != MessageError::Ok) return false;
@@ -1025,6 +1207,14 @@ bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
 bool Node::publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
                               void* ctx, std::uint64_t timestamp_us,
                               EndpointSealFn seal, void* seal_ctx) noexcept {
+    return publish_named_on(link0_, topic_id, fill, ctx, timestamp_us, seal,
+                            seal_ctx);
+}
+
+bool Node::publish_named_on(NodeLinkSlot& link, std::uint16_t topic_id,
+                            NodeNamedFillFn fill, void* ctx,
+                            std::uint64_t timestamp_us, EndpointSealFn seal,
+                            void* seal_ctx) noexcept {
     if (serve_catalog_ == nullptr || fill == nullptr ||
         scratch_buffer_ == nullptr) {
         return false;
@@ -1032,14 +1222,15 @@ bool Node::publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
     const CatalogTopic* topic = serve_catalog_->topic(topic_id);
     if (topic == nullptr) return false;
 
+    SharedLock guard(cfg_);
     NamedSampleWriter writer(scratch_buffer_, scratch_capacity_, *topic);
     if (writer.begin(topic->schema_version) != MessageError::Ok) return false;
     fill(ctx, writer);
     std::size_t written = 0U;
     if (writer.finish(&written) != MessageError::Ok) return false;
 
-    return send_with(MessageType::Telemetry, topic_id, scratch_buffer_, written,
-                     timestamp_us, seal, seal_ctx);
+    return transmit(link, MessageType::Telemetry, topic_id, scratch_buffer_,
+                    written, timestamp_us, seal, seal_ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,20 +1259,29 @@ bool Node::on_publish(std::uint16_t topic_id, NodeNamedFillFn fill,
 }
 
 std::size_t Node::publish_subscribed_topics(std::uint64_t now_ms) noexcept {
-    SubscriptionTable* subscriptions = link0_.subscriptions_;
-    if (publish_slots_ == nullptr || subscriptions == nullptr) return 0U;
+    if (publish_slots_ == nullptr) return 0U;
 
+    // Every link with its own subscription table publishes to it at its own
+    // cadence -- a topic subscribed on two links goes out on both.
     std::size_t published = 0U;
-    for (std::size_t i = 0U; i < publish_slot_count_; ++i) {
-        const PublishRegistration& reg = publish_slots_[i];
-        if (!subscriptions->due(reg.topic_id, now_ms)) continue;
-        // Skipped, not counted as an error, when reg.topic_id is not (or no
-        // longer) in the served catalogue -- same "unknown topic -> false"
-        // rule publish_named() itself already has; there is no separate
-        // "was it even a real topic" outcome for a caller to want back here.
-        if (publish_named(reg.topic_id, reg.fill, reg.ctx, now_ms * 1000ULL)) {
-            subscriptions->note_published(reg.topic_id, now_ms);
-            ++published;
+    for (std::size_t l = 0U; l < kMaxNodeLinks; ++l) {
+        NodeLinkSlot* link = links_[l];
+        if (link == nullptr || link->subscriptions_ == nullptr) continue;
+        SubscriptionTable& subscriptions = *link->subscriptions_;
+        for (std::size_t i = 0U; i < publish_slot_count_; ++i) {
+            const PublishRegistration& reg = publish_slots_[i];
+            if (!subscriptions.due(reg.topic_id, now_ms)) continue;
+            // Skipped, not counted as an error, when reg.topic_id is not (or
+            // no longer) in the served catalogue -- same "unknown topic ->
+            // false" rule publish_named() itself already has; there is no
+            // separate "was it even a real topic" outcome for a caller to
+            // want back here.
+            if (publish_named_on(*link, reg.topic_id, reg.fill, reg.ctx,
+                                 now_ms * 1000ULL, current_seal(*link),
+                                 current_seal_ctx(*link))) {
+                subscriptions.note_published(reg.topic_id, now_ms);
+                ++published;
+            }
         }
     }
     return published;
@@ -1196,9 +1396,16 @@ void Node::arm_session(std::uint64_t now_ms) noexcept {
 SessionEvent Node::tick() noexcept { return tick(resolve_now(0U)); }
 
 SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
-    link0_.receiver_.expire(now_ms);
+    for (std::size_t l = 0U; l < kMaxNodeLinks; ++l) {
+        NodeLinkSlot* link = links_[l];
+        if (link == nullptr) continue;
+        link->receiver_.expire(now_ms);
+        if (link->subscriptions_ != nullptr) link->subscriptions_->expire(now_ms);
+        if (l != 0U && link->session_on_) {
+            link->last_session_event_ = link->session_.poll(now_ms).event;
+        }
+    }
     last_initiator_event_ = initiator_.poll(now_ms).event;
-    if (link0_.subscriptions_ != nullptr) link0_.subscriptions_->expire(now_ms);
     if (subscription_client_ != nullptr) {
         subscription_client_->expire(now_ms);
         drain_subscription_renewals(now_ms);
@@ -1220,13 +1427,17 @@ SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
     return outcome.event;
 }
 
-Node::Stats Node::stats() const noexcept {
+Node::Stats Node::stats() const noexcept { return link_stats(0U); }
+
+Node::Stats Node::link_stats(std::uint8_t link) const noexcept {
     Stats s{};
-    s.rx = link0_.receiver_.stats();
-    s.session_path_dropped_crc = link0_.session_path_dropped_crc_;
-    s.session_path_dropped_decode = link0_.session_path_dropped_decode_;
-    s.dropped_cleartext = link0_.dropped_cleartext_;
-    s.dropped_open_failed = link0_.dropped_open_failed_;
+    const NodeLinkSlot* l = slot(link);
+    if (l == nullptr) return s;
+    s.rx = l->receiver_.stats();
+    s.session_path_dropped_crc = l->session_path_dropped_crc_;
+    s.session_path_dropped_decode = l->session_path_dropped_decode_;
+    s.dropped_cleartext = l->dropped_cleartext_;
+    s.dropped_open_failed = l->dropped_open_failed_;
     return s;
 }
 
