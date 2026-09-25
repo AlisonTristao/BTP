@@ -4,25 +4,20 @@
 
 namespace btp {
 
-Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
-           const ReassemblyStorage* storage, std::size_t slot_count,
-           std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
-           std::size_t rx_capacity, std::uint8_t* seal_scratch,
-           std::size_t seal_scratch_cap, std::uint8_t* open_buffer,
-           std::size_t open_capacity, std::uint8_t* scratch_buffer,
-           std::size_t scratch_capacity) noexcept
-    : cfg_(cfg),
+NodeLinkSlot::NodeLinkSlot(ReassemblySlot* slot_array,
+                           const ReassemblyStorage* storage,
+                           std::size_t slot_count,
+                           std::uint64_t reassembly_timeout_ms,
+                           const TransportLimits& transport,
+                           std::uint8_t* rx_buffer, std::size_t rx_capacity,
+                           std::uint8_t* open_buffer,
+                           std::size_t open_capacity) noexcept
+    : cfg_(nullptr),
+      receiver_(slot_array, storage, slot_count, reassembly_timeout_ms, transport),
       rx_buffer_(rx_buffer),
       rx_capacity_(rx_capacity),
-      seal_scratch_(seal_scratch),
-      seal_scratch_cap_(seal_scratch_cap),
       open_buffer_(open_buffer),
       open_capacity_(open_capacity),
-      scratch_buffer_(scratch_buffer),
-      scratch_capacity_(scratch_capacity),
-      endpoint_(),
-      receiver_(slots, storage, slot_count, reassembly_timeout_ms,
-                cfg.transport),
       last_receive_outcome_(ReceiveOutcome::InvalidArgument),
       session_(Hello{}, 0U),
       session_on_(false),
@@ -31,9 +26,25 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       session_path_dropped_decode_(0U),
       dropped_cleartext_(0U),
       dropped_open_failed_(0U),
+      subscriptions_(nullptr) {}
+
+Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
+           const ReassemblyStorage* storage, std::size_t slot_count,
+           std::uint64_t reassembly_timeout_ms, std::uint8_t* rx_buffer,
+           std::size_t rx_capacity, std::uint8_t* seal_scratch,
+           std::size_t seal_scratch_cap, std::uint8_t* open_buffer,
+           std::size_t open_capacity, std::uint8_t* scratch_buffer,
+           std::size_t scratch_capacity) noexcept
+    : cfg_(cfg),
+      seal_scratch_(seal_scratch),
+      seal_scratch_cap_(seal_scratch_cap),
+      scratch_buffer_(scratch_buffer),
+      scratch_capacity_(scratch_capacity),
+      endpoint_(),
+      link0_(slots, storage, slot_count, reassembly_timeout_ms, cfg.transport,
+             rx_buffer, rx_capacity, open_buffer, open_capacity),
       initiator_(),
       last_initiator_event_(InitiatorEvent::None),
-      subscriptions_(nullptr),
       subscription_client_(nullptr),
       last_subscription_event_(SubscriptionEvent::None),
       last_subscription_outcome_(),
@@ -59,23 +70,26 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       serve_name_(nullptr),
       publish_slots_(nullptr),
       publish_slot_capacity_(0U),
-      publish_slot_count_(0U) {}
+      publish_slot_count_(0U) {
+    link0_.cfg_ = &cfg_;
+}
 
 // ---------------------------------------------------------------------------
-// NodeConfig bridges -- the only place a virtual call becomes a C-style
-// function pointer for btp::Endpoint / btp::Receiver. `ctx` is always the
-// NodeConfig this Node (or, for command_thunk, a StaticNode<>'s own
-// cfg_ reached via its own enable_commands() call) was built with.
+// NodeLink / NodeConfig bridges -- the only place a virtual call becomes a
+// C-style function pointer for btp::Endpoint / btp::Receiver. `ctx` is the
+// NodeLink a frame leaves through (send / seal), or the NodeConfig this Node
+// (or, for command_thunk, a StaticNode<>'s own cfg_ reached via its own
+// enable_commands() call) was built with (terminal / command).
 // ---------------------------------------------------------------------------
 
 bool Node::send_thunk(void* ctx, const std::uint8_t* frame,
                       std::size_t frame_size) noexcept {
-    return static_cast<NodeConfig*>(ctx)->send(frame, frame_size);
+    return static_cast<NodeLink*>(ctx)->send(frame, frame_size);
 }
 
 bool Node::seal_thunk(void* ctx, const Header& header, std::uint16_t payload_size,
                       const std::uint8_t* plaintext, std::uint8_t* out) noexcept {
-    return static_cast<NodeConfig*>(ctx)->seal(header, payload_size, plaintext, out);
+    return static_cast<NodeLink*>(ctx)->seal(header, payload_size, plaintext, out);
 }
 
 void Node::terminal_thunk(void* ctx, Node& node, const Header& header,
@@ -91,24 +105,24 @@ void Node::command_thunk(void* ctx, std::uint16_t action_id,
                                            outcome, ticket);
 }
 
-EndpointSealFn Node::current_seal() const noexcept {
-    return cfg_.has_seal() ? &Node::seal_thunk : nullptr;
+EndpointSealFn Node::current_seal(const NodeLinkSlot& link) noexcept {
+    return link.cfg_->has_seal() ? &Node::seal_thunk : nullptr;
 }
 
-void* Node::current_seal_ctx() const noexcept {
-    return cfg_.has_seal() ? &cfg_ : nullptr;
+void* Node::current_seal_ctx(const NodeLinkSlot& link) noexcept {
+    return link.cfg_->has_seal() ? link.cfg_ : nullptr;
 }
 
 bool Node::begin(bool arm_and_announce) noexcept {
     if (!endpoint_.configure(cfg_.source_id, cfg_.boot_id)) return false;
-    if (!receiver_.valid()) return false;
-    if (session_on_ && !session_.valid()) return false;
+    if (!link0_.receiver_.valid()) return false;
+    if (link0_.session_on_ && !link0_.session_.valid()) return false;
     // NodeConfig::send() is always implemented (it is pure virtual) -- a
     // receive-only node's own override just returns false unconditionally,
     // so there is nothing to check here any more.
 
     if (arm_and_announce) {
-        if (session_on_) arm_session();
+        if (link0_.session_on_) arm_session();
         if (serve_catalog_ != nullptr) announce_catalog();
     }
     return true;
@@ -121,8 +135,8 @@ bool Node::begin(const Hello& local_hello,
 }
 
 bool Node::configured() const noexcept {
-    return endpoint_.configured() && receiver_.valid() &&
-           (!session_on_ || session_.valid());
+    return endpoint_.configured() && link0_.receiver_.valid() &&
+           (!link0_.session_on_ || link0_.session_.valid());
 }
 
 std::uint64_t Node::resolve_now(std::uint64_t fallback) const noexcept {
@@ -133,34 +147,55 @@ std::uint64_t Node::resolve_now(std::uint64_t fallback) const noexcept {
 // Transmit
 // ---------------------------------------------------------------------------
 
+bool Node::transmit(NodeLinkSlot& link, MessageType type, std::uint16_t object_id,
+                    const std::uint8_t* payload, std::size_t size,
+                    std::uint64_t timestamp_us, EndpointSealFn seal,
+                    void* seal_ctx) noexcept {
+    const LogicalMessage message{type, object_id, timestamp_us,
+                                 {payload, size}};
+    const bool ok = endpoint_.send_logical(message, link.cfg_->transport,
+                                          &Node::send_thunk, link.cfg_,
+                                          seal_scratch_, seal_scratch_cap_, seal,
+                                          seal_ctx);
+    if (ok) ++frames_tx_;
+    return ok;
+}
+
+bool Node::transmit_reserved(NodeLinkSlot& link, std::uint32_t sequence,
+                             MessageType type, std::uint16_t object_id,
+                             const std::uint8_t* payload, std::size_t size,
+                             std::uint64_t timestamp_us) noexcept {
+    const LogicalMessage message{type, object_id, timestamp_us, {payload, size}};
+    return endpoint_.send_logical_reserved(sequence, message, link.cfg_->transport,
+                                          &Node::send_thunk, link.cfg_,
+                                          seal_scratch_, seal_scratch_cap_,
+                                          current_seal(link), current_seal_ctx(link));
+}
+
 bool Node::send_with(MessageType type, std::uint16_t object_id,
                      const std::uint8_t* payload, std::size_t size,
                      std::uint64_t timestamp_us, EndpointSealFn seal,
                      void* seal_ctx) noexcept {
-    const LogicalMessage message{type, object_id, timestamp_us,
-                                 {payload, size}};
-    const bool ok = endpoint_.send_logical(message, cfg_.transport, &Node::send_thunk,
-                                          &cfg_, seal_scratch_,
-                                          seal_scratch_cap_, seal, seal_ctx);
-    if (ok) ++frames_tx_;
-    return ok;
+    return transmit(link0_, type, object_id, payload, size, timestamp_us, seal,
+                    seal_ctx);
 }
 
 bool Node::send(MessageType type, std::uint16_t object_id,
                 const std::uint8_t* payload, std::size_t size,
                 std::uint64_t timestamp_us) noexcept {
     return send_with(type, object_id, payload, size, timestamp_us,
-                     current_seal(), current_seal_ctx());
+                     current_seal(link0_), current_seal_ctx(link0_));
 }
 
-void Node::reply_seal_for(const Header& request, EndpointSealFn* out_seal,
+void Node::reply_seal_for(NodeLinkSlot& link, const Header& request,
+                          EndpointSealFn* out_seal,
                           void** out_seal_ctx) const noexcept {
     *out_seal = nullptr;
     *out_seal_ctx = nullptr;
-    cfg_.reply_seal(request, out_seal, out_seal_ctx);
+    link.cfg_->reply_seal(request, out_seal, out_seal_ctx);
     if (*out_seal == nullptr) {
-        *out_seal = current_seal();
-        *out_seal_ctx = current_seal_ctx();
+        *out_seal = current_seal(link);
+        *out_seal_ctx = current_seal_ctx(link);
     }
 }
 
@@ -175,37 +210,7 @@ NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
 
 NodeRx Node::receive(const std::uint8_t* datagram, std::size_t size,
                      std::uint64_t now_ms, ReceivedMessage* out) noexcept {
-    last_session_event_ = SessionEvent::None;
-    last_initiator_event_ = InitiatorEvent::None;
-    if (out == nullptr || datagram == nullptr || size == 0U) {
-        last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
-        return NodeRx::DroppedFrame;
-    }
-
-    const bool initiator_live = initiator_.state() != InitiatorState::Idle;
-    if (!session_on_ && !initiator_live) {
-        return finish(receiver_.submit(datagram, size, now_ms, rx_buffer_,
-                                       rx_capacity_, out),
-                      out, now_ms);
-    }
-
-    // A session (either direction) needs the DecodedFrame btp::Receiver keeps
-    // to itself, so the decode happens here; its failures are counted apart
-    // (stats()).
-    DecodedFrame decoded{};
-    const Error error = btp::decode(datagram, size, cfg_.transport, &decoded);
-    if (error != Error::Ok) {
-        if (error == Error::CrcMismatch) {
-            ++session_path_dropped_crc_;
-            last_receive_outcome_ = ReceiveOutcome::DroppedCrc;
-        } else {
-            ++session_path_dropped_decode_;
-            last_receive_outcome_ = ReceiveOutcome::DroppedDecode;
-        }
-        return NodeRx::DroppedFrame;
-    }
-
-    return route_decoded(decoded, now_ms, out);
+    return receive_datagram(link0_, datagram, size, now_ms, out);
 }
 
 NodeRx Node::receive(const DecodedFrame& frame, ReceivedMessage* out) noexcept {
@@ -214,18 +219,63 @@ NodeRx Node::receive(const DecodedFrame& frame, ReceivedMessage* out) noexcept {
 
 NodeRx Node::receive(const DecodedFrame& frame, std::uint64_t now_ms,
                      ReceivedMessage* out) noexcept {
-    last_session_event_ = SessionEvent::None;
-    last_initiator_event_ = InitiatorEvent::None;
-    if (out == nullptr) {
-        last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
-        return NodeRx::DroppedFrame;
-    }
-    return route_decoded(frame, now_ms, out);
+    return receive_frame(link0_, frame, now_ms, out);
 }
 
-NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
-                           ReceivedMessage* out) noexcept {
-    const bool initiator_live = initiator_.state() != InitiatorState::Idle;
+NodeRx Node::receive_datagram(NodeLinkSlot& link, const std::uint8_t* datagram,
+                              std::size_t size, std::uint64_t now_ms,
+                              ReceivedMessage* out) noexcept {
+    link.last_session_event_ = SessionEvent::None;
+    if (&link == &link0_) last_initiator_event_ = InitiatorEvent::None;
+    if (out == nullptr || datagram == nullptr || size == 0U) {
+        link.last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
+        return NodeRx::DroppedFrame;
+    }
+
+    // The initiator (connect()) only ever runs on link 0.
+    const bool initiator_live =
+        &link == &link0_ && initiator_.state() != InitiatorState::Idle;
+    if (!link.session_on_ && !initiator_live) {
+        return finish(link,
+                      link.receiver_.submit(datagram, size, now_ms, link.rx_buffer_,
+                                            link.rx_capacity_, out),
+                      out, now_ms);
+    }
+
+    // A session (either direction) needs the DecodedFrame btp::Receiver keeps
+    // to itself, so the decode happens here; its failures are counted apart
+    // (stats()).
+    DecodedFrame decoded{};
+    const Error error = btp::decode(datagram, size, link.cfg_->transport, &decoded);
+    if (error != Error::Ok) {
+        if (error == Error::CrcMismatch) {
+            ++link.session_path_dropped_crc_;
+            link.last_receive_outcome_ = ReceiveOutcome::DroppedCrc;
+        } else {
+            ++link.session_path_dropped_decode_;
+            link.last_receive_outcome_ = ReceiveOutcome::DroppedDecode;
+        }
+        return NodeRx::DroppedFrame;
+    }
+
+    return route_decoded(link, decoded, now_ms, out);
+}
+
+NodeRx Node::receive_frame(NodeLinkSlot& link, const DecodedFrame& frame,
+                           std::uint64_t now_ms, ReceivedMessage* out) noexcept {
+    link.last_session_event_ = SessionEvent::None;
+    if (&link == &link0_) last_initiator_event_ = InitiatorEvent::None;
+    if (out == nullptr) {
+        link.last_receive_outcome_ = ReceiveOutcome::InvalidArgument;
+        return NodeRx::DroppedFrame;
+    }
+    return route_decoded(link, frame, now_ms, out);
+}
+
+NodeRx Node::route_decoded(NodeLinkSlot& link, const DecodedFrame& decoded,
+                           std::uint64_t now_ms, ReceivedMessage* out) noexcept {
+    const bool initiator_live =
+        &link == &link0_ && initiator_.state() != InitiatorState::Idle;
 
     if (initiator_live) {
         const InitiatorOutcome io = initiator_.on_frame(decoded, now_ms);
@@ -244,20 +294,22 @@ NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
         }
     }
 
-    if (!session_on_) {
-        return finish(
-            receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out),
-            out, now_ms);
+    if (!link.session_on_) {
+        return finish(link,
+                      link.receiver_.submit(decoded, now_ms, link.rx_buffer_,
+                                            link.rx_capacity_, out),
+                      out, now_ms);
     }
 
     std::uint8_t reply[kSessionMaxReplySize];
     const SessionOutcome outcome =
-        session_.on_frame(decoded, now_ms, reply, sizeof(reply));
-    last_session_event_ = outcome.event;
+        link.session_.on_frame(decoded, now_ms, reply, sizeof(reply));
+    link.last_session_event_ = outcome.event;
     if (outcome.reply_size != 0U) {
         // btp::Session produces the reply PAYLOAD (HELLO_RESULT /
         // SESSION_CLOSE_RESULT); the node frames it and puts it on the wire,
         // cleartext -- the handshake bootstraps the session before any key.
+        // Not counted in frames_tx_ (bootstrap traffic, see enable_status()).
         const std::uint16_t reply_object =
             outcome.event == SessionEvent::SessionClosed
                 ? object_id::kSessionCloseResult
@@ -265,8 +317,9 @@ NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
         const LogicalMessage reply_msg{
             MessageType::Control, reply_object, resolve_now(0U) * 1000ULL,
             {reply, outcome.reply_size}};
-        endpoint_.send_logical(reply_msg, cfg_.transport, &Node::send_thunk, &cfg_,
-                               seal_scratch_, seal_scratch_cap_, nullptr, nullptr);
+        endpoint_.send_logical(reply_msg, link.cfg_->transport, &Node::send_thunk,
+                               link.cfg_, seal_scratch_, seal_scratch_cap_, nullptr,
+                               nullptr);
     }
     switch (outcome.event) {
         case SessionEvent::FrameAccepted:
@@ -281,14 +334,15 @@ NodeRx Node::route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
             return NodeRx::SessionHandled;
     }
 
-    return finish(
-        receiver_.submit(decoded, now_ms, rx_buffer_, rx_capacity_, out), out,
-        now_ms);
+    return finish(link,
+                  link.receiver_.submit(decoded, now_ms, link.rx_buffer_,
+                                        link.rx_capacity_, out),
+                  out, now_ms);
 }
 
-NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
-                    std::uint64_t now_ms) noexcept {
-    last_receive_outcome_ = outcome;
+NodeRx Node::finish(NodeLinkSlot& link, ReceiveOutcome outcome,
+                    ReceivedMessage* out, std::uint64_t now_ms) noexcept {
+    link.last_receive_outcome_ = outcome;
     switch (outcome) {
         case ReceiveOutcome::Complete:
             break;
@@ -305,21 +359,22 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
     // Complete. With a key (has_open()), open the sealed payload in place --
     // and refuse a cleartext one unless accept_cleartext() lets it through:
     // otherwise a peer could skip the key just by leaving ENCRYPTED clear.
-    if (cfg_.has_open()) {
+    NodeLink& cfg = *link.cfg_;
+    if (cfg.has_open()) {
         if ((out->header.flags & kFlagEncrypted) != 0U) {
             if (out->payload.size < kEndpointAeadTagSize ||
-                open_buffer_ == nullptr ||
-                out->payload.size - kEndpointAeadTagSize > open_capacity_ ||
-                !cfg_.open(out->header,
-                           static_cast<std::uint16_t>(out->payload.size),
-                           out->payload.data, open_buffer_)) {
-                ++dropped_open_failed_;
+                link.open_buffer_ == nullptr ||
+                out->payload.size - kEndpointAeadTagSize > link.open_capacity_ ||
+                !cfg.open(out->header,
+                          static_cast<std::uint16_t>(out->payload.size),
+                          out->payload.data, link.open_buffer_)) {
+                ++link.dropped_open_failed_;
                 return NodeRx::DroppedFrame;
             }
-            out->payload =
-                ByteView{open_buffer_, out->payload.size - kEndpointAeadTagSize};
-        } else if (!cfg_.accept_cleartext(out->header)) {
-            ++dropped_cleartext_;
+            out->payload = ByteView{link.open_buffer_,
+                                    out->payload.size - kEndpointAeadTagSize};
+        } else if (!cfg.accept_cleartext(out->header)) {
+            ++link.dropped_cleartext_;
             return NodeRx::DroppedFrame;
         }
     }
@@ -327,7 +382,7 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
     // ----- discovery the node manages itself -----
     if (serve_catalog_ != nullptr && out->header.type == MessageType::Control &&
         out->header.object_id == object_id::kManifestRequest) {
-        serve_manifest(out->header, out->payload);
+        serve_manifest(link, out->header, out->payload);
         return NodeRx::RequestServed;
     }
     if (learn_catalog_ != nullptr &&
@@ -351,14 +406,14 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
     }
 
     // ----- subscriptions the node manages itself -----
-    if (subscriptions_ != nullptr && out->header.type == MessageType::Control &&
+    if (link.subscriptions_ != nullptr && out->header.type == MessageType::Control &&
         out->header.object_id == object_id::kSubscribe) {
-        serve_subscribe(out->header, out->payload, now_ms);
+        serve_subscribe(link, out->header, out->payload, now_ms);
         return NodeRx::SubscriptionServed;
     }
-    if (subscriptions_ != nullptr && out->header.type == MessageType::Control &&
+    if (link.subscriptions_ != nullptr && out->header.type == MessageType::Control &&
         out->header.object_id == object_id::kUnsubscribe) {
-        serve_unsubscribe(out->header, out->payload);
+        serve_unsubscribe(link, out->header, out->payload);
         return NodeRx::SubscriptionServed;
     }
     if (subscription_client_ != nullptr && out->header.type == MessageType::Control &&
@@ -376,7 +431,7 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
     if (commands_ != nullptr && on_command_ != nullptr &&
         out->header.type == MessageType::Command &&
         out->header.object_id == object_id::kCommandRequest) {
-        serve_command(out->header, out->payload);
+        serve_command(link, out->header, out->payload);
         return NodeRx::CommandServed;
     }
     if (command_client_ != nullptr && out->header.type == MessageType::Command &&
@@ -402,9 +457,9 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
 // Subscriptions
 // ---------------------------------------------------------------------------
 
-void Node::serve_subscribe(const Header& request, ByteView payload,
-                           std::uint64_t now_ms) noexcept {
-    if (subscriptions_ == nullptr || serve_catalog_ == nullptr) return;
+void Node::serve_subscribe(NodeLinkSlot& link, const Header& request,
+                           ByteView payload, std::uint64_t now_ms) noexcept {
+    if (link.subscriptions_ == nullptr || serve_catalog_ == nullptr) return;
     Subscribe req = {};
     if (decode_subscribe(payload.data, payload.size, &req) != MessageError::Ok) {
         return;
@@ -418,7 +473,8 @@ void Node::serve_subscribe(const Header& request, ByteView payload,
     }
 
     SubscribeResult result = {};
-    subscriptions_->handle_subscribe(*serve_catalog_, request, req, now_ms, &result);
+    link.subscriptions_->handle_subscribe(*serve_catalog_, request, req, now_ms,
+                                         &result);
 
     std::uint8_t buffer[40];
     std::size_t written = 0U;
@@ -428,13 +484,14 @@ void Node::serve_subscribe(const Header& request, ByteView payload,
     }
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
-    reply_seal_for(request, &seal, &seal_ctx);
-    send_with(MessageType::Control, object_id::kSubscribeResult, buffer, written,
-             resolve_now(0U) * 1000ULL, seal, seal_ctx);
+    reply_seal_for(link, request, &seal, &seal_ctx);
+    transmit(link, MessageType::Control, object_id::kSubscribeResult, buffer,
+             written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
-void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
-    if (subscriptions_ == nullptr) return;
+void Node::serve_unsubscribe(NodeLinkSlot& link, const Header& request,
+                             ByteView payload) noexcept {
+    if (link.subscriptions_ == nullptr) return;
     Unsubscribe req = {};
     if (decode_unsubscribe(payload.data, payload.size, &req) != MessageError::Ok) {
         return;
@@ -445,7 +502,7 @@ void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
     }
 
     ControlResult result = {};
-    subscriptions_->handle_unsubscribe(request, req, &result);
+    link.subscriptions_->handle_unsubscribe(request, req, &result);
 
     std::uint8_t buffer[24];
     std::size_t written = 0U;
@@ -455,9 +512,9 @@ void Node::serve_unsubscribe(const Header& request, ByteView payload) noexcept {
     }
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
-    reply_seal_for(request, &seal, &seal_ctx);
-    send_with(MessageType::Control, object_id::kUnsubscribeResult, buffer, written,
-             resolve_now(0U) * 1000ULL, seal, seal_ctx);
+    reply_seal_for(link, request, &seal, &seal_ctx);
+    transmit(link, MessageType::Control, object_id::kUnsubscribeResult, buffer,
+             written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
@@ -476,15 +533,11 @@ std::uint32_t Node::subscribe(std::uint32_t peer_source_id, std::uint32_t peer_b
         &written);
     if (local_id == 0U) return 0U;
 
-    const LogicalMessage message{MessageType::Control, object_id::kSubscribe,
-                                 now_ms * 1000ULL, {buffer, written}};
     // A send failure here is rare (the frame fit at subscribe() time) and not
     // fatal: the slot stays Pending and simply times out via expire(), the
     // same fail-safe as any other lost frame.
-    endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                   &Node::send_thunk, &cfg_, seal_scratch_,
-                                   seal_scratch_cap_, current_seal(),
-                                   current_seal_ctx());
+    transmit_reserved(link0_, sequence, MessageType::Control, object_id::kSubscribe,
+                      buffer, written, now_ms * 1000ULL);
     return local_id;
 }
 
@@ -500,12 +553,9 @@ bool Node::unsubscribe(std::uint32_t local_id) noexcept {
                                            &written)) {
         return false;
     }
-    const LogicalMessage message{MessageType::Control, object_id::kUnsubscribe,
-                                 resolve_now(0U) * 1000ULL, {buffer, written}};
-    return endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                          &Node::send_thunk, &cfg_, seal_scratch_,
-                                          seal_scratch_cap_, current_seal(),
-                                          current_seal_ctx());
+    return transmit_reserved(link0_, sequence, MessageType::Control,
+                             object_id::kUnsubscribe, buffer, written,
+                             resolve_now(0U) * 1000ULL);
 }
 
 void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
@@ -523,12 +573,8 @@ void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
                                          &written)) {
             break;  // should not happen -- next_renewal_due() just found it Active
         }
-        const LogicalMessage message{MessageType::Control, object_id::kSubscribe,
-                                     now_ms * 1000ULL, {buffer, written}};
-        endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                       &Node::send_thunk, &cfg_, seal_scratch_,
-                                       seal_scratch_cap_, current_seal(),
-                                       current_seal_ctx());
+        transmit_reserved(link0_, sequence, MessageType::Control,
+                          object_id::kSubscribe, buffer, written, now_ms * 1000ULL);
     }
 }
 
@@ -536,7 +582,8 @@ void Node::drain_subscription_renewals(std::uint64_t now_ms) noexcept {
 // Commands
 // ---------------------------------------------------------------------------
 
-void Node::serve_command(const Header& request, ByteView payload) noexcept {
+void Node::serve_command(NodeLinkSlot& link, const Header& request,
+                         ByteView payload) noexcept {
     if (commands_ == nullptr || on_command_ == nullptr ||
         scratch_buffer_ == nullptr) {
         return;
@@ -570,8 +617,8 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
             // send now, the slot stays Reserved (a retransmission in the
             // meantime classifies DuplicateInFlight and is dropped).
             if (!outcome.pending) {
-                emit_command_result(request, req.action_id, req.action_version,
-                                    outcome, slot);
+                emit_command_result(link, request, req.action_id,
+                                    req.action_version, outcome, slot);
             }
             break;
         }
@@ -580,20 +627,21 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
             // exact stored result, do not run the action again.
             EndpointSealFn seal = nullptr;
             void* seal_ctx = nullptr;
-            reply_seal_for(request, &seal, &seal_ctx);
-            send_with(MessageType::Command, object_id::kCommandResult, stored.data,
-                     stored.size, resolve_now(0U) * 1000ULL, seal, seal_ctx);
+            reply_seal_for(link, request, &seal, &seal_ctx);
+            transmit(link, MessageType::Command, object_id::kCommandResult,
+                     stored.data, stored.size, resolve_now(0U) * 1000ULL, seal,
+                     seal_ctx);
             break;
         }
         case DedupVerdict::DuplicateInFlight:
             break;  // still executing -- drop, the peer will retry
         case DedupVerdict::Conflict:
-            emit_command_reject(request, req.action_id, req.action_version,
+            emit_command_reject(link, request, req.action_id, req.action_version,
                                 ResultStatus::Rejected, ResultError::RequestConflict);
             break;
         case DedupVerdict::Evicted:
         case DedupVerdict::CapacityExhausted:
-            emit_command_reject(request, req.action_id, req.action_version,
+            emit_command_reject(link, request, req.action_id, req.action_version,
                                 ResultStatus::Busy, ResultError::CapacityExhausted);
             break;
         case DedupVerdict::InvalidArgument:
@@ -601,7 +649,8 @@ void Node::serve_command(const Header& request, ByteView payload) noexcept {
     }
 }
 
-bool Node::emit_command_result(const Header& request, std::uint16_t action_id,
+bool Node::emit_command_result(NodeLinkSlot& link, const Header& request,
+                               std::uint16_t action_id,
                                std::uint16_t action_version,
                                const NodeActionOutcome& outcome,
                                std::size_t slot) noexcept {
@@ -637,20 +686,21 @@ bool Node::emit_command_result(const Header& request, std::uint16_t action_id,
     }
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
-    reply_seal_for(request, &seal, &seal_ctx);
-    send_with(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
-             resolve_now(0U) * 1000ULL, seal, seal_ctx);
+    reply_seal_for(link, request, &seal, &seal_ctx);
+    transmit(link, MessageType::Command, object_id::kCommandResult, scratch_buffer_,
+             written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
     return true;
 }
 
 bool Node::complete_command(const NodeCommandTicket& ticket,
                             const NodeActionOutcome& outcome) noexcept {
     if (!ticket.valid() || commands_ == nullptr) return false;
-    return emit_command_result(ticket.request, ticket.action_id,
+    return emit_command_result(link0_, ticket.request, ticket.action_id,
                                ticket.action_version, outcome, ticket.slot);
 }
 
-void Node::emit_command_reject(const Header& request, std::uint16_t action_id,
+void Node::emit_command_reject(NodeLinkSlot& link, const Header& request,
+                               std::uint16_t action_id,
                                std::uint16_t action_version, ResultStatus status,
                                ResultError error) noexcept {
     CommandResult result = {};
@@ -669,9 +719,9 @@ void Node::emit_command_reject(const Header& request, std::uint16_t action_id,
     }
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
-    reply_seal_for(request, &seal, &seal_ctx);
-    send_with(MessageType::Command, object_id::kCommandResult, scratch_buffer_, written,
-             resolve_now(0U) * 1000ULL, seal, seal_ctx);
+    reply_seal_for(link, request, &seal, &seal_ctx);
+    transmit(link, MessageType::Command, object_id::kCommandResult, scratch_buffer_,
+             written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
 std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
@@ -692,14 +742,11 @@ std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boo
         scratch_buffer_, scratch_capacity_, &written);
     if (local_id == 0U) return 0U;
 
-    const LogicalMessage message{MessageType::Command, object_id::kCommandRequest,
-                                 now_ms * 1000ULL, {scratch_buffer_, written}};
     // A send failure here is rare and not fatal: the slot stays Pending and
     // simply times out via expire(), the same fail-safe as any lost frame.
-    endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                   &Node::send_thunk, &cfg_, seal_scratch_,
-                                   seal_scratch_cap_, current_seal(),
-                                   current_seal_ctx());
+    transmit_reserved(link0_, sequence, MessageType::Command,
+                      object_id::kCommandRequest, scratch_buffer_, written,
+                      now_ms * 1000ULL);
     return local_id;
 }
 
@@ -716,7 +763,7 @@ void Node::enable_status(std::uint32_t period_ms) noexcept {
 void Node::emit_status(std::uint64_t now_ms) noexcept {
     if (scratch_buffer_ == nullptr) return;
 
-    const Receiver::Stats rx = receiver_.stats();
+    const Receiver::Stats rx = link0_.receiver_.stats();
     StatusV1 status = {};
     status.uptime_us = now_ms >= status_started_ms_
                            ? (now_ms - status_started_ms_) * 1000ULL
@@ -724,15 +771,15 @@ void Node::emit_status(std::uint64_t now_ms) noexcept {
     status.frames_rx = rx.completed;
     status.frames_tx = frames_tx_;
     status.crc_errors = static_cast<std::uint64_t>(rx.dropped_crc) +
-                        session_path_dropped_crc_;
+                        link0_.session_path_dropped_crc_;
     status.decode_errors = static_cast<std::uint64_t>(rx.dropped_decode) +
-                           session_path_dropped_decode_;
+                           link0_.session_path_dropped_decode_;
     status.reassembly_completed = rx.completed;
     status.reassembly_timeouts = rx.reassembly_timeouts;
     status.reassembly_rejected = rx.dropped_reassembly;
     status.frames_dropped = status.crc_errors + status.decode_errors +
-                            status.reassembly_rejected + dropped_cleartext_ +
-                            dropped_open_failed_;
+                            status.reassembly_rejected +
+                            link0_.dropped_cleartext_ + link0_.dropped_open_failed_;
     status.command_duplicates =
         commands_ != nullptr ? commands_->stats().replayed : 0U;
     status.telemetry_dropped = 0U;  // not tracked separately yet
@@ -743,14 +790,15 @@ void Node::emit_status(std::uint64_t now_ms) noexcept {
     // subscribed right now does.
     TopicStatusRecord topics[kMaxStatusTopics];
     std::size_t topic_count = 0U;
+    const SubscriptionTable* subscriptions = link0_.subscriptions_;
     if (on_status_topics_ != nullptr && serve_catalog_ != nullptr &&
-        subscriptions_ != nullptr) {
+        subscriptions != nullptr) {
         const std::size_t catalog_topics = serve_catalog_->topic_count();
         for (std::size_t i = 0U;
              i < catalog_topics && topic_count < kMaxStatusTopics; ++i) {
             const CatalogTopic* topic = serve_catalog_->topic_at(i);
             if (topic == nullptr) continue;
-            const std::size_t subs = subscriptions_->subscriber_count(topic->topic_id);
+            const std::size_t subs = subscriptions->subscriber_count(topic->topic_id);
             if (subs == 0U) continue;
 
             TopicStatusRecord& record = topics[topic_count];
@@ -758,7 +806,7 @@ void Node::emit_status(std::uint64_t now_ms) noexcept {
             record.topic_id = topic->topic_id;
             record.subscriber_count = static_cast<std::uint16_t>(subs);
             record.effective_rate_millihz =
-                subscriptions_->aggregate_rate_millihz(topic->topic_id);
+                subscriptions->aggregate_rate_millihz(topic->topic_id);
             record.bytes_total = 0U;
             record.samples_dropped_total = 0U;
             on_status_topics_(on_status_topics_ctx_, *this, topic->topic_id,
@@ -824,9 +872,10 @@ void Node::serve_catalog(Catalog* catalog, std::uint8_t role,
     }
 }
 
-void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
-                         std::uint8_t status, std::uint8_t flags,
-                         std::uint16_t error_code, bool with_topics) noexcept {
+void Node::emit_manifest(NodeLinkSlot& link, const Header& request,
+                         const RequestRef& reply_to, std::uint8_t status,
+                         std::uint8_t flags, std::uint16_t error_code,
+                         bool with_topics) noexcept {
     if (serve_catalog_ == nullptr || scratch_buffer_ == nullptr) {
         return;
     }
@@ -882,12 +931,13 @@ void Node::emit_manifest(const Header& request, const RequestRef& reply_to,
 
     EndpointSealFn seal = nullptr;
     void* seal_ctx = nullptr;
-    reply_seal_for(request, &seal, &seal_ctx);
-    send_with(MessageType::Control, object_id::kManifestData, scratch_buffer_,
+    reply_seal_for(link, request, &seal, &seal_ctx);
+    transmit(link, MessageType::Control, object_id::kManifestData, scratch_buffer_,
              written, resolve_now(0U) * 1000ULL, seal, seal_ctx);
 }
 
-void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
+void Node::serve_manifest(NodeLinkSlot& link, const Header& request,
+                          ByteView payload) noexcept {
     if (serve_catalog_ == nullptr) return;
 
     ManifestRequest req = {};
@@ -906,7 +956,7 @@ void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
     reply_to.reply_to_sequence = request.sequence;
 
     if (req.target_boot_id != 0U && req.target_boot_id != cfg_.boot_id) {
-        emit_manifest(request, reply_to,
+        emit_manifest(link, request, reply_to,
                       static_cast<std::uint8_t>(ResultStatus::Rejected),
                       0U,
                       static_cast<std::uint16_t>(ResultError::StaleTargetBoot),
@@ -915,12 +965,13 @@ void Node::serve_manifest(const Header& request, ByteView payload) noexcept {
     }
     if (req.known_config_revision != 0U &&
         req.known_config_revision == serve_catalog_->config_revision()) {
-        emit_manifest(request, reply_to,
+        emit_manifest(link, request, reply_to,
                       static_cast<std::uint8_t>(ResultStatus::Success),
                       kManifestNotModified, 0U, /*with_topics=*/false);
         return;
     }
-    emit_manifest(request, reply_to, static_cast<std::uint8_t>(ResultStatus::Success),
+    emit_manifest(link, request, reply_to,
+                  static_cast<std::uint8_t>(ResultStatus::Success),
                   kManifestCatalogComplete, 0U, /*with_topics=*/true);
 }
 
@@ -932,15 +983,16 @@ bool Node::announce_catalog() noexcept {
     // -- reply_seal_for() falls through to cfg.seal/cfg.seal_ctx for a
     // default-constructed Header exactly as it would for any other source_id
     // a reply_seal callback does not recognise.
-    emit_manifest(Header{}, RequestRef{}, static_cast<std::uint8_t>(ResultStatus::Success),
+    emit_manifest(link0_, Header{}, RequestRef{},
+                  static_cast<std::uint8_t>(ResultStatus::Success),
                   kManifestCatalogComplete, 0U, /*with_topics=*/true);
     return true;
 }
 
 bool Node::publish(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
                    std::uint64_t timestamp_us) noexcept {
-    return publish_with(topic_id, fill, ctx, timestamp_us, current_seal(),
-                        current_seal_ctx());
+    return publish_with(topic_id, fill, ctx, timestamp_us, current_seal(link0_),
+                        current_seal_ctx(link0_));
 }
 
 bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
@@ -966,8 +1018,8 @@ bool Node::publish_with(std::uint16_t topic_id, NodeFillFn fill, void* ctx,
 
 bool Node::publish_named(std::uint16_t topic_id, NodeNamedFillFn fill,
                          void* ctx, std::uint64_t timestamp_us) noexcept {
-    return publish_named_with(topic_id, fill, ctx, timestamp_us, current_seal(),
-                              current_seal_ctx());
+    return publish_named_with(topic_id, fill, ctx, timestamp_us,
+                              current_seal(link0_), current_seal_ctx(link0_));
 }
 
 bool Node::publish_named_with(std::uint16_t topic_id, NodeNamedFillFn fill,
@@ -1016,18 +1068,19 @@ bool Node::on_publish(std::uint16_t topic_id, NodeNamedFillFn fill,
 }
 
 std::size_t Node::publish_subscribed_topics(std::uint64_t now_ms) noexcept {
-    if (publish_slots_ == nullptr || subscriptions_ == nullptr) return 0U;
+    SubscriptionTable* subscriptions = link0_.subscriptions_;
+    if (publish_slots_ == nullptr || subscriptions == nullptr) return 0U;
 
     std::size_t published = 0U;
     for (std::size_t i = 0U; i < publish_slot_count_; ++i) {
         const PublishRegistration& reg = publish_slots_[i];
-        if (!subscriptions_->due(reg.topic_id, now_ms)) continue;
+        if (!subscriptions->due(reg.topic_id, now_ms)) continue;
         // Skipped, not counted as an error, when reg.topic_id is not (or no
         // longer) in the served catalogue -- same "unknown topic -> false"
         // rule publish_named() itself already has; there is no separate
         // "was it even a real topic" outcome for a caller to want back here.
         if (publish_named(reg.topic_id, reg.fill, reg.ctx, now_ms * 1000ULL)) {
-            subscriptions_->note_published(reg.topic_id, now_ms);
+            subscriptions->note_published(reg.topic_id, now_ms);
             ++published;
         }
     }
@@ -1080,7 +1133,7 @@ bool Node::connect(const Hello& local, std::uint64_t now_ms,
     const LogicalMessage message{MessageType::Control, object_id::kHello,
                                  now_ms * 1000ULL, {hello, written}};
     if (!endpoint_.send_logical_reserved(sequence, message, cfg_.transport,
-                                         &Node::send_thunk, &cfg_,
+                                         &Node::send_thunk, link0_.cfg_,
                                          seal_scratch_, seal_scratch_cap_,
                                          nullptr, nullptr)) {
         initiator_.reset();  // the HELLO never left -- undo the AwaitingResult
@@ -1130,22 +1183,22 @@ bool Node::disconnect(std::uint64_t now_ms, std::uint8_t reason,
 
 void Node::enable_session(const Hello& local,
                           std::uint64_t hello_deadline_ms) noexcept {
-    session_ = Session(local, hello_deadline_ms);
-    session_on_ = true;
+    link0_.session_ = Session(local, hello_deadline_ms);
+    link0_.session_on_ = true;
 }
 
 void Node::arm_session() noexcept { arm_session(resolve_now(0U)); }
 
 void Node::arm_session(std::uint64_t now_ms) noexcept {
-    if (session_on_) session_.arm(now_ms);
+    if (link0_.session_on_) link0_.session_.arm(now_ms);
 }
 
 SessionEvent Node::tick() noexcept { return tick(resolve_now(0U)); }
 
 SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
-    receiver_.expire(now_ms);
+    link0_.receiver_.expire(now_ms);
     last_initiator_event_ = initiator_.poll(now_ms).event;
-    if (subscriptions_ != nullptr) subscriptions_->expire(now_ms);
+    if (link0_.subscriptions_ != nullptr) link0_.subscriptions_->expire(now_ms);
     if (subscription_client_ != nullptr) {
         subscription_client_->expire(now_ms);
         drain_subscription_renewals(now_ms);
@@ -1161,19 +1214,19 @@ SessionEvent Node::tick(std::uint64_t now_ms) noexcept {
         emit_status(now_ms);
         status_last_ms_ = now_ms;
     }
-    if (!session_on_) return SessionEvent::None;
-    const SessionOutcome outcome = session_.poll(now_ms);
-    last_session_event_ = outcome.event;
+    if (!link0_.session_on_) return SessionEvent::None;
+    const SessionOutcome outcome = link0_.session_.poll(now_ms);
+    link0_.last_session_event_ = outcome.event;
     return outcome.event;
 }
 
 Node::Stats Node::stats() const noexcept {
     Stats s{};
-    s.rx = receiver_.stats();
-    s.session_path_dropped_crc = session_path_dropped_crc_;
-    s.session_path_dropped_decode = session_path_dropped_decode_;
-    s.dropped_cleartext = dropped_cleartext_;
-    s.dropped_open_failed = dropped_open_failed_;
+    s.rx = link0_.receiver_.stats();
+    s.session_path_dropped_crc = link0_.session_path_dropped_crc_;
+    s.session_path_dropped_decode = link0_.session_path_dropped_decode_;
+    s.dropped_cleartext = link0_.dropped_cleartext_;
+    s.dropped_open_failed = link0_.dropped_open_failed_;
     return s;
 }
 

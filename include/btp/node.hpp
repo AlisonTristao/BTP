@@ -240,16 +240,17 @@ using NodeActionFn = void (*)(void* ctx, std::uint16_t action_id,
 // method on the Node you're mid-constructing from your own mem-initializers
 // or constructor body -- store, don't dispatch, same rule the Node's own
 // constructor follows (see Node::Node's comment).
-class NodeConfig {
+//
+// NodeConfig is split in two since 2.47.0. NodeLink below is everything that
+// belongs to ONE path to a peer -- how a frame leaves (send / transport) and
+// the key policy on it (seal / open / accept_cleartext / reply_seal).
+// NodeConfig adds what belongs to the node as a whole (identity, clock,
+// terminal / command handlers). A single-link node sees no difference: it
+// still inherits NodeConfig and overrides the same methods. A node with
+// several links (Node::attach_link()) gives each extra link its own NodeLink.
+class NodeLink {
 public:
-    virtual ~NodeConfig() = default;
-
-    // Identity. Both non-zero (BTP reserves 0 for each); source_id is usually
-    // derived from the MAC, boot_id changes every reboot. Plain data, not
-    // behaviour -- set in your constructor (or any time before begin(), see
-    // above), no override needed.
-    std::uint32_t source_id = 0U;
-    std::uint32_t boot_id = 0U;
+    virtual ~NodeLink() = default;
 
     // NOT "which transport" -- the node never touches your link. It is only
     // the frame/payload size ceiling the fragmenter targets, plus one policy
@@ -271,15 +272,6 @@ public:
     // Override has_X() alongside X() -- Node calls has_X() first and only
     // calls X() when it says true, so a subclass that has nothing to add can
     // leave both alone. ----
-
-    // millis since boot -- millis() / esp_timer_get_time() / 1000 on an MCU,
-    // QElapsedTimer::elapsed() under Qt, a counter in a test. May be read
-    // from a timer ISR that increments a word; the node's own methods must
-    // NOT be called from an ISR (btp::Receiver / btp::Session are not
-    // internally synchronised, by design). has_clock() false (the default)
-    // means you pass now_ms explicitly to receive() / tick() / etc.
-    virtual bool has_clock() const noexcept { return false; }
-    virtual std::uint64_t clock() { return 0U; }
 
     // Encrypts ONE logical payload before it is fragmented; the mirror of
     // open() below. has_seal() false (the default) means send() is
@@ -329,6 +321,55 @@ public:
         return false;
     }
 
+    // Picks the seal for ONE automatic reply the node is about to send: a
+    // SUBSCRIBE_RESULT / UNSUBSCRIBE_RESULT, a COMMAND_RESULT (a fresh one or
+    // a DuplicateComplete replay), or a MANIFEST_DATA. `request_header` is
+    // the ORIGINAL request's header -- source_id names who actually asked,
+    // unlike the reply's own header, which always carries this node's own
+    // identity, so this is the one place a hub-shaped node (several keys,
+    // one per relayed peer or channel) can pick the matching key per reply
+    // instead of one key for every automatic send. Leave both
+    // `*out_seal`/`*out_seal_ctx` at their nullptr default (this method's own
+    // default body already does) to fall through to has_seal()/seal(); set
+    // `*out_seal` to send this ONE reply in the clear regardless, or to any
+    // OTHER raw EndpointSealFn (not necessarily this object's own seal() --
+    // that is what buys a hub several independently selectable keys without
+    // several NodeConfig objects).
+    //
+    // Does NOT apply to send() / send_with() / publish() / publish_named()
+    // -- those are the caller's own sends, already covered by send_with()'s
+    // explicit seal argument -- nor to an INITIATOR's own outgoing requests
+    // (connect() / subscribe() / command() and their renewals), which have
+    // no "original request" to classify by and always use
+    // has_seal()/seal().
+    virtual void reply_seal(const Header& request_header, EndpointSealFn* out_seal,
+                            void** out_seal_ctx) {
+        (void)request_header;
+        *out_seal = nullptr;
+        *out_seal_ctx = nullptr;
+    }
+};
+
+// The link a Node is built with (link 0) plus everything that belongs to the
+// node as a whole -- see NodeLink's own comment above for the split.
+class NodeConfig : public NodeLink {
+public:
+    // Identity. Both non-zero (BTP reserves 0 for each); source_id is usually
+    // derived from the MAC, boot_id changes every reboot. Plain data, not
+    // behaviour -- set in your constructor (or any time before begin(), see
+    // above), no override needed. One identity for every link of the node.
+    std::uint32_t source_id = 0U;
+    std::uint32_t boot_id = 0U;
+
+    // millis since boot -- millis() / esp_timer_get_time() / 1000 on an MCU,
+    // QElapsedTimer::elapsed() under Qt, a counter in a test. May be read
+    // from a timer ISR that increments a word; the node's own methods must
+    // NOT be called from an ISR (btp::Receiver / btp::Session are not
+    // internally synchronised, by design). has_clock() false (the default)
+    // means you pass now_ms explicitly to receive() / tick() / etc.
+    virtual bool has_clock() const noexcept { return false; }
+    virtual std::uint64_t clock() { return 0U; }
+
     // Called by receive() for a TERMINAL_IN / TERMINAL_OUT frame -- see
     // Node::on_terminal()'s own comment for the parameters. has_terminal()
     // false (the default) means the frame comes back as NodeRx::Complete for
@@ -361,34 +402,6 @@ public:
         (void)parameters;
         (void)outcome;
         (void)ticket;
-    }
-
-    // Picks the seal for ONE automatic reply the node is about to send: a
-    // SUBSCRIBE_RESULT / UNSUBSCRIBE_RESULT, a COMMAND_RESULT (a fresh one or
-    // a DuplicateComplete replay), or a MANIFEST_DATA. `request_header` is
-    // the ORIGINAL request's header -- source_id names who actually asked,
-    // unlike the reply's own header, which always carries this node's own
-    // identity, so this is the one place a hub-shaped node (several keys,
-    // one per relayed peer or channel) can pick the matching key per reply
-    // instead of one key for every automatic send. Leave both
-    // `*out_seal`/`*out_seal_ctx` at their nullptr default (this method's own
-    // default body already does) to fall through to has_seal()/seal(); set
-    // `*out_seal` to send this ONE reply in the clear regardless, or to any
-    // OTHER raw EndpointSealFn (not necessarily this object's own seal() --
-    // that is what buys a hub several independently selectable keys without
-    // several NodeConfig objects).
-    //
-    // Does NOT apply to send() / send_with() / publish() / publish_named()
-    // -- those are the caller's own sends, already covered by send_with()'s
-    // explicit seal argument -- nor to an INITIATOR's own outgoing requests
-    // (connect() / subscribe() / command() and their renewals), which have
-    // no "original request" to classify by and always use
-    // has_seal()/seal().
-    virtual void reply_seal(const Header& request_header, EndpointSealFn* out_seal,
-                            void** out_seal_ctx) {
-        (void)request_header;
-        *out_seal = nullptr;
-        *out_seal_ctx = nullptr;
     }
 };
 
@@ -432,6 +445,48 @@ enum class NodeRx : std::uint8_t {
 };
 
 const char* node_rx_string(NodeRx rx) noexcept;
+
+// ---------------------------------------------------------------------------
+// NodeLinkSlot -- the per-link state of a Node
+// ---------------------------------------------------------------------------
+//
+// Everything a Node keeps for ONE link: the reassembly (btp::Receiver and the
+// buffers a completed message is copied / opened into), the optional
+// responder session, the subscription table peers on this link subscribe
+// through, and the per-link counters. Opaque -- only Node reads or writes it.
+// A Node owns the slot of its link 0 itself; StaticNode<> owns the slots of
+// its extra links. The buffers stay the caller's, same rules as the Node
+// constructor's own rx_buffer / open_buffer.
+class NodeLinkSlot {
+public:
+    NodeLinkSlot(ReassemblySlot* slot_array, const ReassemblyStorage* storage,
+                 std::size_t slot_count, std::uint64_t reassembly_timeout_ms,
+                 const TransportLimits& transport, std::uint8_t* rx_buffer,
+                 std::size_t rx_capacity, std::uint8_t* open_buffer,
+                 std::size_t open_capacity) noexcept;
+
+    NodeLinkSlot(const NodeLinkSlot&) = delete;
+    NodeLinkSlot& operator=(const NodeLinkSlot&) = delete;
+
+private:
+    friend class Node;
+
+    NodeLink* cfg_;  // nullptr until the link is attached (link 0: always set)
+    Receiver receiver_;
+    std::uint8_t* rx_buffer_;
+    std::size_t rx_capacity_;
+    std::uint8_t* open_buffer_;
+    std::size_t open_capacity_;
+    ReceiveOutcome last_receive_outcome_;  // see Node::receive_outcome()
+    Session session_;       // placeholder HELLO until enable_session()
+    bool session_on_;
+    SessionEvent last_session_event_;
+    std::uint32_t session_path_dropped_crc_;
+    std::uint32_t session_path_dropped_decode_;
+    std::uint32_t dropped_cleartext_;
+    std::uint32_t dropped_open_failed_;
+    SubscriptionTable* subscriptions_;  // nullptr until enable_subscriptions()
+};
 
 // ---------------------------------------------------------------------------
 // Node
@@ -603,7 +658,7 @@ public:
     // from whatever receive() last actually reached btp::Receiver) when the
     // most recent NodeRx was anything else -- a session/initiator/
     // subscription/command/catalog/terminal outcome never touches this.
-    ReceiveOutcome receive_outcome() const noexcept { return last_receive_outcome_; }
+    ReceiveOutcome receive_outcome() const noexcept { return link0_.last_receive_outcome_; }
 
     // ---- session responder (opt-in) -------------------------------------
     // `local` is this peer's HELLO advertisement (role, versions, limits,
@@ -612,7 +667,7 @@ public:
     // that bound -- only the negotiated watchdog then applies). Copied in.
     void enable_session(const Hello& local,
                         std::uint64_t hello_deadline_ms) noexcept;
-    bool session_enabled() const noexcept { return session_on_; }
+    bool session_enabled() const noexcept { return link0_.session_on_; }
 
     // Idle -> AwaitingHello. Call once the link is up (or after a console ENTER
     // line). No-op if no session is enabled.
@@ -626,7 +681,7 @@ public:
     SessionEvent tick(std::uint64_t now_ms) noexcept;
 
     // The session event the most recent receive() / tick() produced.
-    SessionEvent session_event() const noexcept { return last_session_event_; }
+    SessionEvent session_event() const noexcept { return link0_.last_session_event_; }
 
     // ---- session initiator (opt-in via connect()) -------------------------
     // The OTHER end of a session from enable_session() above: this node
@@ -682,10 +737,12 @@ public:
     // RESPONDER: grant subscriptions on THIS node's served catalogue (needs
     // serve_catalog() too -- the table validates against it). nullptr detaches.
     void enable_subscriptions(SubscriptionTable* table) noexcept {
-        subscriptions_ = table;
+        link0_.subscriptions_ = table;
     }
-    SubscriptionTable* subscriptions() noexcept { return subscriptions_; }
-    const SubscriptionTable* subscriptions() const noexcept { return subscriptions_; }
+    SubscriptionTable* subscriptions() noexcept { return link0_.subscriptions_; }
+    const SubscriptionTable* subscriptions() const noexcept {
+        return link0_.subscriptions_;
+    }
 
     // INITIATOR: hold subscriptions on a peer. nullptr detaches.
     void enable_subscription_client(SubscriptionClient* client) noexcept {
@@ -974,11 +1031,13 @@ public:
     // ---- escape hatches -----------------------------------------------------
     Endpoint& endpoint() noexcept { return endpoint_; }
     const Endpoint& endpoint() const noexcept { return endpoint_; }
-    Receiver& receiver() noexcept { return receiver_; }
-    const Receiver& receiver() const noexcept { return receiver_; }
-    Session* session() noexcept { return session_on_ ? &session_ : nullptr; }
+    Receiver& receiver() noexcept { return link0_.receiver_; }
+    const Receiver& receiver() const noexcept { return link0_.receiver_; }
+    Session* session() noexcept {
+        return link0_.session_on_ ? &link0_.session_ : nullptr;
+    }
     const Session* session() const noexcept {
-        return session_on_ ? &session_ : nullptr;
+        return link0_.session_on_ ? &link0_.session_ : nullptr;
     }
     // Always present (Idle until connect()), unlike session() above.
     SessionInitiator& initiator() noexcept { return initiator_; }
@@ -1002,29 +1061,53 @@ public:
 
 private:
     std::uint64_t resolve_now(std::uint64_t fallback) const noexcept;
+    // Every method below that takes a NodeLinkSlot& works on THAT link: its
+    // receiver / session / subscriptions, and every reply it sends leaves
+    // through that link's own send() / seal policy -- a request is always
+    // answered on the link it arrived on.
+    //
     // The shared tail of every receive() overload: feed one already-decoded
     // frame to the initiator, then the responder session, then reassembly, and
     // finish() the outcome. The datagram overloads btp::decode() into a
     // DecodedFrame first; the DecodedFrame overloads skip straight here.
-    NodeRx route_decoded(const DecodedFrame& decoded, std::uint64_t now_ms,
-                         ReceivedMessage* out) noexcept;
-    NodeRx finish(ReceiveOutcome outcome, ReceivedMessage* out,
-                 std::uint64_t now_ms) noexcept;
-    // cfg_.reply_seal()'s pick, or cfg_.has_seal()/cfg_.seal() when it
-    // leaves *out_seal null -- see NodeConfig::reply_seal()'s own comment.
+    NodeRx receive_datagram(NodeLinkSlot& link, const std::uint8_t* datagram,
+                            std::size_t size, std::uint64_t now_ms,
+                            ReceivedMessage* out) noexcept;
+    NodeRx receive_frame(NodeLinkSlot& link, const DecodedFrame& frame,
+                         std::uint64_t now_ms, ReceivedMessage* out) noexcept;
+    NodeRx route_decoded(NodeLinkSlot& link, const DecodedFrame& decoded,
+                         std::uint64_t now_ms, ReceivedMessage* out) noexcept;
+    NodeRx finish(NodeLinkSlot& link, ReceiveOutcome outcome, ReceivedMessage* out,
+                  std::uint64_t now_ms) noexcept;
+    // One logical message out through `link` -- the one place Endpoint's
+    // send_logical() is called with a link's send() / transport.
+    bool transmit(NodeLinkSlot& link, MessageType type, std::uint16_t object_id,
+                  const std::uint8_t* payload, std::size_t size,
+                  std::uint64_t timestamp_us, EndpointSealFn seal,
+                  void* seal_ctx) noexcept;
+    bool transmit_reserved(NodeLinkSlot& link, std::uint32_t sequence,
+                           MessageType type, std::uint16_t object_id,
+                           const std::uint8_t* payload, std::size_t size,
+                           std::uint64_t timestamp_us) noexcept;
+    // link.cfg_->reply_seal()'s pick, or its has_seal()/seal() when it
+    // leaves *out_seal null -- see NodeLink::reply_seal()'s own comment.
     // Every automatic-reply send site below calls this once, right before
-    // send_with(), instead of using send()/cfg_.seal() directly.
-    void reply_seal_for(const Header& request, EndpointSealFn* out_seal,
-                        void** out_seal_ctx) const noexcept;
-    void serve_manifest(const Header& request, ByteView payload) noexcept;
-    void emit_manifest(const Header& request, const RequestRef& reply_to,
-                       std::uint8_t status, std::uint8_t flags,
-                       std::uint16_t error_code, bool with_topics) noexcept;
-    void serve_subscribe(const Header& request, ByteView payload,
+    // transmit(), instead of using the link's seal() directly.
+    void reply_seal_for(NodeLinkSlot& link, const Header& request,
+                        EndpointSealFn* out_seal, void** out_seal_ctx) const noexcept;
+    void serve_manifest(NodeLinkSlot& link, const Header& request,
+                        ByteView payload) noexcept;
+    void emit_manifest(NodeLinkSlot& link, const Header& request,
+                       const RequestRef& reply_to, std::uint8_t status,
+                       std::uint8_t flags, std::uint16_t error_code,
+                       bool with_topics) noexcept;
+    void serve_subscribe(NodeLinkSlot& link, const Header& request, ByteView payload,
                          std::uint64_t now_ms) noexcept;
-    void serve_unsubscribe(const Header& request, ByteView payload) noexcept;
+    void serve_unsubscribe(NodeLinkSlot& link, const Header& request,
+                           ByteView payload) noexcept;
     void drain_subscription_renewals(std::uint64_t now_ms) noexcept;
-    void serve_command(const Header& request, ByteView payload) noexcept;
+    void serve_command(NodeLinkSlot& link, const Header& request,
+                       ByteView payload) noexcept;
     // Returns false, sending nothing, when commands_->record_result() itself
     // refuses `slot` (WrongOrder -- already completed by an earlier call, the
     // way a spent/reused NodeCommandTicket would; or InvalidArgument -- an
@@ -1032,19 +1115,20 @@ private:
     // repeated ticket. The Fresh path in serve_command() below never sees
     // false in practice (its slot is always freshly Reserved), but checks
     // the same way for the one code path either caller goes through.
-    bool emit_command_result(const Header& request, std::uint16_t action_id,
-                             std::uint16_t action_version,
+    bool emit_command_result(NodeLinkSlot& link, const Header& request,
+                             std::uint16_t action_id, std::uint16_t action_version,
                              const NodeActionOutcome& outcome,
                              std::size_t slot) noexcept;
-    void emit_command_reject(const Header& request, std::uint16_t action_id,
-                             std::uint16_t action_version, ResultStatus status,
-                             ResultError error) noexcept;
+    void emit_command_reject(NodeLinkSlot& link, const Header& request,
+                             std::uint16_t action_id, std::uint16_t action_version,
+                             ResultStatus status, ResultError error) noexcept;
     void emit_status(std::uint64_t now_ms) noexcept;
 
-    // Bridges from NodeConfig's virtual methods into the plain C-style
-    // function pointers btp::Endpoint / btp::Receiver themselves take (they
-    // never changed -- only what calls them did). `ctx` is always a
-    // NodeConfig* here (this node's own cfg_, or -- for command_thunk, the
+    // Bridges from NodeLink / NodeConfig's virtual methods into the plain
+    // C-style function pointers btp::Endpoint / btp::Receiver themselves take
+    // (they never changed -- only what calls them did). `ctx` is a NodeLink*
+    // for send/seal (the link the frame leaves through) and a NodeConfig*
+    // for terminal/command (this node's own cfg_, or -- for command_thunk, the
     // only one a subclass needs -- a StaticNode<>'s own cfg_ reached through
     // its own protected access). Written once, here, so no caller ever
     // writes one of these.
@@ -1054,7 +1138,7 @@ private:
                            std::uint16_t payload_size,
                            const std::uint8_t* plaintext,
                            std::uint8_t* out) noexcept;
-    // No open_thunk: cfg_.open() is never handed to Endpoint/Receiver as a
+    // No open_thunk: a link's open() is never handed to Endpoint/Receiver as a
     // callback -- finish() below calls it directly (a plain virtual
     // dispatch), unlike send()/seal(), which Endpoint calls internally
     // mid-fragmentation and therefore needs bridged to its own C-style
@@ -1074,37 +1158,23 @@ private:
                               const NodeCommandTicket& ticket) noexcept;
 
   private:
-    // cfg_.has_seal() ? &seal_thunk : nullptr, and the matching ctx -- every
-    // send-a-message call site used to write `cfg_.seal, cfg_.seal_ctx`
-    // inline; these two centralise the has_seal() check that replaced it.
-    EndpointSealFn current_seal() const noexcept;
-    void* current_seal_ctx() const noexcept;
+    // link.cfg_->has_seal() ? &seal_thunk : nullptr, and the matching ctx --
+    // centralise the has_seal() check every send-a-message call site needs.
+    static EndpointSealFn current_seal(const NodeLinkSlot& link) noexcept;
+    static void* current_seal_ctx(const NodeLinkSlot& link) noexcept;
 
     NodeConfig& cfg_;
-    std::uint8_t* rx_buffer_;
-    std::size_t rx_capacity_;
     std::uint8_t* seal_scratch_;
     std::size_t seal_scratch_cap_;
-    std::uint8_t* open_buffer_;
-    std::size_t open_capacity_;
     std::uint8_t* scratch_buffer_;
     std::size_t scratch_capacity_;
 
     Endpoint endpoint_;
-    Receiver receiver_;
-    ReceiveOutcome last_receive_outcome_;  // see receive_outcome()'s own comment
-    Session session_;       // placeholder HELLO until enable_session()
-    bool session_on_;
-    SessionEvent last_session_event_;
-    std::uint32_t session_path_dropped_crc_;
-    std::uint32_t session_path_dropped_decode_;
-    std::uint32_t dropped_cleartext_;
-    std::uint32_t dropped_open_failed_;
+    NodeLinkSlot link0_;  // the link cfg_ describes
 
     SessionInitiator initiator_;  // Idle until connect()
     InitiatorEvent last_initiator_event_;
 
-    SubscriptionTable* subscriptions_;        // nullptr until enable_subscriptions()
     SubscriptionClient* subscription_client_;  // nullptr until enable_subscription_client()
     SubscriptionEvent last_subscription_event_;
     SubscriptionOutcome last_subscription_outcome_;
