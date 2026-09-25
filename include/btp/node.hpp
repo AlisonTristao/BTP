@@ -433,6 +433,18 @@ public:
         *out_seal = nullptr;
         *out_seal_ctx = nullptr;
     }
+
+    // Whether this node's OWN MANIFEST_REQUEST to `target_source_id`
+    // (request_manifest() / request_manifest_cached(), and the re-request the
+    // manifest cache issues after an eviction) is sealed with has_seal() /
+    // seal() -- true, the default -- or sent in the clear. The case for false
+    // (library 2.48.0): a client behind a hub whose manifests are answered by
+    // the HUB's own manifest cache, which does not hold the end-to-end key
+    // the rest of that client's traffic is sealed with.
+    virtual bool seal_manifest_request(std::uint32_t target_source_id) {
+        (void)target_source_id;
+        return true;
+    }
 };
 
 // The link a Node is built with (link 0) plus everything that belongs to the

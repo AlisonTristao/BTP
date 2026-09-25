@@ -65,6 +65,7 @@ Later changes:
   `ManifestRejected`, `manifest_outcome()`), `NodeConfig::has_manifest_cache()`
   / `manifest_load()` / `manifest_store()` / `manifest_evict()`,
   `Node::request_manifest_cached()`, opt-in `set_manifest_skip_on_hello()`,
+  `NodeLink::seal_manifest_request()` (a hub client's cleartext request),
   `Node::connected_peer_uuid()` / `SessionInitiator::peer_uuid()`,
   `Catalog::set_config_revision_auto()` / `content_revision()`. A rejected
   `MANIFEST_DATA` no longer empties a learn catalogue. Source compatible.

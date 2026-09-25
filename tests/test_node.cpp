@@ -3315,6 +3315,40 @@ void test_auto_revision_is_served() {
     CHECK((h.flags & btp::kManifestNotModified) != 0U);
 }
 
+// A client behind a hub asks the HUB's manifest cache, which has no
+// end-to-end key: seal_manifest_request() false keeps that one request in the
+// clear while everything else on the keyed link stays sealed.
+struct ClearManifestConfig : TestConfig {
+    bool seal_manifests = true;
+    bool seal_manifest_request(std::uint32_t) override { return seal_manifests; }
+};
+
+void test_seal_manifest_request_hook() {
+    Sink tx;
+    ClearManifestConfig cfg;
+    static_cast<TestConfig&>(cfg) = base_config(kPeerId, kPeerBoot, &tx);
+    cfg.seal_fn = &fake_seal;
+    cfg.open_fn = &fake_open;
+    TestNode node(cfg);
+    node.begin();
+
+    auto encrypted = [&tx]() {
+        btp::DecodedFrame f{};
+        CHECK(btp::decode(tx.frames.back().data(), tx.frames.back().size(),
+                          kEspNowTransport, &f) == btp::Error::Ok);
+        return (f.header.flags & btp::kFlagEncrypted) != 0U;
+    };
+
+    CHECK(node.request_manifest(0x0000A001U, 0U, 0U));
+    CHECK(encrypted());  // default: sealed like everything else
+    cfg.seal_manifests = false;
+    CHECK(node.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(!encrypted());
+    const std::vector<std::uint8_t> p = make_payload(8, 0x10);
+    CHECK(node.send(MessageType::Control, 0x0400U, p.data(), p.size(), 1ULL));
+    CHECK(encrypted());  // the hook only touches MANIFEST_REQUEST
+}
+
 int main() {
     test_begin();
     test_reconfigure_before_begin();
@@ -3396,6 +3430,7 @@ int main() {
     test_manifest_skip_on_hello_is_opt_in();
     test_catalog_content_revision();
     test_auto_revision_is_served();
+    test_seal_manifest_request_hook();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

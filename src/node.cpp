@@ -1052,9 +1052,13 @@ bool Node::send_manifest_request(std::uint32_t target_source_id,
     slot.sequence = sequence;
     slot.target_source_id = target_source_id;
     slot.used = true;
-    const bool ok = transmit_reserved(link0_, sequence, MessageType::Control,
-                                      object_id::kManifestRequest, buffer, written,
-                                      resolve_now(0U) * 1000ULL);
+    const bool sealed = link0_.cfg_->seal_manifest_request(target_source_id);
+    const LogicalMessage message{MessageType::Control, object_id::kManifestRequest,
+                                 resolve_now(0U) * 1000ULL, {buffer, written}};
+    const bool ok = endpoint_.send_logical_reserved(
+        sequence, message, link0_.cfg_->transport, &Node::send_thunk, link0_.cfg_,
+        seal_scratch_, seal_scratch_cap_, sealed ? current_seal(link0_) : nullptr,
+        sealed ? current_seal_ctx(link0_) : nullptr);
     if (ok) ++frames_tx_;
     return ok;
 }
