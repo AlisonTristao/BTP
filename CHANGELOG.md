@@ -55,6 +55,11 @@ Later changes:
   ~200 octets on a TCP / Serial / BLE node no longer fails to send;
   `btp::TxQueue` / `StaticTxQueue` (`btp/txqueue.hpp`), a send-side priority
   queue that sheds telemetry first.
+* `2.47`: several links on one `Node` -- `NodeLink` (the per-link half of
+  `NodeConfig`), `attach_link()` / `receive_on()` / `enable_session_on()` /
+  `reset_link()`, `LinkRef` epochs for replies that outlive a connection,
+  `StaticNode<..., Links>`, `NodeConfig::terminal_on()` / `lock()`. Source
+  compatible: a single-link node needs no change.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of

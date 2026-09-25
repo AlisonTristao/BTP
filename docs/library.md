@@ -232,8 +232,9 @@ It is `btp::Node`: `btp::Endpoint`, `btp::Receiver` and — opt-in —
 `btp::Session`, a `btp::Catalog` and subscriptions in one object, sharing one
 identity, one `now_ms` notion and one set of caller-owned buffers, with every
 external dependency (`send`, `clock`, `seal`, `open`, ...) a virtual method on
-`NodeConfig`, an abstract class a consumer inherits from once. It adds no wire
-field; it coordinates the state of its layers — the members stay reachable for a caller that
+`NodeConfig`, an abstract class a consumer inherits from once -- and, since
+2.47.0, up to four links (one `NodeLink` each) sharing that one identity. It
+adds no wire field; it coordinates the state of its layers — the members stay reachable for a caller that
 wants a layer directly. [The node layer](#16-the-node-layer) covers it.
 
 ### `btp::catalog`
@@ -3390,7 +3391,73 @@ is wrapped in the caller's own critical section. A `Node` frame never exceeds
 250 octets whatever the transport (§14), so `SlotBytes =
 kEspNowMaxFrameSize` fits every frame a `Node` produces.
 
-### 16.10 What stays out
+### 16.10 Several links on one node (`attach_link()` / `receive_on()`)
+
+A device that talks over more than one path -- a robot reached by an ESP-NOW
+dongle AND by a direct TCP or BLE client -- is still ONE source: one
+`source_id` / `boot_id`, one sequence counter, one catalogue. Before 2.47 it
+needed one `Node` per path anyway, because `enable_session()` gates the
+whole node behind a `HELLO`: a session-less ESP-NOW peer and a TCP client
+that must say `HELLO` first could not share one. Since 2.47 a `Node` has up
+to `kMaxNodeLinks` (4) **links**, and the session is a property of the link.
+
+| Shared by every link (the node's) | Per link (`NodeLink` + `NodeLinkSlot`) |
+|---|---|
+| identity, the `Endpoint` and its sequence counter | `send()` and `TransportLimits` |
+| the served catalogue, `on_publish()` registry | `seal` / `open` / `accept_cleartext` / `reply_seal` |
+| manifest / command scratch, seal scratch | `Receiver` (reassembly) + rx / open buffers |
+| command `DedupCache` (scoped to the boot, §13) | responder session (opt-in per link) |
+| terminal / command handlers, `clock()` | `SubscriptionTable` |
+| initiator, subscription / command clients (link 0) | counters (`link_stats()`), an **epoch** |
+
+`NodeConfig` is `NodeLink` plus the node-wide part, and it is link 0 -- a
+single-link node is written exactly as before. Extra links are attached:
+
+```cpp
+class DirectLink : public btp::NodeLink {        // one per extra link
+    bool send(const std::uint8_t* f, std::size_t n) override { return tcp.send(f, n); }
+    bool has_seal() const noexcept override { return true; }  /* seal/open... */
+};
+
+btp::StaticNode<4, 600, 2048, 2048, 8, 64, 1536, 8, 4, 128, 0, /*Links=*/3> node(radio_cfg);
+DirectLink tcp_link, ble_link;
+node.attach_link(1, tcp_link, /*reassembly_timeout_ms=*/5000);
+node.attach_link(2, ble_link, 5000);
+node.enable_session_on(1, hello, 2000);          // only link 1 waits for HELLO
+node.enable_session_on(2, hello, 2000);
+node.begin();
+
+// each transport's own task:
+node.receive(espnow_frame, n, now, &msg);       // link 0
+node.receive_on(1, tcp_frame, now, &msg);       // link 1 -- replies leave on link 1
+
+// the TCP client connects / disconnects:
+node.reset_link(1); node.arm_session_on(1, now);  // on connect
+node.reset_link(1);                               // on disconnect
+```
+
+Every managed reply (`HELLO_RESULT`, `MANIFEST_DATA`, `SUBSCRIBE_RESULT`,
+`COMMAND_RESULT`) leaves on the link the request arrived on, sealed by that
+link's policy. `publish_subscribed_topics()` walks every link's table.
+
+**Stale replies.** `reset_link()` drops the link's partial reassemblies,
+returns its session to `Idle`, frees its subscriptions, zeroes its counters
+and bumps its epoch. A `LinkRef` (`{link, epoch}`, from `link_ref()`) taken
+before that is no longer `link_current()`, so `send_on(ref, ...)` refuses it:
+a reply computed for a connection that has since gone -- a shell command
+still running on another task, say -- is dropped instead of reaching whoever
+connected next. `NodeCommandTicket::link` carries the same reference:
+`complete_command()` on a reset link records the result (a retransmission is
+replayed, never re-executed) but sends nothing. `NodeConfig::terminal_on()`
+hands a TERMINAL handler the `LinkRef` it arrived on.
+
+**Threads.** The rule stays "one context per link": `receive_on(L)` only
+touches link L's state. The shared scratch buffers, the dedup cache and
+`frames_tx()` are guarded by `NodeConfig::lock()` / `unlock()` -- no-ops by
+default, a (recursive) mutex when links run on different tasks. The epoch is
+atomic.
+
+### 16.11 What stays out
 
 Everything §11 keeps above the wire, unchanged: **routing policy** (`receive()`
 hands back a message it does not manage; relay-or-drop is the caller's one
