@@ -3142,6 +3142,12 @@ A full enumeration (`target_source_id` 0) never uses the cache:
 `known_config_revision` names one source's revision; ask each known source
 by id instead. Without `has_manifest_cache()` nothing changes.
 
+A client behind a hub is answered by the **hub's** manifest cache, which does
+not hold the end-to-end key the rest of that client's traffic is sealed with:
+`NodeLink::seal_manifest_request(target)` returning false sends its
+`MANIFEST_REQUEST`s (and the cache's own re-requests) in the clear while every
+other send on the link stays sealed.
+
 `set_manifest_skip_on_hello(true)` (default **false**) goes one step further on
 a `connect()`ed session: when the target is the connected peer and its
 `HELLO_RESULT` `config_revision` and `peer_uuid` match the cache, nothing is
