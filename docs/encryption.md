@@ -475,6 +475,21 @@ The receiver must:
 
 A message that fails AEAD authentication must not be delivered as valid application data.
 
+A receiver that holds a key must also decide what to do with a message that
+arrives **without** `ENCRYPTED`. Delivering it as if it were protected lets any
+sender bypass the key simply by leaving the flag clear — a downgrade. The
+receiver must therefore reject a cleartext message unless the application has
+explicitly allowed that specific traffic in the clear (for example a gateway's
+own unsealed control replies on a link that also carries sealed end-to-end
+data). The session handshake (`HELLO`, `HELLO_RESULT`, `SESSION_CLOSE`,
+`SESSION_CLOSE_RESULT`) is cleartext by design and is exempt: it runs before
+any key is in use.
+
+The reference implementation (`btp::Node`, library 2.46.0) rejects cleartext by
+default whenever `NodeConfig::has_open()` is true, and counts the drops in
+`Node::stats().dropped_cleartext`; `NodeConfig::accept_cleartext()` is the
+per-message opt-out.
+
 ---
 
 ## 9. Gateway forwarding

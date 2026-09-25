@@ -29,6 +29,8 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       last_session_event_(SessionEvent::None),
       session_path_dropped_crc_(0U),
       session_path_dropped_decode_(0U),
+      dropped_cleartext_(0U),
+      dropped_open_failed_(0U),
       initiator_(),
       last_initiator_event_(InitiatorEvent::None),
       subscriptions_(nullptr),
@@ -300,19 +302,26 @@ NodeRx Node::finish(ReceiveOutcome outcome, ReceivedMessage* out,
             return NodeRx::DroppedFrame;
     }
 
-    // Complete. Open the sealed payload in place when a key function is set.
-    if (cfg_.has_open() && (out->header.flags & kFlagEncrypted) != 0U) {
-        if (out->payload.size < kEndpointAeadTagSize || open_buffer_ == nullptr ||
-            out->payload.size - kEndpointAeadTagSize > open_capacity_) {
+    // Complete. With a key (has_open()), open the sealed payload in place --
+    // and refuse a cleartext one unless accept_cleartext() lets it through:
+    // otherwise a peer could skip the key just by leaving ENCRYPTED clear.
+    if (cfg_.has_open()) {
+        if ((out->header.flags & kFlagEncrypted) != 0U) {
+            if (out->payload.size < kEndpointAeadTagSize ||
+                open_buffer_ == nullptr ||
+                out->payload.size - kEndpointAeadTagSize > open_capacity_ ||
+                !cfg_.open(out->header,
+                           static_cast<std::uint16_t>(out->payload.size),
+                           out->payload.data, open_buffer_)) {
+                ++dropped_open_failed_;
+                return NodeRx::DroppedFrame;
+            }
+            out->payload =
+                ByteView{open_buffer_, out->payload.size - kEndpointAeadTagSize};
+        } else if (!cfg_.accept_cleartext(out->header)) {
+            ++dropped_cleartext_;
             return NodeRx::DroppedFrame;
         }
-        if (!cfg_.open(out->header,
-                       static_cast<std::uint16_t>(out->payload.size),
-                       out->payload.data, open_buffer_)) {
-            return NodeRx::DroppedFrame;
-        }
-        out->payload =
-            ByteView{open_buffer_, out->payload.size - kEndpointAeadTagSize};
     }
 
     // ----- discovery the node manages itself -----
@@ -721,8 +730,9 @@ void Node::emit_status(std::uint64_t now_ms) noexcept {
     status.reassembly_completed = rx.completed;
     status.reassembly_timeouts = rx.reassembly_timeouts;
     status.reassembly_rejected = rx.dropped_reassembly;
-    status.frames_dropped =
-        status.crc_errors + status.decode_errors + status.reassembly_rejected;
+    status.frames_dropped = status.crc_errors + status.decode_errors +
+                            status.reassembly_rejected + dropped_cleartext_ +
+                            dropped_open_failed_;
     status.command_duplicates =
         commands_ != nullptr ? commands_->stats().replayed : 0U;
     status.telemetry_dropped = 0U;  // not tracked separately yet
@@ -1162,6 +1172,8 @@ Node::Stats Node::stats() const noexcept {
     s.rx = receiver_.stats();
     s.session_path_dropped_crc = session_path_dropped_crc_;
     s.session_path_dropped_decode = session_path_dropped_decode_;
+    s.dropped_cleartext = dropped_cleartext_;
+    s.dropped_open_failed = dropped_open_failed_;
     return s;
 }
 

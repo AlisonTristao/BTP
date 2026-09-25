@@ -47,6 +47,17 @@ Later changes:
 * `2.43`: `Node::receive_outcome()`.
 * `2.44`: manifest format 3 field ranges (`min_value` / `max_value`).
 * `2.45`: format-3 ranges become optional per field, selected by `HAS_RANGE`.
+* `2.46`: a keyed `Node` rejects cleartext messages by default
+  (`NodeConfig::accept_cleartext()`, `Node::Stats::dropped_cleartext` /
+  `dropped_open_failed`); TCP and BLE transport profiles (`kTcpTransport`,
+  `kBleTransport`).
+
+2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
+true: a message that arrives without `ENCRYPTED` is now dropped instead of
+routed, so a peer can no longer reach a terminal or command handler by simply
+not sealing. The session handshake is unaffected. A consumer that legitimately
+receives some traffic in the clear on a keyed link overrides
+`accept_cleartext()`; its peers must seal everything else.
 
 The format-3 field layout changed between 2.44 and 2.45. Upgrade producers
 and consumers that exchange format-3 manifests together; 2.45 still reads

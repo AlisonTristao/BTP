@@ -163,6 +163,7 @@ public:
     void (*reply_seal_fn)(void*, const btp::Header&, btp::EndpointSealFn*,
                           void**) = nullptr;
     void* reply_seal_ctx = nullptr;
+    bool (*accept_cleartext_fn)(const btp::Header&) = nullptr;
 
     bool send(const std::uint8_t* frame, std::size_t n) override {
         return send_fn != nullptr && send_fn(send_ctx, frame, n);
@@ -189,6 +190,10 @@ public:
                 btp::NodeActionOutcome* out,
                 const btp::NodeCommandTicket& ticket) override {
         command_fn(command_ctx, id, ver, params, out, ticket);
+    }
+    bool accept_cleartext(const btp::Header& h) override {
+        return accept_cleartext_fn != nullptr ? accept_cleartext_fn(h)
+                                              : NodeConfig::accept_cleartext(h);
     }
     void reply_seal(const btp::Header& request, btp::EndpointSealFn* out_seal,
                     void** out_ctx) override {
@@ -2249,6 +2254,161 @@ void test_sized_node_high_begins() {
 
 }  // namespace
 
+// ===========================================================================
+// btp::Node -- cleartext policy (NodeConfig::accept_cleartext, 2.46.0)
+// ===========================================================================
+
+// A node holding a key (has_open()) drops a message that arrived without
+// ENCRYPTED instead of routing it -- a peer must not be able to skip the key
+// just by leaving the flag clear. Covers the three paths that act on a
+// message without handing it back first: plain routing, the terminal
+// callback and the command responder.
+void test_keyed_node_drops_cleartext_by_default() {
+    Sink tx;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);  // no key
+    TestNode sender(sender_cfg);
+    CHECK(sender.begin());
+
+    Sink rx_out;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    receiver_cfg.open_fn = &fake_open;
+    TerminalCapture terminal = {};
+    receiver_cfg.terminal_fn = &capture_terminal;
+    receiver_cfg.terminal_ctx = &terminal;
+    ActionCalls calls = {};
+    receiver_cfg.command_fn = &echo_action;
+    receiver_cfg.command_ctx = &calls;
+    TestNode receiver(receiver_cfg);
+    CHECK(receiver.begin());
+
+    const std::vector<std::uint8_t> payload = make_payload(24, 0x31);
+    CHECK(sender.send(MessageType::Telemetry, 0x0101U, payload.data(),
+                      payload.size(), 1ULL));
+    ReceivedMessage msg{};
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::DroppedFrame);
+    CHECK(receiver.stats().dropped_cleartext == 1U);
+
+    tx.clear();
+    const std::uint8_t keys[] = {'l', 's', '\r'};
+    CHECK(sender.send(MessageType::Terminal, btp::object_id::kTerminalIn, keys,
+                      sizeof(keys), 2ULL));
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::DroppedFrame);
+    CHECK(terminal.calls == 0);
+
+    tx.clear();
+    const std::uint8_t params[2] = {4, 2};
+    CHECK(sender.command(kPeerId, kPeerBoot, 7U, 1U, params, sizeof(params)) != 0U);
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::DroppedFrame);
+    CHECK(calls.calls == 0);
+    CHECK(rx_out.count() == 0U);  // no COMMAND_RESULT went back
+
+    CHECK(receiver.stats().dropped_cleartext == 3U);
+    CHECK(receiver.stats().dropped_open_failed == 0U);
+}
+
+bool accept_only_log(const btp::Header& header) {
+    return header.type == MessageType::Log;
+}
+
+// accept_cleartext() is the one opening: it lets exactly the cleartext
+// traffic a mixed link carries through, and nothing else.
+void test_accept_cleartext_override() {
+    Sink tx;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode sender(sender_cfg);
+    CHECK(sender.begin());
+
+    Sink rx_out;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    receiver_cfg.open_fn = &fake_open;
+    receiver_cfg.accept_cleartext_fn = &accept_only_log;
+    TestNode receiver(receiver_cfg);
+    CHECK(receiver.begin());
+
+    const std::vector<std::uint8_t> line = make_payload(12, 0x41);
+    CHECK(sender.send(MessageType::Log, 0x0001U, line.data(), line.size(), 1ULL));
+    ReceivedMessage msg{};
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::Complete);
+    CHECK(msg.header.type == MessageType::Log);
+    CHECK(msg.payload.size == line.size());
+
+    tx.clear();
+    CHECK(sender.send(MessageType::Telemetry, 0x0101U, line.data(), line.size(),
+                      2ULL));
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::DroppedFrame);
+    CHECK(receiver.stats().dropped_cleartext == 1U);
+}
+
+// A sealed message open() cannot authenticate (wrong key here) is dropped and
+// counted apart from the cleartext drops.
+void test_open_failure_is_counted() {
+    Sink tx;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    sender_cfg.seal_fn = &fake_seal_b;  // a key the receiver does not hold
+    TestNode sender(sender_cfg);
+    CHECK(sender.begin());
+
+    Sink rx_out;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    receiver_cfg.open_fn = &fake_open;
+    TestNode receiver(receiver_cfg);
+    CHECK(receiver.begin());
+
+    const std::vector<std::uint8_t> payload = make_payload(16, 0x51);
+    CHECK(sender.send(MessageType::Telemetry, 0x0101U, payload.data(),
+                      payload.size(), 1ULL));
+    ReceivedMessage msg{};
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::DroppedFrame);
+    CHECK(receiver.stats().dropped_open_failed == 1U);
+    CHECK(receiver.stats().dropped_cleartext == 0U);
+}
+
+// The session handshake is cleartext by design and stays that way between two
+// keyed nodes; after it, sealed traffic flows, a cleartext frame is dropped,
+// and the session itself stays Active (the watchdog is renewed before the
+// cleartext check runs).
+void test_keyed_session_handshake_stays_cleartext() {
+    const std::uint8_t uuid[16] = {7};
+
+    Sink initiator_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &initiator_tx);
+    initiator_cfg.seal_fn = &fake_seal;
+    initiator_cfg.open_fn = &fake_open;
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+
+    Sink responder_tx;
+    TestConfig responder_cfg = base_config(kSenderId, kSenderBoot, &responder_tx);
+    responder_cfg.seal_fn = &fake_seal;
+    responder_cfg.open_fn = &fake_open;
+    TestNode responder(responder_cfg);
+    responder.enable_session(btp::HelloBuilder(btp::Role::Producer, uuid).build(),
+                             2000U);
+    CHECK(responder.begin(/*arm_and_announce=*/true));
+
+    ReceivedMessage msg{};
+    CHECK(initiator.connect(btp::HelloBuilder(btp::Role::Consumer, uuid).build(),
+                            0U, 2000U));
+    CHECK(deliver(responder, initiator_tx, 0U, &msg) == NodeRx::SessionHandled);
+    CHECK(responder.session_event() == SessionEvent::HelloAccepted);
+    CHECK(deliver(initiator, responder_tx, 0U, &msg) == NodeRx::InitiatorHandled);
+    CHECK(initiator.connected());
+
+    initiator_tx.clear();
+    const std::vector<std::uint8_t> p = make_payload(20, 0x61);
+    CHECK(initiator.send(MessageType::Telemetry, 0x0400U, p.data(), p.size(), 1ULL));
+    CHECK(deliver(responder, initiator_tx, 10U, &msg) == NodeRx::Complete);
+    CHECK(msg.payload.size == p.size());
+
+    initiator_tx.clear();
+    CHECK(initiator.send_with(MessageType::Telemetry, 0x0400U, p.data(), p.size(),
+                              2ULL, nullptr, nullptr));  // forced cleartext
+    CHECK(deliver(responder, initiator_tx, 20U, &msg) == NodeRx::DroppedFrame);
+    CHECK(responder.stats().dropped_cleartext == 1U);
+    CHECK(responder.session() != nullptr);
+    CHECK(responder.session()->state() == btp::SessionState::Active);
+}
+
 int main() {
     test_begin();
     test_reconfigure_before_begin();
@@ -2257,6 +2417,10 @@ int main() {
     test_receive_decoded_frame_drives_the_session();
     test_fragmented_roundtrip();
     test_sealed_roundtrip();
+    test_keyed_node_drops_cleartext_by_default();
+    test_accept_cleartext_override();
+    test_open_failure_is_counted();
+    test_keyed_session_handshake_stays_cleartext();
     test_session_handshake();
     test_session_ignores_frame_before_hello();
     test_stats();

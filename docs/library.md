@@ -2689,6 +2689,7 @@ constructor; every external dependency is a virtual method, each an optional
 | `has_clock()` / `clock()` | optional | → `now_ms`; not overridden means you pass `now_ms` explicitly to `receive()` / `tick()` / `routine()` |
 | `has_seal()` / `seal()` | optional | encrypt one logical payload; not overridden → `send()` is cleartext |
 | `has_open()` / `open()` | optional | decrypt one received payload; not overridden → `receive()` hands back the sealed bytes |
+| `accept_cleartext()` | optional, only with `has_open()` | whether a message that arrived WITHOUT `ENCRYPTED` may still be routed; default `false` — a keyed node drops cleartext (2.46.0) |
 | `has_terminal()` / `terminal()` | optional | answer a `TERMINAL_IN` / `TERMINAL_OUT` frame directly ([§16.5](#165-terminal-nodeon_terminal-nodeconfigterminal)) |
 | `has_command()` / `command()` | optional, `SizedNode<>` / `StaticNode<>` only | run a Fresh `COMMAND_REQUEST`, synchronously or not ([§16.7](#167-commands-btpdedupcache-btpcommandclient)) |
 | `reply_seal()` | optional | picks the seal for ONE automatic reply (`SUBSCRIBE_RESULT` / `UNSUBSCRIBE_RESULT` / `COMMAND_RESULT` / `MANIFEST_DATA`) from the *original request's* header; default falls through to `has_seal()` / `seal()` |
@@ -2827,6 +2828,19 @@ responder that answers a request with whichever key matches ITS ORIGIN (not
 one key for every automatic reply) overrides `reply_seal()` instead — see its
 own doc comment in `node.hpp`. The default (falling through to
 `has_seal()`/`seal()`) is exactly today's single-key behavior.
+
+On the receive side, a node with `has_open()` true is **fail-closed** (2.46.0):
+an `ENCRYPTED` message is opened with `open()` and dropped if that fails
+(`stats().dropped_open_failed`), and a message that arrived WITHOUT
+`ENCRYPTED` is dropped too (`stats().dropped_cleartext`) — otherwise a peer
+could skip the key just by leaving the flag clear, and reach the terminal or a
+command handler unauthenticated. Override `accept_cleartext(header)` to let
+through exactly the cleartext traffic a mixed link legitimately carries (a
+hub's own unsealed control replies next to a robot's sealed data, say). The
+session handshake is exempt: `HELLO` / `HELLO_RESULT` / `SESSION_CLOSE` are
+answered before this check and stay cleartext on the wire. Both counters also
+feed `STATUS.frames_dropped`. Before 2.46.0 a keyed node routed cleartext
+messages as if they were authenticated.
 
 `receive()` sweeps stale partials, decodes, checks CRC and reassembles; with a
 session enabled it also runs the `HELLO` handshake, renews the watchdog and

@@ -313,6 +313,22 @@ public:
         return false;
     }
 
+    // Only consulted when has_open() is true: whether a completed logical
+    // message that arrived WITHOUT the ENCRYPTED flag may still be routed.
+    // The default (false) is fail-closed -- a node holding a key drops every
+    // cleartext message (counted in stats().dropped_cleartext), so a peer
+    // cannot sidestep the key by simply not setting ENCRYPTED. Override it to
+    // allow the specific cleartext traffic a mixed link legitimately carries
+    // (e.g. a hub's own unsealed control replies next to a robot's sealed
+    // data). The session handshake (HELLO / HELLO_RESULT / SESSION_CLOSE /
+    // SESSION_CLOSE_RESULT) never reaches this: it is answered before any key
+    // exists, and stays cleartext on the wire. With has_open() false every
+    // message is routed as it arrives, sealed or not, as always.
+    virtual bool accept_cleartext(const Header& header) {
+        (void)header;
+        return false;
+    }
+
     // Called by receive() for a TERMINAL_IN / TERMINAL_OUT frame -- see
     // Node::on_terminal()'s own comment for the parameters. has_terminal()
     // false (the default) means the frame comes back as NodeRx::Complete for
@@ -976,6 +992,12 @@ public:
         // would otherwise go uncounted).
         std::uint32_t session_path_dropped_crc;
         std::uint32_t session_path_dropped_decode;
+        // Completed messages dropped because has_open() is true and they
+        // arrived without ENCRYPTED, with accept_cleartext() refusing them.
+        std::uint32_t dropped_cleartext;
+        // Completed ENCRYPTED messages dropped because open() failed (bad
+        // tag, no key for this sender) or the sealed size did not fit.
+        std::uint32_t dropped_open_failed;
     };
     Stats stats() const noexcept;
 
@@ -1077,6 +1099,8 @@ private:
     SessionEvent last_session_event_;
     std::uint32_t session_path_dropped_crc_;
     std::uint32_t session_path_dropped_decode_;
+    std::uint32_t dropped_cleartext_;
+    std::uint32_t dropped_open_failed_;
 
     SessionInitiator initiator_;  // Idle until connect()
     InitiatorEvent last_initiator_event_;
