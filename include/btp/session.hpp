@@ -605,6 +605,12 @@ public:
     // when this has not changed since the last session (ManifestClient's own
     // job) needs it; nothing in this class reads it back.
     std::uint32_t peer_config_revision() const noexcept { return peer_config_revision_; }
+    // HELLO_RESULT's peer_uuid (session-and-terminal.md section 1.1): the
+    // responder's stable 16-octet identity, compared byte for byte. All zero
+    // until Connected has fired. Unlike peer_source_id(), the spec promises
+    // this one is stable -- key anything that must survive a reboot or a
+    // change of transport (a manifest cache, "is this the same robot") on it.
+    const std::uint8_t* peer_uuid() const noexcept { return peer_uuid_; }
 
     // Idle -> AwaitingResult. Encodes `local` as a HELLO into `out`; the
     // caller sends it framed with `own_source_id` / `own_boot_id` /
@@ -665,6 +671,7 @@ private:
     std::uint32_t peer_source_id_;
     std::uint32_t peer_boot_id_;
     std::uint32_t peer_config_revision_;
+    std::uint8_t peer_uuid_[16];
 };
 
 // ===========================================================================

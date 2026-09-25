@@ -60,6 +60,14 @@ Later changes:
   `reset_link()`, `LinkRef` epochs for replies that outlive a connection,
   `StaticNode<..., Links>`, `NodeConfig::terminal_on()` / `lock()`. Source
   compatible: a single-link node needs no change.
+* `2.48`: consumer of many sources and a pluggable manifest cache --
+  `Node::on_manifest()` / `NodeManifest` (`NodeRx::ManifestHandled` /
+  `ManifestRejected`, `manifest_outcome()`), `NodeConfig::has_manifest_cache()`
+  / `manifest_load()` / `manifest_store()` / `manifest_evict()`,
+  `Node::request_manifest_cached()`, opt-in `set_manifest_skip_on_hello()`,
+  `Node::connected_peer_uuid()` / `SessionInitiator::peer_uuid()`,
+  `Catalog::set_config_revision_auto()` / `content_revision()`. A rejected
+  `MANIFEST_DATA` no longer empties a learn catalogue. Source compatible.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of

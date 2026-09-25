@@ -131,10 +131,34 @@ public:
     // Drop every topic and reset the pools. config_revision() is kept.
     void clear() noexcept;
 
-    std::uint32_t config_revision() const noexcept { return config_revision_; }
+    // The revision a producer announces (MANIFEST_DATA, HELLO_RESULT) and a
+    // consumer learned (ingest()). With set_config_revision_auto() in effect
+    // it is content_revision(), recomputed on every call -- so it can never
+    // go stale when a topic is added or edited after the call.
+    std::uint32_t config_revision() const noexcept;
+    // A fixed revision, bumped by hand (commands.md 3.11: every change to the
+    // described content needs a new one). Turns auto mode off.
     void set_config_revision(std::uint32_t revision) noexcept {
         config_revision_ = revision;
+        auto_revision_ = false;
     }
+    // Producer side (library 2.48.0): derive the revision from the content
+    // instead -- content_revision() -- so a schema change can never ship
+    // under an old revision because someone forgot the bump. That matters
+    // once a consumer caches manifests across sessions (Node's manifest
+    // cache, docs/library.md 16.4): a stale revision would keep serving it
+    // the old schema from its cache. Stays in effect until
+    // set_config_revision() or ingest() replaces it.
+    void set_config_revision_auto() noexcept { auto_revision_ = true; }
+    bool config_revision_auto() const noexcept { return auto_revision_; }
+    // A 32-bit FNV-1a digest of everything the manifest describes about each
+    // topic, in catalogue order: ids, versions, encoding, flags, rates, names,
+    // and every field's id/order/type/flags/counts/scale/offset/range/name/
+    // unit/description. source_info is NOT included (commands.md 3.12: it is
+    // not covered by config_revision). Never 0 (0 means "no manifest",
+    // session-and-terminal.md 1.2). Stable across builds and platforms: it
+    // hashes little-endian encodings, never struct memory.
+    std::uint32_t content_revision() const noexcept;
 
     // True when at least one stored field has a declared min_value or
     // max_value (manifest_format_version >= 3 -- see field_min()/field_max()).
@@ -311,6 +335,7 @@ private:
     std::size_t source_info_count_;
 
     std::uint32_t config_revision_;
+    bool auto_revision_;
     bool valid_;
 };
 

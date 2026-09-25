@@ -596,7 +596,8 @@ SessionInitiator::SessionInitiator() noexcept
       own_sequence_(0U),
       peer_source_id_(0U),
       peer_boot_id_(0U),
-      peer_config_revision_(0U) {}
+      peer_config_revision_(0U),
+      peer_uuid_() {}
 
 InitiatorOutcome SessionInitiator::check_expiry(std::uint64_t now_ms) noexcept {
     if (state_ == InitiatorState::AwaitingResult) {
@@ -635,6 +636,7 @@ bool SessionInitiator::connect(const Hello& local, std::uint32_t own_source_id,
     deadline_ms_ = now_ms + deadline_ms;
     peer_source_id_ = 0U;
     peer_boot_id_ = 0U;
+    std::memset(peer_uuid_, 0, sizeof(peer_uuid_));
     effective_ = EffectiveLimits{};
     state_ = InitiatorState::AwaitingResult;
     *out_size = written;
@@ -692,6 +694,7 @@ InitiatorOutcome SessionInitiator::on_frame(const DecodedFrame& frame,
         peer_source_id_ = frame.header.source_id;
         peer_boot_id_ = frame.header.boot_id;
         peer_config_revision_ = result.config_revision;
+        std::memcpy(peer_uuid_, result.peer_uuid, sizeof(peer_uuid_));
         state_ = InitiatorState::Active;
         deadline_ms_ = now_ms + effective_.session_timeout_ms;
         return InitiatorOutcome{InitiatorEvent::Connected};

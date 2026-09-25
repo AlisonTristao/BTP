@@ -3079,6 +3079,89 @@ returns (a hub sealing its own automatic replies with one key and a topic
 with another). A null override forces cleartext regardless of `cfg.seal()`,
 the same rule `send_with()` already follows.
 
+#### Many sources: `on_manifest()` (2.48.0)
+
+`learn_catalog()` keeps ONE catalogue, and each full `MANIFEST_DATA` replaces
+it -- right for "the robot I am talking to", wrong for a hub, whose
+enumeration describes every robot it knows. `node.on_manifest(fn, ctx)` hands
+over each `MANIFEST_DATA` `SUCCESS` instead, whichever source it describes, as
+a `btp::NodeManifest`:
+
+```cpp
+void on_manifest(void* ctx, btp::Node&, const btp::NodeManifest& m) {
+    // m.header: the answer that just arrived (source_id, boot_id, revision, uuid)
+    // m.payload: that answer -- walk its source_info with btp::ManifestReader
+    // m.topics_payload: where the topic records are (m.payload, or the cached
+    //                   copy when the peer said NOT_MODIFIED -- m.from_cache)
+}
+node.on_manifest(&on_manifest, &app);
+```
+
+`receive()` then returns `NodeRx::ManifestHandled`, or
+`NodeRx::ManifestRejected` for a non-`SUCCESS` answer -- which describes no
+source on the wire, so `manifest_outcome().target_source_id` recovers the
+target from the request it answers (the node remembers its last
+`kNodeManifestPendingSlots` requests). A rejection no longer reaches a learn
+catalogue at all (before 2.48 `ingest()` of a rejection emptied it). Both
+callbacks can be attached; the learn catalogue is fed too.
+
+#### The manifest cache (2.48.0)
+
+A consumer that has seen a manifest before can ask with its
+`known_config_revision` and get a ~60-octet `NOT_MODIFIED` instead of the
+whole catalogue -- if it still has the catalogue. `NodeConfig` has four
+optional hooks for that; the node decides **when**, your override decides
+**where** (a file, NVS, an SD card):
+
+```cpp
+struct App : btp::NodeConfig {
+    bool has_manifest_cache() const noexcept override { return cache_enabled; }
+    bool manifest_load(std::uint32_t source_id, btp::ByteView* out) override;
+    void manifest_store(std::uint32_t source_id, const btp::ManifestHeader& h,
+                        btp::ByteView payload) override;
+    void manifest_evict(std::uint32_t source_id) override;
+};
+// ...
+node.request_manifest_cached(robot_source_id, /*target_boot_id=*/0);
+```
+
+What is stored is the raw payload of a complete `MANIFEST_DATA` `SUCCESS` --
+the wire format is the serialisation. `request_manifest_cached()` fills
+`known_config_revision` from the cache (0 on a miss). On the answer:
+
+| answer | node does |
+| --- | --- |
+| full `SUCCESS` | `manifest_store()`, then delivers it |
+| `NOT_MODIFIED`, cache matches revision and `source_uuid` | delivers the fresh header + `source_info` with the cached topics (`from_cache`) |
+| `NOT_MODIFIED`, cache missing / other revision / other `source_uuid` | `manifest_evict()` and re-requests revision 0 (`NodeRx::Ignored`) |
+| cached bytes that do not parse, or describe another source | evicted on load, treated as a miss |
+
+A learn catalogue is fed the cached manifest on a `NOT_MODIFIED`, so a
+restarted consumer's empty catalogue is filled instead of "kept empty".
+A full enumeration (`target_source_id` 0) never uses the cache:
+`known_config_revision` names one source's revision; ask each known source
+by id instead. Without `has_manifest_cache()` nothing changes.
+
+`set_manifest_skip_on_hello(true)` (default **false**) goes one step further on
+a `connect()`ed session: when the target is the connected peer and its
+`HELLO_RESULT` `config_revision` and `peer_uuid` match the cache, nothing is
+sent -- `on_manifest()` runs from the cache with `source_info_stale` set. The
+default is the recommendation: the skipped `NOT_MODIFIED` is tiny and is the
+only thing that refreshes `source_info` (firmware version and the like),
+which `config_revision` does not cover. `connected_peer_uuid()` exposes the
+peer's `HELLO_RESULT` identity -- the stable one, unlike
+`connected_peer_source_id()`.
+
+#### Revisions that cannot go stale (2.48.0)
+
+A cache is only as good as `config_revision`: a schema edited without a bump
+would be served from the cache forever. `catalog.set_config_revision_auto()`
+makes `config_revision()` a digest of the content (`content_revision()`,
+32-bit FNV-1a over every topic and field attribute the manifest carries, never
+0, `source_info` excluded) recomputed on each call, so it follows every
+later edit. A producer that also announces the revision in `HELLO_RESULT`
+passes `catalog.config_revision()` there, not a constant.
+
 ### 16.5 Terminal (`node.on_terminal()` / `NodeConfig::terminal()`)
 
 `TERMINAL_IN` / `TERMINAL_OUT` carry opaque bytes, no struct — [Session and

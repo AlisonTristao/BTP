@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <vector>
 
 namespace {
@@ -2821,6 +2822,499 @@ void test_attach_link_bounds() {
     CHECK(!node.attach_link(1U, bad));
 }
 
+// ---------------------------------------------------------------------------
+// Manifest consumer + cache (library 2.48.0)
+// ---------------------------------------------------------------------------
+
+// A manifest cache in RAM, shared by every CacheConfig pointed at it -- the
+// stand-in for a file / NVS store surviving a consumer restart.
+struct ManifestStore {
+    std::map<std::uint32_t, std::vector<std::uint8_t> > entries;
+    int loads = 0;
+    int stores = 0;
+    int evicts = 0;
+};
+
+struct CacheConfig : TestConfig {
+    ManifestStore* store = nullptr;
+    bool has_manifest_cache() const noexcept override { return store != nullptr; }
+    bool manifest_load(std::uint32_t source_id, btp::ByteView* out) override {
+        ++store->loads;
+        const auto it = store->entries.find(source_id);
+        if (it == store->entries.end()) return false;
+        *out = btp::ByteView{it->second.data(), it->second.size()};
+        return true;
+    }
+    void manifest_store(std::uint32_t source_id, const btp::ManifestHeader& header,
+                        btp::ByteView payload) override {
+        CHECK(header.described_source_id == source_id);
+        ++store->stores;
+        store->entries[source_id].assign(payload.data, payload.data + payload.size);
+    }
+    void manifest_evict(std::uint32_t source_id) override {
+        ++store->evicts;
+        store->entries.erase(source_id);
+    }
+};
+
+CacheConfig cache_config(std::uint32_t source_id, std::uint32_t boot_id, Sink* sink,
+                         ManifestStore* store) {
+    CacheConfig cfg;
+    static_cast<TestConfig&>(cfg) = base_config(source_id, boot_id, sink);
+    cfg.store = store;
+    return cfg;
+}
+
+struct ManifestCapture {
+    int calls = 0;
+    std::uint32_t source_id = 0U;
+    std::uint32_t boot_id = 0U;
+    std::uint32_t revision = 0U;
+    std::uint16_t topic_count = 0U;  // of topics_payload
+    std::uint16_t info_count = 0U;   // source_info rows in `payload`
+    bool from_cache = false;
+    bool source_info_stale = false;
+    std::vector<std::uint32_t> sources;
+};
+
+void capture_manifest(void* ctx, btp::Node&, const btp::NodeManifest& m) {
+    auto* c = static_cast<ManifestCapture*>(ctx);
+    ++c->calls;
+    c->source_id = m.header.described_source_id;
+    c->boot_id = m.header.described_boot_id;
+    c->revision = m.header.config_revision;
+    c->from_cache = m.from_cache;
+    c->source_info_stale = m.source_info_stale;
+    c->sources.push_back(m.header.described_source_id);
+
+    btp::ManifestReader topics(m.topics_payload.data, m.topics_payload.size);
+    btp::ManifestHeader th{};
+    CHECK(topics.header(&th) == MessageError::Ok);
+    c->topic_count = th.topic_count;
+
+    btp::ManifestReader info(m.payload.data, m.payload.size);
+    btp::ManifestHeader ih{};
+    CHECK(info.header(&ih) == MessageError::Ok);
+    btp::SourceInfoEntry row{};
+    c->info_count = 0U;
+    while (info.next_source_info(&row) == btp::ManifestStep::Item) ++c->info_count;
+}
+
+// A producer fixture: one topic, fixed revision/uuid, optional source_info.
+struct Producer {
+    Sink tx;
+    TestConfig cfg;
+    btp::StaticNode<4, 700, 1024, 900> node;
+    btp::StaticCatalog<4, 32, 1024, 4> catalog;
+    std::uint8_t uuid[16];
+
+    Producer(std::uint32_t id, std::uint32_t boot, std::uint32_t revision,
+             std::uint8_t uuid_seed)
+        : cfg(base_config(id, boot, &tx)), node(cfg) {
+        for (int i = 0; i < 16; ++i) uuid[i] = static_cast<std::uint8_t>(uuid_seed + i);
+        catalog.set_config_revision(revision);
+        CHECK(catalog.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+              MessageError::Ok);
+        CHECK(catalog.add_source_info("fw_version", "Firmware", "1.2.3") ==
+              MessageError::Ok);
+        node.serve_catalog(&catalog, static_cast<std::uint8_t>(Role::Producer), uuid,
+                           "robot");
+        node.begin();
+    }
+};
+
+// One consumer, two producers standing in for a hub enumeration: each answer
+// reaches on_manifest() on its own, neither replaces the other -- the thing
+// learn_catalog()'s one-catalogue model could not do.
+void test_on_manifest_delivers_every_source() {
+    Producer a(0x0000A001U, 0x11U, 3U, 0x10U);
+    Producer b(0x0000B002U, 0x22U, 7U, 0x20U);
+
+    Sink cons_tx;
+    TestConfig cons_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(cons_cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    ReceivedMessage msg{};
+    CHECK(consumer.request_manifest(a.node.source_id(), 0U, 0U));
+    CHECK(deliver(a.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    cons_tx.clear();
+    CHECK(consumer.request_manifest(b.node.source_id(), 0U, 0U));
+    CHECK(deliver(b.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+
+    CHECK(deliver(consumer, a.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(deliver(consumer, b.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(cap.calls == 2);
+    CHECK(cap.sources.size() == 2U && cap.sources[0] == 0x0000A001U &&
+          cap.sources[1] == 0x0000B002U);
+    CHECK(cap.revision == 7U);
+    CHECK(cap.topic_count == 1U);
+    CHECK(cap.info_count == 1U);
+    CHECK(!cap.from_cache);
+}
+
+// The core of the cache: the first session stores the full answer, a second
+// consumer (a restart) asks with the cached revision, gets NOT_MODIFIED and
+// is handed the cached topics -- with the boot_id and source_info of the
+// answer that just arrived.
+void test_manifest_cache_answers_not_modified_from_the_cache() {
+    ManifestStore store;
+    Producer first(0x0000A001U, 0x11U, 5U, 0x10U);
+
+    {
+        Sink cons_tx;
+        CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+        TestNode consumer(cfg);
+        ManifestCapture cap;
+        consumer.on_manifest(&capture_manifest, &cap);
+        consumer.begin();
+
+        CHECK(consumer.request_manifest_cached(first.node.source_id(), 0U));
+        btp::DecodedFrame req{};
+        CHECK(btp::decode(cons_tx.frames[0].data(), cons_tx.frames[0].size(),
+                          kEspNowTransport, &req) == btp::Error::Ok);
+        btp::ManifestRequest decoded{};
+        CHECK(btp::decode_manifest_request(req.payload.data, req.payload.size,
+                                           &decoded) == MessageError::Ok);
+        CHECK(decoded.known_config_revision == 0U);  // nothing cached yet
+
+        ReceivedMessage msg{};
+        CHECK(deliver(first.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+        CHECK(deliver(consumer, first.tx, 0U, &msg) == NodeRx::ManifestHandled);
+        CHECK(cap.calls == 1 && !cap.from_cache && cap.topic_count == 1U);
+        CHECK(store.stores == 1);
+        CHECK(store.entries.count(0x0000A001U) == 1U);
+    }
+
+    // Same robot rebooted (new boot_id), same revision; a brand-new consumer
+    // over the same store.
+    Producer rebooted(0x0000A001U, 0x99U, 5U, 0x10U);
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot + 1U, &cons_tx, &store);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    CHECK(consumer.request_manifest_cached(rebooted.node.source_id(), 0U));
+    btp::DecodedFrame req{};
+    CHECK(btp::decode(cons_tx.frames[0].data(), cons_tx.frames[0].size(),
+                      kEspNowTransport, &req) == btp::Error::Ok);
+    btp::ManifestRequest decoded{};
+    CHECK(btp::decode_manifest_request(req.payload.data, req.payload.size, &decoded) ==
+          MessageError::Ok);
+    CHECK(decoded.known_config_revision == 5U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(rebooted.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, rebooted.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(cap.calls == 1);
+    CHECK(cap.from_cache);
+    CHECK(cap.topic_count == 1U);      // from the cache
+    CHECK(cap.boot_id == 0x99U);       // from the fresh answer
+    CHECK(cap.info_count == 1U);       // source_info rides NOT_MODIFIED
+    CHECK(store.stores == 1);          // nothing new to store
+    CHECK(store.evicts == 0);
+}
+
+// A new firmware (new revision) replaces the cached entry.
+void test_manifest_cache_replaced_on_new_revision() {
+    ManifestStore store;
+    Producer old_fw(0x0000A001U, 0x11U, 5U, 0x10U);
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    ReceivedMessage msg{};
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    deliver(old_fw.node, cons_tx, 0U, &msg);
+    deliver(consumer, old_fw.tx, 0U, &msg);
+    CHECK(store.stores == 1);
+
+    Producer new_fw(0x0000A001U, 0x12U, 6U, 0x10U);
+    cons_tx.clear();
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(deliver(new_fw.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, new_fw.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(!cap.from_cache);
+    CHECK(cap.revision == 6U);
+    CHECK(store.stores == 2);
+    btp::ManifestReader r(store.entries[0x0000A001U].data(),
+                          store.entries[0x0000A001U].size());
+    btp::ManifestHeader h{};
+    CHECK(r.header(&h) == MessageError::Ok && h.config_revision == 6U);
+}
+
+// A different device answering for the same source_id (a swapped board): the
+// NOT_MODIFIED carries another source_uuid, so the cached entry is evicted
+// and the full manifest re-requested instead of being trusted.
+void test_manifest_cache_evicts_on_uuid_mismatch() {
+    ManifestStore store;
+    Producer original(0x0000A001U, 0x11U, 5U, 0x10U);
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    ReceivedMessage msg{};
+    consumer.request_manifest_cached(0x0000A001U, 0U);
+    deliver(original.node, cons_tx, 0U, &msg);
+    deliver(consumer, original.tx, 0U, &msg);
+    CHECK(cap.calls == 1);
+
+    Producer impostor(0x0000A001U, 0x33U, 5U, 0x70U);  // same id + revision, other uuid
+    cons_tx.clear();
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(deliver(impostor.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    cons_tx.clear();
+    CHECK(deliver(consumer, impostor.tx, 0U, &msg) == NodeRx::Ignored);
+    CHECK(cap.calls == 1);  // nothing delivered from a cache that is not its own
+    CHECK(store.evicts == 1);
+    CHECK(store.entries.count(0x0000A001U) == 0U);
+
+    // ... and the node already asked again, for everything.
+    CHECK(cons_tx.count() == 1U);
+    btp::DecodedFrame req{};
+    CHECK(btp::decode(cons_tx.frames[0].data(), cons_tx.frames[0].size(),
+                      kEspNowTransport, &req) == btp::Error::Ok);
+    btp::ManifestRequest decoded{};
+    CHECK(btp::decode_manifest_request(req.payload.data, req.payload.size, &decoded) ==
+          MessageError::Ok);
+    CHECK(decoded.target_source_id == 0x0000A001U);
+    CHECK(decoded.known_config_revision == 0U);
+
+    impostor.tx.clear();
+    CHECK(deliver(impostor.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, impostor.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(cap.calls == 2 && !cap.from_cache);
+    CHECK(store.entries.count(0x0000A001U) == 1U);
+}
+
+// Garbage in the store is never handed out: it is evicted on load and the
+// request goes out as if nothing were cached.
+void test_manifest_cache_evicts_a_corrupt_entry() {
+    ManifestStore store;
+    store.entries[0x0000A001U] = std::vector<std::uint8_t>(40, 0xEEU);
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(store.evicts == 1);
+    btp::DecodedFrame req{};
+    CHECK(btp::decode(cons_tx.frames[0].data(), cons_tx.frames[0].size(),
+                      kEspNowTransport, &req) == btp::Error::Ok);
+    btp::ManifestRequest decoded{};
+    CHECK(btp::decode_manifest_request(req.payload.data, req.payload.size, &decoded) ==
+          MessageError::Ok);
+    CHECK(decoded.known_config_revision == 0U);
+}
+
+// A rejection names no source on the wire; the node recovers the target from
+// the request it answers, and a learn catalogue is left alone (it used to be
+// wiped by ingest()ing the rejection).
+void test_manifest_rejection_is_correlated_and_harmless() {
+    Producer p(0x0000A001U, 0x11U, 5U, 0x10U);
+    Sink cons_tx;
+    TestConfig cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(cfg);
+    btp::StaticCatalog<> learned;
+    consumer.learn_catalog(&learned);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+
+    ReceivedMessage msg{};
+    CHECK(consumer.request_manifest(0x0000A001U, 0U, 0U));
+    deliver(p.node, cons_tx, 0U, &msg);
+    CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(learned.topic_count() == 1U);
+
+    // A wrong target_boot_id -> STALE_TARGET_BOOT.
+    cons_tx.clear();
+    p.tx.clear();
+    CHECK(consumer.request_manifest(0x0000A001U, 0x11U + 1U, 0U));
+    CHECK(deliver(p.node, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::ManifestRejected);
+    CHECK(consumer.manifest_outcome().correlated);
+    CHECK(consumer.manifest_outcome().target_source_id == 0x0000A001U);
+    CHECK(consumer.manifest_outcome().status !=
+          static_cast<std::uint8_t>(btp::ResultStatus::Success));
+    CHECK(cap.calls == 1);
+    CHECK(learned.topic_count() == 1U);  // untouched
+}
+
+// learn_catalog() on a restarted consumer: a NOT_MODIFIED used to leave the
+// (empty) catalogue empty -- "keep what I have" with nothing to keep. With a
+// cache, the cached manifest is ingested instead.
+void test_learn_catalog_is_filled_from_the_cache_on_not_modified() {
+    ManifestStore store;
+    Producer p(0x0000A001U, 0x11U, 5U, 0x10U);
+    {
+        Sink cons_tx;
+        CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+        TestNode consumer(cfg);
+        btp::StaticCatalog<> learned;
+        consumer.learn_catalog(&learned);
+        consumer.begin();
+        ReceivedMessage msg{};
+        consumer.request_manifest_cached(0x0000A001U, 0U);
+        deliver(p.node, cons_tx, 0U, &msg);
+        CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::CatalogUpdated);
+        CHECK(learned.topic_count() == 1U);
+    }
+    p.tx.clear();
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot + 1U, &cons_tx, &store);
+    TestNode consumer(cfg);
+    btp::StaticCatalog<> learned;
+    consumer.learn_catalog(&learned);
+    consumer.begin();
+    ReceivedMessage msg{};
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    deliver(p.node, cons_tx, 0U, &msg);
+    CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::CatalogUpdated);
+    CHECK(learned.topic_count() == 1U);
+    CHECK(learned.config_revision() == 5U);
+    CHECK(learned.topic(0x0101U) != nullptr);
+}
+
+// Direct session + cache whose revision matches HELLO_RESULT: with the opt-in
+// skip, no MANIFEST_REQUEST goes out and on_manifest() runs from the cache at
+// once (boot_id from HELLO_RESULT, source_info flagged stale). Without the
+// opt-in -- the default -- the request still goes out.
+void test_manifest_skip_on_hello_is_opt_in() {
+    ManifestStore store;
+    Producer p(0x0000A001U, 0x11U, 5U, 0x10U);
+    p.node.enable_session(btp::HelloBuilder(Role::Producer, p.uuid).config_revision(5U).build(),
+                          2000U);
+    p.node.arm_session(0U);
+
+    // Prime the cache over a session.
+    Sink cons_tx;
+    CacheConfig cfg = cache_config(kPeerId, kPeerBoot, &cons_tx, &store);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+    const std::uint8_t my_uuid[16] = {0x42};
+    ReceivedMessage msg{};
+    CHECK(consumer.connect(btp::HelloBuilder(Role::Consumer, my_uuid).build(), 0U, 2000U));
+    CHECK(deliver(p.node, cons_tx, 0U, &msg) == NodeRx::SessionHandled);
+    CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::InitiatorHandled);
+    CHECK(consumer.connected());
+    CHECK(consumer.connected_peer_config_revision() == 5U);
+    CHECK(std::memcmp(consumer.connected_peer_uuid(), p.uuid, 16U) == 0);
+
+    cons_tx.clear();
+    p.tx.clear();
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    deliver(p.node, cons_tx, 0U, &msg);
+    CHECK(deliver(consumer, p.tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(store.entries.count(0x0000A001U) == 1U);
+
+    // Default: still asks.
+    CHECK(!consumer.manifest_skip_on_hello());
+    cons_tx.clear();
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(cons_tx.count() == 1U);
+
+    // Opt-in: answered from the cache, nothing sent.
+    consumer.set_manifest_skip_on_hello(true);
+    cons_tx.clear();
+    const int before = cap.calls;
+    CHECK(consumer.request_manifest_cached(0x0000A001U, 0U));
+    CHECK(cons_tx.count() == 0U);
+    CHECK(cap.calls == before + 1);
+    CHECK(cap.from_cache);
+    CHECK(cap.source_info_stale);
+    CHECK(cap.boot_id == 0x11U);
+    CHECK(cap.topic_count == 1U);
+
+    // A source that is not the connected peer is never skipped.
+    CHECK(consumer.request_manifest_cached(0x0000B002U, 0U));
+    CHECK(cons_tx.count() == 1U);
+}
+
+void test_catalog_content_revision() {
+    btp::StaticCatalog<> a;
+    btp::StaticCatalog<8, 64, 1536, /*SourceInfoEntries=*/2> b;
+    CHECK(a.add_topic(0x0101U, 2U, "drive_status", kDriveFields) == MessageError::Ok);
+    CHECK(b.add_topic(0x0101U, 2U, "drive_status", kDriveFields) == MessageError::Ok);
+    CHECK(a.content_revision() != 0U);
+    CHECK(a.content_revision() == b.content_revision());
+
+    // Any change to what the manifest describes changes it.
+    btp::StaticCatalog<> c;
+    CHECK(c.add_topic(0x0101U, 3U, "drive_status", kDriveFields) == MessageError::Ok);
+    CHECK(c.content_revision() != a.content_revision());
+    btp::StaticCatalog<> d;
+    const btp::FieldRecord other_scale[] = {
+        btp::f32("left_rpm"),
+        btp::u16("battery_v", 0.01),
+        btp::nullable(btp::i16("temp_c", 0.1)),
+    };
+    CHECK(d.add_topic(0x0101U, 2U, "drive_status", other_scale) == MessageError::Ok);
+    CHECK(d.content_revision() != a.content_revision());
+
+    // source_info is not part of it (commands.md 3.12).
+    CHECK(b.add_source_info("fw_version", "Firmware", "9.9.9") == MessageError::Ok);
+    CHECK(b.content_revision() == a.content_revision());
+
+    // Auto mode follows later edits; a fixed revision turns it off.
+    btp::StaticCatalog<> e;
+    e.set_config_revision_auto();
+    const std::uint32_t empty_rev = e.config_revision();
+    CHECK(empty_rev != 0U);
+    CHECK(e.add_topic(0x0101U, 2U, "drive_status", kDriveFields) == MessageError::Ok);
+    CHECK(e.config_revision() == a.content_revision());
+    e.set_config_revision(4U);
+    CHECK(!e.config_revision_auto());
+    CHECK(e.config_revision() == 4U);
+}
+
+// A producer in auto mode serves the content revision, and a consumer that
+// already has it gets NOT_MODIFIED.
+void test_auto_revision_is_served() {
+    Producer p(0x0000A001U, 0x11U, 1U, 0x10U);
+    p.catalog.set_config_revision_auto();
+    const std::uint32_t rev = p.catalog.content_revision();
+
+    Sink cons_tx;
+    TestConfig cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(cfg);
+    ManifestCapture cap;
+    consumer.on_manifest(&capture_manifest, &cap);
+    consumer.begin();
+    ReceivedMessage msg{};
+    consumer.request_manifest(0x0000A001U, 0U, 0U);
+    deliver(p.node, cons_tx, 0U, &msg);
+    deliver(consumer, p.tx, 0U, &msg);
+    CHECK(cap.revision == rev);
+
+    cons_tx.clear();
+    p.tx.clear();
+    consumer.request_manifest(0x0000A001U, 0U, rev);
+    deliver(p.node, cons_tx, 0U, &msg);
+    btp::DecodedFrame f{};
+    CHECK(btp::decode(p.tx.frames[0].data(), p.tx.frames[0].size(), kEspNowTransport,
+                      &f) == btp::Error::Ok);
+    btp::ManifestReader r(f.payload.data, f.payload.size);
+    btp::ManifestHeader h{};
+    CHECK(r.header(&h) == MessageError::Ok);
+    CHECK((h.flags & btp::kManifestNotModified) != 0U);
+}
+
 int main() {
     test_begin();
     test_reconfigure_before_begin();
@@ -2891,6 +3385,17 @@ int main() {
     test_terminal_on_names_the_link_and_lock_is_balanced();
     test_async_command_on_a_reset_link_is_recorded_but_not_sent();
     test_attach_link_bounds();
+
+    test_on_manifest_delivers_every_source();
+    test_manifest_cache_answers_not_modified_from_the_cache();
+    test_manifest_cache_replaced_on_new_revision();
+    test_manifest_cache_evicts_on_uuid_mismatch();
+    test_manifest_cache_evicts_a_corrupt_entry();
+    test_manifest_rejection_is_correlated_and_harmless();
+    test_learn_catalog_is_filled_from_the_cache_on_not_modified();
+    test_manifest_skip_on_hello_is_opt_in();
+    test_catalog_content_revision();
+    test_auto_revision_is_served();
 
     if (failures == 0) {
         std::cout << "test_node: all checks passed\n";

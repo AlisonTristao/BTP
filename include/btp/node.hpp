@@ -136,6 +136,64 @@ using NodeNamedFillFn = void (*)(void* ctx, NamedSampleWriter& writer);
 using NodeTerminalFn = void (*)(void* ctx, Node& node, const Header& header,
                                 ByteView payload, std::uint64_t now_ms);
 
+// One MANIFEST_DATA SUCCESS, as on_manifest() (library 2.48.0) hands it over --
+// for ANY described source, not just one peer's catalogue the way
+// learn_catalog() keeps it. A hub enumeration arrives as one call per source.
+//
+//   header          the response that just ARRIVED: described_source_id,
+//                   described_boot_id, config_revision, source_uuid, role,
+//                   flags. Always current, even when the topics come from the
+//                   cache. Its source_name view points into `payload`.
+//   payload         that response's whole payload. Walk its source_info with
+//                   btp::ManifestReader -- source_info is not covered by
+//                   config_revision (commands.md 3.12), so the fresh one
+//                   rides even a NOT_MODIFIED.
+//   topics_payload  a complete MANIFEST_DATA to read the TOPIC records from:
+//                   `payload` itself for a full response; the cached copy
+//                   when the peer answered NOT_MODIFIED (from_cache true).
+//                   With no cache attached a NOT_MODIFIED is delivered with
+//                   topics_payload == payload, which describes no topics --
+//                   "keep what you have", as before.
+//   from_cache      topics_payload is the cached manifest.
+//   source_info_stale  set only by the skip-on-hello path
+//                   (set_manifest_skip_on_hello()): nothing was asked on the
+//                   wire, so header/payload are the CACHED ones -- only
+//                   described_boot_id was refreshed from HELLO_RESULT -- and
+//                   the source_info they carry is whatever was cached.
+//   link            the link it arrived on.
+//
+// Every view is valid only during the callback.
+struct NodeManifest {
+    ManifestHeader header;
+    ByteView payload;
+    ByteView topics_payload;
+    bool from_cache;
+    bool source_info_stale;
+    LinkRef link;
+};
+
+// Called by receive() for each MANIFEST_DATA SUCCESS -- see NodeManifest.
+// `node` is this node, mid-receive(); sending from here is fine.
+using NodeManifestFn = void (*)(void* ctx, Node& node, const NodeManifest& manifest);
+
+// What the last non-SUCCESS MANIFEST_DATA said (NodeRx::ManifestRejected). A
+// rejection describes no source on the wire (commands.md 3.2), so
+// `target_source_id` is recovered from the request it answers -- 0 when the
+// answer did not correlate with anything this node asked (target 0 was a
+// full enumeration, or someone else's request).
+struct NodeManifestOutcome {
+    std::uint32_t target_source_id;
+    std::uint8_t status;       // ResultStatus
+    std::uint16_t error_code;  // ResultError
+    bool correlated;
+};
+
+// Outstanding MANIFEST_REQUESTs a node remembers, to correlate an answer back
+// to its target (above). A ring: the oldest is forgotten first, which only
+// costs that answer's target_source_id -- a manifest itself is still
+// delivered.
+static const std::size_t kNodeManifestPendingSlots = 8U;
+
 // Called by emit_status() once per actively-subscribed topic (see
 // enable_status_topics() below) to fill the two counters this layer cannot
 // know itself -- bytes actually put on the wire and samples dropped are the
@@ -422,6 +480,44 @@ public:
         terminal(node, header, payload, now_ms);
     }
 
+    // Manifest cache (library 2.48.0) -- WHERE a consumer keeps the
+    // manifests it learned, so the next session asks with
+    // known_config_revision and gets a ~60-octet NOT_MODIFIED instead of the
+    // whole catalogue (Node::request_manifest_cached()). The node decides
+    // WHEN to read and write; your override decides where (a file, NVS, an
+    // SD card, RAM). has_manifest_cache() false (the default) turns the whole
+    // thing off: nothing is read or stored, exactly as before this existed.
+    // Only consulted on a node that consumes manifests (on_manifest() or
+    // learn_catalog() attached).
+    //
+    // What is stored is the raw payload of a complete MANIFEST_DATA SUCCESS
+    // -- the wire format IS the serialisation, there is nothing else to
+    // define. Key it by source_id; manifest_store() also passes the decoded
+    // header (config_revision, source_uuid, source_name...) for an index.
+    //
+    // manifest_load(): point *out at the stored payload and return true, or
+    // return false when there is none. The bytes must stay valid until the
+    // next manifest_* call on this config or until receive() returns,
+    // whichever comes first. The node validates what comes back (a complete
+    // SUCCESS describing `source_id`) and evicts anything else as a miss.
+    virtual bool has_manifest_cache() const noexcept { return false; }
+    virtual bool manifest_load(std::uint32_t source_id, ByteView* out) {
+        (void)source_id;
+        (void)out;
+        return false;
+    }
+    virtual void manifest_store(std::uint32_t source_id, const ManifestHeader& header,
+                                ByteView payload) {
+        (void)source_id;
+        (void)header;
+        (void)payload;
+    }
+    // The stored entry is unusable -- a NOT_MODIFIED answered a revision it
+    // no longer matches, a different source_uuid answered for the same
+    // source_id, or it failed to parse. The node re-requests the full
+    // manifest right after.
+    virtual void manifest_evict(std::uint32_t source_id) { (void)source_id; }
+
     // Mutual exclusion for the state every link shares (2.47.0): the seal /
     // manifest / command scratch buffers, the command dedup cache and the
     // frames_tx counter. The node calls lock() / unlock() around every use
@@ -489,6 +585,9 @@ enum class NodeRx : std::uint8_t {
                      // Counts are in receiver().stats().
     NoDatagram,      // routine() was called with nothing that arrived this pass --
                      // receive() did not run, but the housekeeping still did.
+    ManifestHandled,   // a MANIFEST_DATA SUCCESS -- the node called on_manifest().
+    ManifestRejected,  // a non-SUCCESS MANIFEST_DATA on a node that consumes
+                       // manifests. See manifest_outcome().
 };
 
 const char* node_rx_string(NodeRx rx) noexcept;
@@ -826,6 +925,10 @@ public:
     // peer_config_revision()'s own comment on why it is not part of
     // EffectiveLimits.
     std::uint32_t connected_peer_config_revision() const noexcept;
+    // HELLO_RESULT's peer_uuid -- 16 octets, all zero until connected. The
+    // peer's stable identity (session-and-terminal.md 1.1), unlike
+    // connected_peer_source_id(), which the spec does not promise is stable.
+    const std::uint8_t* connected_peer_uuid() const noexcept;
 
     // Sends SESSION_CLOSE and tears the connection down locally right away
     // (does not wait for SESSION_CLOSE_RESULT). A no-op outside AwaitingResult
@@ -1022,6 +1125,46 @@ public:
     bool request_manifest(std::uint32_t target_source_id,
                           std::uint32_t target_boot_id,
                           std::uint32_t known_config_revision) noexcept;
+
+    // Consumer of MANY sources (library 2.48.0): called for every MANIFEST_DATA
+    // SUCCESS, whichever source it describes -- see NodeManifest. With this
+    // set, receive() consumes MANIFEST_DATA (NodeRx::ManifestHandled /
+    // ManifestRejected) instead of handing it back as Complete. Coexists with
+    // learn_catalog() (both are fed). nullptr detaches.
+    void on_manifest(NodeManifestFn callback, void* ctx) noexcept {
+        on_manifest_ = callback;
+        on_manifest_ctx_ = ctx;
+    }
+
+    // request_manifest() with known_config_revision filled in from the
+    // manifest cache (NodeConfig::manifest_load()) -- 0 on a miss or with no
+    // cache, which asks for the whole thing. The answer then arrives through
+    // on_manifest() / learn_catalog() either way: a full one (stored to the
+    // cache) or a NOT_MODIFIED (delivered with the cached topics).
+    // target_source_id 0 (a full enumeration) never uses the cache --
+    // known_config_revision names ONE source's revision (commands.md 3.1);
+    // ask each known source by id instead when you already know who exists.
+    //
+    // With set_manifest_skip_on_hello(true), a request aimed at the peer this
+    // node is connect()ed to, whose HELLO_RESULT config_revision equals the
+    // cached one, sends NOTHING: on_manifest() runs right here, from the
+    // cache, with source_info_stale set. Returns true when a request went out
+    // or the cache answered.
+    bool request_manifest_cached(std::uint32_t target_source_id,
+                                 std::uint32_t target_boot_id) noexcept;
+
+    // Opt-in, default false -- and false is the recommendation: the
+    // NOT_MODIFIED a skipped request would have fetched costs ~60 octets and
+    // is the only thing that refreshes source_info (firmware version, running
+    // partition...), which config_revision does not cover. Turn it on only
+    // when that round trip matters more than current source_info.
+    void set_manifest_skip_on_hello(bool skip) noexcept { manifest_skip_on_hello_ = skip; }
+    bool manifest_skip_on_hello() const noexcept { return manifest_skip_on_hello_; }
+
+    // The last NodeRx::ManifestRejected. See NodeManifestOutcome.
+    const NodeManifestOutcome& manifest_outcome() const noexcept {
+        return last_manifest_outcome_;
+    }
 
     // Called by receive() for a TELEMETRY sample of a topic the learn catalogue
     // knows. Without this, a TELEMETRY frame comes back as NodeRx::Complete for
@@ -1285,6 +1428,18 @@ private:
     std::uint8_t index_of(const NodeLinkSlot& link) const noexcept;
     void deliver_terminal(NodeLinkSlot& link, const Header& header,
                           ByteView payload, std::uint64_t now_ms) noexcept;
+    // One MANIFEST_REQUEST out on link 0, remembered in manifest_pending_.
+    bool send_manifest_request(std::uint32_t target_source_id,
+                               std::uint32_t target_boot_id,
+                               std::uint32_t known_config_revision) noexcept;
+    // The pending target a MANIFEST_DATA answers, forgotten once found.
+    bool take_manifest_pending(const RequestRef& ref,
+                               std::uint32_t* target_source_id) noexcept;
+    // A validated cache entry for `source_id`, or false (evicting a bad one).
+    bool load_cached_manifest(std::uint32_t source_id, ByteView* payload,
+                              ManifestHeader* header) noexcept;
+    void deliver_manifest(const NodeManifest& manifest) noexcept;
+    NodeRx consume_manifest(NodeLinkSlot& link, const ReceivedMessage& msg) noexcept;
 
     NodeConfig& cfg_;
     std::uint8_t* seal_scratch_;
@@ -1322,6 +1477,18 @@ private:
     Catalog* learn_catalog_;
     NodeSampleFn on_sample_;
     void* on_sample_ctx_;
+
+    NodeManifestFn on_manifest_;  // nullptr until on_manifest()
+    void* on_manifest_ctx_;
+    bool manifest_skip_on_hello_;
+    NodeManifestOutcome last_manifest_outcome_;
+    struct ManifestPending {
+        std::uint32_t sequence;
+        std::uint32_t target_source_id;
+        bool used;
+    };
+    ManifestPending manifest_pending_[kNodeManifestPendingSlots];
+    std::size_t manifest_pending_next_;
 
     Catalog* serve_catalog_;
     std::uint8_t serve_role_;

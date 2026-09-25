@@ -64,8 +64,91 @@ Catalog::Catalog(CatalogTopic* topics, std::size_t topic_capacity,
       source_info_capacity_(source_info_capacity),
       source_info_count_(0U),
       config_revision_(0U),
+      auto_revision_(false),
       valid_(topics != nullptr && topic_capacity != 0U &&
              field_pool != nullptr && field_pool_capacity != 0U) {}
+
+// ---------------------------------------------------------------------------
+// Revision
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// FNV-1a, 32 bits. Every multi-octet value goes in little-endian so the
+// digest does not depend on the host's byte order or struct layout.
+struct Fnv1a {
+    std::uint32_t h = 2166136261U;
+    void byte(std::uint8_t b) noexcept {
+        h ^= b;
+        h *= 16777619U;
+    }
+    void u16(std::uint16_t v) noexcept {
+        byte(static_cast<std::uint8_t>(v));
+        byte(static_cast<std::uint8_t>(v >> 8U));
+    }
+    void u32(std::uint32_t v) noexcept {
+        u16(static_cast<std::uint16_t>(v));
+        u16(static_cast<std::uint16_t>(v >> 16U));
+    }
+    void u64(std::uint64_t v) noexcept {
+        u32(static_cast<std::uint32_t>(v));
+        u32(static_cast<std::uint32_t>(v >> 32U));
+    }
+    void f64(double v) noexcept {
+        // Every NaN ("no bound") hashes the same, whatever its payload bits.
+        if (v != v) {
+            u64(0x7FF8000000000000ULL);
+            return;
+        }
+        std::uint64_t bits = 0U;
+        std::memcpy(&bits, &v, sizeof(bits));
+        u64(bits);
+    }
+    // Length-prefixed, so "ab"+"c" and "a"+"bc" differ.
+    void str(const char* s) noexcept {
+        const std::size_t n = s != nullptr ? std::strlen(s) : 0U;
+        u32(static_cast<std::uint32_t>(n));
+        for (std::size_t i = 0U; i < n; ++i) byte(static_cast<std::uint8_t>(s[i]));
+    }
+};
+
+}  // namespace
+
+std::uint32_t Catalog::config_revision() const noexcept {
+    return auto_revision_ ? content_revision() : config_revision_;
+}
+
+std::uint32_t Catalog::content_revision() const noexcept {
+    Fnv1a f;
+    f.u32(static_cast<std::uint32_t>(topic_count_));
+    for (std::size_t ti = 0U; ti < topic_count_; ++ti) {
+        const CatalogTopic& t = topics_[ti];
+        f.u16(t.topic_id);
+        f.u16(t.schema_version);
+        f.byte(t.encoding);
+        f.byte(t.flags);
+        f.u32(t.max_rate_millihz);
+        f.str(t.name);
+        f.u32(static_cast<std::uint32_t>(t.field_count));
+        for (std::size_t fi = 0U; fi < t.field_count; ++fi) {
+            const FieldSpec& spec = t.fields[fi];
+            f.u16(spec.field_id);
+            f.u16(spec.order);
+            f.byte(spec.type);
+            f.byte(spec.flags);
+            f.u16(spec.element_count);
+            f.u16(spec.max_element_count);
+            f.f64(spec.scale);
+            f.f64(spec.offset);
+            f.f64(field_min(t, fi));
+            f.f64(field_max(t, fi));
+            f.str(field_name(t, fi));
+            f.str(field_unit(t, fi));
+            f.str(field_description(t, fi));
+        }
+    }
+    return f.h != 0U ? f.h : 1U;
+}
 
 void Catalog::clear() noexcept {
     topic_count_ = 0U;
@@ -300,6 +383,7 @@ MessageError Catalog::ingest(const std::uint8_t* payload,
 
     clear();
     config_revision_ = header.config_revision;
+    auto_revision_ = false;
 
     // The format-2 source_info block comes before the topics; walk it into our
     // own pool when the caller kept one. Skipping this call is fine too --

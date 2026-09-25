@@ -81,6 +81,12 @@ Node::Node(NodeConfig& cfg, ReassemblySlot* slots,
       learn_catalog_(nullptr),
       on_sample_(nullptr),
       on_sample_ctx_(nullptr),
+      on_manifest_(nullptr),
+      on_manifest_ctx_(nullptr),
+      manifest_skip_on_hello_(false),
+      last_manifest_outcome_(),
+      manifest_pending_(),
+      manifest_pending_next_(0U),
       serve_catalog_(nullptr),
       serve_role_(0U),
       serve_uuid_(),
@@ -548,13 +554,10 @@ NodeRx Node::finish(NodeLinkSlot& link, ReceiveOutcome outcome,
         serve_manifest(link, out->header, out->payload);
         return NodeRx::RequestServed;
     }
-    if (learn_catalog_ != nullptr &&
+    if ((learn_catalog_ != nullptr || on_manifest_ != nullptr) &&
         out->header.type == MessageType::Control &&
         out->header.object_id == object_id::kManifestData) {
-        return learn_catalog_->ingest(out->payload.data, out->payload.size) ==
-                       MessageError::Ok
-                   ? NodeRx::CatalogUpdated
-                   : NodeRx::DroppedFrame;
+        return consume_manifest(link, *out);
     }
     if (learn_catalog_ != nullptr && on_sample_ != nullptr &&
         out->header.type == MessageType::Telemetry) {
@@ -1020,6 +1023,13 @@ void Node::on_sample(NodeSampleFn callback, void* ctx) noexcept {
 bool Node::request_manifest(std::uint32_t target_source_id,
                             std::uint32_t target_boot_id,
                             std::uint32_t known_config_revision) noexcept {
+    return send_manifest_request(target_source_id, target_boot_id,
+                                 known_config_revision);
+}
+
+bool Node::send_manifest_request(std::uint32_t target_source_id,
+                                 std::uint32_t target_boot_id,
+                                 std::uint32_t known_config_revision) noexcept {
     ManifestRequest request = {};
     request.target_source_id = target_source_id;
     request.target_boot_id = target_boot_id;
@@ -1031,8 +1041,181 @@ bool Node::request_manifest(std::uint32_t target_source_id,
         MessageError::Ok) {
         return false;
     }
-    return send(MessageType::Control, object_id::kManifestRequest, buffer,
-                written, resolve_now(0U) * 1000ULL);
+
+    // Reserved first, so the answer's RequestRef (reply_to_sequence) can be
+    // matched back to this target -- see take_manifest_pending().
+    SharedLock guard(cfg_);
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return false;
+    ManifestPending& slot = manifest_pending_[manifest_pending_next_];
+    manifest_pending_next_ = (manifest_pending_next_ + 1U) % kNodeManifestPendingSlots;
+    slot.sequence = sequence;
+    slot.target_source_id = target_source_id;
+    slot.used = true;
+    const bool ok = transmit_reserved(link0_, sequence, MessageType::Control,
+                                      object_id::kManifestRequest, buffer, written,
+                                      resolve_now(0U) * 1000ULL);
+    if (ok) ++frames_tx_;
+    return ok;
+}
+
+bool Node::take_manifest_pending(const RequestRef& ref,
+                                 std::uint32_t* target_source_id) noexcept {
+    if (ref.request_source_id != cfg_.source_id || ref.request_boot_id != cfg_.boot_id) {
+        return false;  // unsolicited (all zero), or answering somebody else
+    }
+    for (std::size_t i = 0U; i < kNodeManifestPendingSlots; ++i) {
+        ManifestPending& slot = manifest_pending_[i];
+        if (slot.used && slot.sequence == ref.reply_to_sequence) {
+            *target_source_id = slot.target_source_id;
+            slot.used = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Node::load_cached_manifest(std::uint32_t source_id, ByteView* payload,
+                                ManifestHeader* header) noexcept {
+    if (source_id == 0U || !cfg_.has_manifest_cache()) return false;
+    ByteView stored{};
+    if (!cfg_.manifest_load(source_id, &stored)) return false;
+
+    // Trust nothing that came back from storage: it must be a complete
+    // SUCCESS describing this very source, framed exactly (raw_records()
+    // requires the payload consumed to the last octet).
+    bool ok = stored.data != nullptr && stored.size != 0U;
+    ManifestHeader h = {};
+    if (ok) {
+        ManifestReader reader(stored.data, stored.size);
+        ByteView info{};
+        ByteView topics{};
+        ByteView actions{};
+        ok = reader.header(&h) == MessageError::Ok &&
+             h.status == static_cast<std::uint8_t>(ResultStatus::Success) &&
+             (h.flags & kManifestNotModified) == 0U &&
+             h.described_source_id == source_id &&
+             reader.raw_source_info(&info) == MessageError::Ok &&
+             reader.raw_records(&topics, &actions) == MessageError::Ok;
+    }
+    if (!ok) {
+        cfg_.manifest_evict(source_id);
+        return false;
+    }
+    *payload = stored;
+    *header = h;
+    return true;
+}
+
+bool Node::request_manifest_cached(std::uint32_t target_source_id,
+                                   std::uint32_t target_boot_id) noexcept {
+    ByteView cached{};
+    ManifestHeader cached_header = {};
+    const bool have = target_source_id != 0U &&
+                      load_cached_manifest(target_source_id, &cached, &cached_header);
+
+    // Skip-on-hello (opt-in): the peer we are connected to already told us
+    // its revision in HELLO_RESULT, and the cache holds exactly that one --
+    // answer from the cache without a round trip. Only the boot changes
+    // between sessions without the revision changing, and HELLO_RESULT
+    // carried that too.
+    if (have && manifest_skip_on_hello_ && initiator_.connected() &&
+        target_source_id == initiator_.peer_source_id() &&
+        cached_header.config_revision == initiator_.peer_config_revision() &&
+        std::memcmp(cached_header.source_uuid, initiator_.peer_uuid(), 16U) == 0) {
+        NodeManifest manifest = {};
+        manifest.header = cached_header;
+        manifest.header.described_boot_id = initiator_.peer_boot_id();
+        manifest.payload = cached;
+        manifest.topics_payload = cached;
+        manifest.from_cache = true;
+        manifest.source_info_stale = true;
+        manifest.link = ref_of(0U, link0_);
+        deliver_manifest(manifest);
+        return true;
+    }
+
+    return send_manifest_request(target_source_id, target_boot_id,
+                                 have ? cached_header.config_revision : 0U);
+}
+
+void Node::deliver_manifest(const NodeManifest& manifest) noexcept {
+    if (learn_catalog_ != nullptr) {
+        // topics_payload is complete (a full answer, or the cached one) or a
+        // NOT_MODIFIED with no cache behind it, which ingest() already reads
+        // as "keep what I have".
+        learn_catalog_->ingest(manifest.topics_payload.data, manifest.topics_payload.size);
+    }
+    if (on_manifest_ != nullptr) {
+        on_manifest_(on_manifest_ctx_, *this, manifest);
+    }
+}
+
+NodeRx Node::consume_manifest(NodeLinkSlot& link, const ReceivedMessage& msg) noexcept {
+    ManifestReader reader(msg.payload.data, msg.payload.size);
+    ManifestHeader header = {};
+    if (reader.header(&header) != MessageError::Ok) {
+        return NodeRx::DroppedFrame;
+    }
+
+    std::uint32_t target = 0U;
+    const bool correlated = take_manifest_pending(header.request, &target);
+
+    if (header.status != static_cast<std::uint8_t>(ResultStatus::Success)) {
+        // Describes no source (commands.md 3.2) -- nothing to learn, and in
+        // particular nothing to wipe a learn catalogue with.
+        last_manifest_outcome_.target_source_id = target;
+        last_manifest_outcome_.status = header.status;
+        last_manifest_outcome_.error_code = header.error_code;
+        last_manifest_outcome_.correlated = correlated;
+        return NodeRx::ManifestRejected;
+    }
+
+    const std::uint32_t source = header.described_source_id;
+    const bool not_modified = (header.flags & kManifestNotModified) != 0U;
+    ByteView topics = msg.payload;
+    bool from_cache = false;
+
+    if (cfg_.has_manifest_cache() && source != 0U) {
+        if (not_modified) {
+            ByteView cached{};
+            ManifestHeader cached_header = {};
+            const bool have = load_cached_manifest(source, &cached, &cached_header);
+            const bool usable =
+                have && cached_header.config_revision == header.config_revision &&
+                std::memcmp(cached_header.source_uuid, header.source_uuid, 16U) == 0;
+            if (!usable) {
+                // The peer says "you already have revision N", but what is
+                // stored is not N (it changed underneath, or was never ours),
+                // or it belongs to another device with the same source_id.
+                // Drop it and fetch the real thing.
+                if (have) cfg_.manifest_evict(source);
+                send_manifest_request(source, 0U, 0U);
+                return NodeRx::Ignored;
+            }
+            topics = cached;
+            from_cache = true;
+        } else {
+            cfg_.manifest_store(source, header, msg.payload);
+        }
+    }
+
+    NodeManifest manifest = {};
+    manifest.header = header;
+    manifest.payload = msg.payload;
+    manifest.topics_payload = topics;
+    manifest.from_cache = from_cache;
+    manifest.source_info_stale = false;
+    manifest.link = ref_of(index_of(link), link);
+
+    if (on_manifest_ == nullptr) {
+        // learn_catalog() alone: same NodeRx it always returned.
+        return learn_catalog_->ingest(topics.data, topics.size) == MessageError::Ok
+                   ? NodeRx::CatalogUpdated
+                   : NodeRx::DroppedFrame;
+    }
+    deliver_manifest(manifest);
+    return NodeRx::ManifestHandled;
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,6 +1543,10 @@ std::uint32_t Node::connected_peer_config_revision() const noexcept {
     return initiator_.peer_config_revision();
 }
 
+const std::uint8_t* Node::connected_peer_uuid() const noexcept {
+    return initiator_.peer_uuid();
+}
+
 bool Node::disconnect(std::uint8_t reason,
                       std::uint32_t drain_timeout_ms) noexcept {
     return disconnect(resolve_now(0U), reason, drain_timeout_ms);
@@ -1458,6 +1645,8 @@ const char* node_rx_string(NodeRx rx) noexcept {
         case NodeRx::Ignored: return "ignored";
         case NodeRx::DroppedFrame: return "dropped frame";
         case NodeRx::NoDatagram: return "no datagram";
+        case NodeRx::ManifestHandled: return "manifest handled";
+        case NodeRx::ManifestRejected: return "manifest rejected";
     }
     return "unknown";
 }
