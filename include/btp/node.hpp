@@ -543,11 +543,10 @@ public:
     // whole payload before fragmenting; a false from `cfg.seal()` sends
     // nothing (fail-closed). Returns "did the whole logical message go out".
     //
-    // FIRST-CUT LIMIT: a single encoded frame must fit the ESP-NOW ceiling
-    // (250 octets) -- true for every EspNow and UsbHid frame, and for Serial
-    // payloads up to ~200 octets. A larger Serial frame returns false; native
-    // large-Serial TX is a later change (it needs a caller frame buffer the
-    // endpoint layer does not take yet).
+    // Frames never exceed 250 octets (the ESP-NOW ceiling), whatever the
+    // transport: on a TCP / Serial / BLE node a payload larger than that goes
+    // out as several fragments the receiver reassembles (2.46.0 -- before, a
+    // payload past ~200 octets on those transports made send() fail).
     bool send(MessageType type, std::uint16_t object_id,
               const std::uint8_t* payload, std::size_t size,
               std::uint64_t timestamp_us) noexcept;

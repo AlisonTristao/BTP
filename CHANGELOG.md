@@ -50,7 +50,11 @@ Later changes:
 * `2.46`: a keyed `Node` rejects cleartext messages by default
   (`NodeConfig::accept_cleartext()`, `Node::Stats::dropped_cleartext` /
   `dropped_open_failed`); TCP and BLE transport profiles (`kTcpTransport`,
-  `kBleTransport`).
+  `kBleTransport`); `Endpoint::send_logical()` (and every `Node` send)
+  fragments to at most 250-octet frames on any transport, so a payload past
+  ~200 octets on a TCP / Serial / BLE node no longer fails to send;
+  `btp::TxQueue` / `StaticTxQueue` (`btp/txqueue.hpp`), a send-side priority
+  queue that sheds telemetry first.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of

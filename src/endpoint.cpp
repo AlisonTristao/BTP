@@ -8,14 +8,26 @@
 namespace btp {
 namespace {
 
-// Every frame this class encodes into is bounded by the ESP-NOW ceiling: the
-// endpoint's real job is channel-C / channel-B radio traffic, and a logical
-// payload larger than one ESP-NOW frame goes through send_logical(), which
-// fragments to fit. A single frame that does not fit -- a Serial-sized
-// cleartext fragment, say -- fails cleanly on encode()'s own capacity check
-// rather than being silently truncated. Serial / USB-HID sized single frames
-// are TraceView's concern, not this class's.
+// Every frame this class encodes goes through a stack buffer of the ESP-NOW
+// ceiling, so no send ever needs caller storage for the frame itself.
+// send_logical() therefore fragments against the SMALLER of the transport's
+// own frame ceiling and this buffer (frame_limits() below): on a TCP /
+// Serial / BLE link a logical message larger than one ESP-NOW frame goes out
+// as several frames of at most 250 octets -- always valid on the wider
+// transport, and reassembled by the receiver like any other fragmented
+// message -- instead of one oversized frame that could not be encoded here
+// (which, before 2.46.0, made the whole send fail).
 constexpr std::size_t kFrameScratchSize = kEspNowMaxFrameSize;
+
+// The limits send_logical() actually fragments against: the transport's,
+// capped at what fits kFrameScratchSize.
+TransportLimits frame_limits(const TransportLimits& transport) noexcept {
+    TransportLimits limits = transport;
+    if (limits.max_frame_size > kFrameScratchSize) {
+        limits.max_frame_size = kFrameScratchSize;
+    }
+    return limits;
+}
 
 // The sealed copy of one single-frame payload. A whole logical message that
 // needs fragmenting seals into the caller's seal_scratch instead (its size is a
@@ -206,15 +218,16 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
         (message.payload.data == nullptr && message.payload.size != 0U)) {
         return false;
     }
+    const TransportLimits limits = frame_limits(transport);
 
     // ----- cleartext: slice the plaintext directly, one frame at a time -----
     if (seal == nullptr) {
         std::uint8_t count = 0U;
-        if (btp::fragment_count(message.payload.size, transport, &count) !=
+        if (btp::fragment_count(message.payload.size, limits, &count) !=
             btp::Error::Ok) {
             return false;
         }
-        const std::size_t limit = max_payload_size(transport);
+        const std::size_t limit = max_payload_size(limits);
         for (std::uint8_t index = 0U; index < count; ++index) {
             const std::size_t offset = static_cast<std::size_t>(index) * limit;
             const std::size_t remaining = message.payload.size - offset;
@@ -224,7 +237,7 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
                 {message.payload.data == nullptr ? nullptr
                                                  : message.payload.data + offset,
                  fragment_size}};
-            if (!send_fragment(fragment, transport, sequence, index, count, send,
+            if (!send_fragment(fragment, limits, sequence, index, count, send,
                                send_context)) {
                 return false;
             }
@@ -261,7 +274,7 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
     }
 
     std::uint8_t count = 0U;
-    if (btp::fragment_count(sealed_size, transport, &count) != btp::Error::Ok) {
+    if (btp::fragment_count(sealed_size, limits, &count) != btp::Error::Ok) {
         return false;
     }
 
@@ -272,12 +285,12 @@ bool Endpoint::send_logical_impl(std::uint32_t sequence,
     for (std::uint8_t index = 0U; index < count; ++index) {
         btp::Frame fragment{};
         if (btp::make_fragment(logical_header, {seal_scratch, sealed_size},
-                               transport, index, &fragment) != btp::Error::Ok) {
+                               limits, index, &fragment) != btp::Error::Ok) {
             return false;
         }
         std::uint8_t frame[kFrameScratchSize];
         std::size_t frame_size = 0U;
-        if (btp::encode(fragment, transport, frame, sizeof(frame),
+        if (btp::encode(fragment, limits, frame, sizeof(frame),
                         &frame_size) != btp::Error::Ok) {
             return false;
         }

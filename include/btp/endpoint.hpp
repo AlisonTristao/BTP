@@ -155,7 +155,10 @@ public:
     // sealed copy the fragments are cut from). Fails closed: a false from
     // `seal` or `send`, an oversized payload, or an unconfigured endpoint sends
     // nothing further and returns false. Best-effort past the first frame:
-    // there is no rollback of frames already sent.
+    // there is no rollback of frames already sent. Fragments are cut to the
+    // smaller of `transport.max_frame_size` and the 250-octet ESP-NOW frame
+    // this class encodes into, so a wide transport (TCP / Serial / BLE) gets
+    // several <= 250-octet frames rather than a failed send (2.46.0).
     bool send_logical(const LogicalMessage& message, const TransportLimits& transport,
                       EndpointSendFn send, void* send_context,
                       std::uint8_t* seal_scratch,

@@ -2409,6 +2409,56 @@ void test_keyed_session_handshake_stays_cleartext() {
     CHECK(responder.session()->state() == btp::SessionState::Active);
 }
 
+// ===========================================================================
+// btp::Node -- sends on a transport whose frames exceed 250 octets (2.46.0)
+// ===========================================================================
+
+// A payload larger than one ESP-NOW frame on a TCP / Serial / BLE node used to
+// fail outright: the transport's own ceiling (8192 / 4096 / 512) produced ONE
+// fragment too big for the 250-octet frame the endpoint encodes into, so
+// send() returned false and nothing reached the wire -- a robot's ~1.7 KB
+// sealed MANIFEST_DATA over a direct TCP session, for one. Fragments are now
+// cut to fit that frame, and the receiver reassembles them as usual.
+void check_large_send_on(const btp::TransportLimits& transport, bool sealed) {
+    Sink tx;
+    TestConfig sender_cfg = base_config(kSenderId, kSenderBoot, &tx);
+    sender_cfg.transport = transport;
+    if (sealed) sender_cfg.seal_fn = &fake_seal;
+    btp::StaticNode<4, 2048, 2048> sender(sender_cfg);
+    CHECK(sender.begin());
+
+    Sink rx_out;
+    TestConfig receiver_cfg = base_config(kPeerId, kPeerBoot, &rx_out);
+    receiver_cfg.transport = transport;
+    if (sealed) receiver_cfg.open_fn = &fake_open;
+    btp::StaticNode<4, 2048, 2048> receiver(receiver_cfg);
+    CHECK(receiver.begin());
+
+    const std::vector<std::uint8_t> payload = make_payload(1710, 0x21);
+    CHECK(sender.send(MessageType::Control, btp::object_id::kManifestData, payload.data(),
+                      payload.size(), 1ULL));
+    CHECK(tx.count() > 1U);
+    for (const std::vector<std::uint8_t>& frame : tx.frames) {
+        CHECK(frame.size() <= btp::kEspNowMaxFrameSize);
+        CHECK(frame.size() <= transport.max_frame_size);
+    }
+
+    ReceivedMessage msg{};
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::Complete);
+    CHECK(msg.reassembled);
+    CHECK(msg.payload.size == payload.size());
+    CHECK(msg.payload.size == payload.size() &&
+          std::memcmp(msg.payload.data, payload.data(), payload.size()) == 0);
+}
+
+void test_large_send_on_wide_transports() {
+    check_large_send_on(btp::kTcpTransport, /*sealed=*/false);
+    check_large_send_on(btp::kTcpTransport, /*sealed=*/true);
+    check_large_send_on(btp::kSerialTransport, /*sealed=*/false);
+    check_large_send_on(btp::kSerialTransport, /*sealed=*/true);
+    check_large_send_on(btp::kBleTransport, /*sealed=*/true);
+}
+
 int main() {
     test_begin();
     test_reconfigure_before_begin();
@@ -2417,6 +2467,7 @@ int main() {
     test_receive_decoded_frame_drives_the_session();
     test_fragmented_roundtrip();
     test_sealed_roundtrip();
+    test_large_send_on_wide_transports();
     test_keyed_node_drops_cleartext_by_default();
     test_accept_cleartext_override();
     test_open_failure_is_counted();

@@ -3348,14 +3348,57 @@ has the rest silently left out of *that* message. No callback attached, no
 served catalog, no subscription table, or simply nothing subscribed right
 now: falls back to v1, unchanged from before this existed.
 
-### 16.9 What stays out
+### 16.9 Send queue (`btp::TxQueue`)
+
+A `Node` sends synchronously: every frame goes straight to `cfg.send()`. A
+link that is slower than its producers -- a radio waiting on a delivery
+callback, a socket with a full buffer -- needs a queue in between, and the
+spec (docs/model.md section 8) says telemetry is shed first under
+congestion. `btp::TxQueue` (`btp/txqueue.hpp`, header-only, 2.46.0) is that
+queue, written once: one FIFO per `PriorityClass`, all sharing one pool of
+caller-owned fixed-size slots.
+
+- **Classification** -- `push(frame, size)` reads the class off the frame's own
+  (cleartext) header with `frame_priority()`; `push(frame, size, cls)` takes it
+  explicitly (e.g. a degraded STATUS, whose DEGRADED bit is in the payload).
+- **Shedding** -- a full pool evicts the *oldest* frame of the *lowest* class
+  below the incoming one; with nothing lower queued, the incoming frame is
+  dropped (`TxPush::Dropped`). Per-class `stats()` count queued / sent /
+  dropped.
+- **Draining** -- `TxDrainPolicy::Strict` (highest non-empty class first) or
+  `Weighted` (per-round shares, `kDefaultTxWeights` = 8/4/4/2/2/1, so control
+  traffic cannot starve telemetry outright). `front()` / `pop()` are split for
+  a delivery-confirmed link: the frame `front()` handed out stays put -- never
+  evicted -- until `pop()`. `drain(send, ctx, max)` is the plain loop.
+
+```cpp
+btp::StaticTxQueue<16> queue;   // 16 frames of up to 250 octets
+
+class RobotLink : public btp::NodeConfig {
+    bool send(const std::uint8_t* frame, std::size_t n) override {
+        Lock lock(queue_mutex);                    // not thread-safe by itself
+        return queue.push(frame, n) != btp::TxPush::Dropped;
+    }
+};
+
+// radio task
+{ Lock lock(queue_mutex); queue.drain(&radio_send, &peer, /*max_frames=*/4); }
+```
+
+No allocation, exceptions, clock or locking -- a queue shared between tasks
+is wrapped in the caller's own critical section. A `Node` frame never exceeds
+250 octets whatever the transport (§14), so `SlotBytes =
+kEspNowMaxFrameSize` fits every frame a `Node` produces.
+
+### 16.10 What stays out
 
 Everything §11 keeps above the wire, unchanged: **routing policy** (`receive()`
 hands back a message it does not manage; relay-or-drop is the caller's one
 switch), the **hub subscription aggregator** (one subscription upstream per N
 downstream subscribers of the same source + topic -- §16.6 is the per-node
-piece; a hub layers its aggregation on top via `Node::subscriptions()`), the
-priority scheduler, and **key derivation** (the body of your `seal` / `open`).
+piece; a hub layers its aggregation on top via `Node::subscriptions()`), and
+**key derivation** (the body of your `seal` / `open`). A send queue is opt-in
+and sits outside the `Node`, in its `send()` (§16.9).
 §16.3's `connect()` is only the `HELLO` → `HELLO_RESULT` handshake -- a
 subscription and a command are still the caller's to make, once `connected()`
 is true. Plus: **link framing** — a `Node` does not own COBS / HID-report
@@ -3363,8 +3406,9 @@ de-padding / a serial byte stream. `receive(datagram, size)` wants one whole
 BTP frame; a caller that owns its own framing (feeds bytes through
 `btp::SerialDecoder`, de-pads a HID report) hands the decoded frame to
 `receive(const DecodedFrame&, …)` (2.35.0) instead, and gets the identical
-session / reassembly / discovery path. A single encoded frame must still fit
-the ESP-NOW ceiling — large-Serial TX is a later addition.
+session / reassembly / discovery path. On the send side a `Node` never emits
+a frame past the 250-octet ESP-NOW ceiling: a larger message on a TCP /
+Serial / BLE node goes out as fragments the receiver reassembles (2.46.0).
 
 ---
 

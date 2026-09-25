@@ -33,5 +33,6 @@
 #include <btp/receiver.hpp>
 #include <btp/session.hpp>
 #include <btp/subscription.hpp>
+#include <btp/txqueue.hpp>
 
 int main() { return 0; }

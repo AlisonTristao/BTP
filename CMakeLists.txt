@@ -501,6 +501,14 @@ if(BTP_BUILD_TESTS)
     btp_strict_warnings(btp_node_tests)
     add_test(NAME btp_node_tests COMMAND btp_node_tests)
 
+    # btp::TxQueue (header-only): the send-side priority queue, driven with
+    # opaque frames, real encoded frames and a Node that sends through it.
+    add_executable(btp_txqueue_tests tests/test_txqueue.cpp)
+    target_link_libraries(btp_txqueue_tests PRIVATE btp::node)
+    target_compile_features(btp_txqueue_tests PRIVATE cxx_std_11)
+    btp_strict_warnings(btp_txqueue_tests)
+    add_test(NAME btp_txqueue_tests COMMAND btp_txqueue_tests)
+
     # Compile-only: simulates Qt's <QObject> macro environment (unless a
     # consumer builds with QT_NO_KEYWORDS, #define slots / signals / emit are
     # active in every TU that included it, including this one's -- a BTP
