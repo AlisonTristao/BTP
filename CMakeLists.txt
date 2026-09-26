@@ -1,3 +1,34 @@
+# ---------------------------------------------------------------------------
+# ESP-IDF component. When ESP-IDF's build system includes this file (the repo
+# listed in EXTRA_COMPONENT_DIRS, or pulled by the IDF component manager), it
+# must register one component and stop: project(), options and the host test
+# targets below belong to a standalone CMake build only.
+#
+# REQUIRES mbedtls is the whole reason this block exists. A library compiled
+# outside the IDF component graph never gets the mbedtls / PSA include paths,
+# so src/aead.cpp would compile to nothing and btp::aead_* would come out
+# undefined at link time (see the backend selection comment in src/aead.cpp).
+# ---------------------------------------------------------------------------
+if(ESP_PLATFORM)
+    idf_component_register(
+        SRCS
+            "src/codec.cpp"
+            "src/fragmentation.cpp"
+            "src/stream.cpp"
+            "src/messages.cpp"
+            "src/telemetry.cpp"
+            "src/session.cpp"
+            "src/endpoint.cpp"
+            "src/receiver.cpp"
+            "src/catalog.cpp"
+            "src/subscription.cpp"
+            "src/node.cpp"
+            "src/aead.cpp"
+        INCLUDE_DIRS "include"
+        REQUIRES mbedtls)
+    return()
+endif()
+
 cmake_minimum_required(VERSION 3.16)
 
 # The version number lives in one place -- include/btp/version.hpp -- so that

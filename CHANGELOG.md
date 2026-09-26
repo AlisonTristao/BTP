@@ -69,6 +69,11 @@ Later changes:
   `Node::connected_peer_uuid()` / `SessionInitiator::peer_uuid()`,
   `Catalog::set_config_revision_auto()` / `content_revision()`. A rejected
   `MANIFEST_DATA` no longer empties a learn catalogue. Source compatible.
+* `2.49`: the repository is also an ESP-IDF component -- `CMakeLists.txt`
+  calls `idf_component_register(... REQUIRES mbedtls)` when ESP-IDF includes
+  it, so a project can list the checkout in `EXTRA_COMPONENT_DIRS` (or pull it
+  with the component manager) and get the AEAD backend without a wrapper
+  component. No code change.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of

@@ -116,7 +116,8 @@ target_link_libraries(app PRIVATE btp::codec)  # or btp::node
 ```
 
 The repository also supports `add_subdirectory()`, `FetchContent` and
-PlatformIO. The [library guide](docs/library.md) lists all targets and build
+PlatformIO, and is an ESP-IDF component on its own: add the checkout to
+`EXTRA_COMPONENT_DIRS` (or the component manager) and `REQUIRES BTP`. The [library guide](docs/library.md) lists all targets and build
 options. To compile the embedded test target:
 
 ```bash
