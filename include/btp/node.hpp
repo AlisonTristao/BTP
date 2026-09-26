@@ -511,16 +511,16 @@ public:
     // return false when there is none. The bytes must stay valid until the
     // next manifest_* call on this config or until receive() returns,
     // whichever comes first. The node validates what comes back (a complete
-    // SUCCESS describing `source_id`) and evicts anything else as a miss.
+    // SUCCESS describing `cached_source_id`) and evicts anything else as a miss.
     virtual bool has_manifest_cache() const noexcept { return false; }
-    virtual bool manifest_load(std::uint32_t source_id, ByteView* out) {
-        (void)source_id;
+    virtual bool manifest_load(std::uint32_t cached_source_id, ByteView* out) {
+        (void)cached_source_id;
         (void)out;
         return false;
     }
-    virtual void manifest_store(std::uint32_t source_id, const ManifestHeader& header,
+    virtual void manifest_store(std::uint32_t cached_source_id, const ManifestHeader& header,
                                 ByteView payload) {
-        (void)source_id;
+        (void)cached_source_id;
         (void)header;
         (void)payload;
     }
@@ -528,7 +528,7 @@ public:
     // no longer matches, a different source_uuid answered for the same
     // source_id, or it failed to parse. The node re-requests the full
     // manifest right after.
-    virtual void manifest_evict(std::uint32_t source_id) { (void)source_id; }
+    virtual void manifest_evict(std::uint32_t cached_source_id) { (void)cached_source_id; }
 
     // Mutual exclusion for the state every link shares (2.47.0): the seal /
     // manifest / command scratch buffers, the command dedup cache and the
