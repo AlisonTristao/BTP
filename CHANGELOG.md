@@ -74,6 +74,20 @@ Later changes:
   it, so a project can list the checkout in `EXTRA_COMPONENT_DIRS` (or pull it
   with the component manager) and get the AEAD backend without a wrapper
   component. No code change.
+* `2.50`: STREAM actions and action records in the catalogue -- the action
+  flag `kActionStream` (action flags bit 2, [commands.md 2.7](docs/commands.md#27-stream-actions)):
+  each request is a self-contained sample, served without deduplication and
+  never answered, and it declares no results (`ManifestWriter` /
+  `ManifestReader` reject one that does). `btp::Catalog` keeps action records
+  (`CatalogAction`, `add_action()`, `ActionBuilder`, `action()` /
+  `action_at()`, `write_actions()`; `StaticCatalog`'s new `Actions` argument),
+  `Node::emit_manifest()` serves them, `Node::serve_command()` runs a STREAM
+  action of the served catalogue without the dedup cache or a result, and
+  `Node::send_stream()` sends one. The content revision of a catalogue with
+  no actions is unchanged. New: [profiles](docs/profiles/index.md), naming
+  conventions layered on BTP (not part of the protocol), starting with the
+  closed-loop `loop` profile and the optional `btp/profiles/loop.hpp` /
+  `loopctl.h` headers. Wire compatible.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of
