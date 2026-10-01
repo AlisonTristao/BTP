@@ -89,3 +89,6 @@ nav:
   - Commands and discovery: commands.md
   - Session and terminal: session-and-terminal.md
   - Using the library: library.md
+  - Profiles:
+      - Overview: profiles/index.md
+      - Closed-loop control (loop): profiles/loop.md
