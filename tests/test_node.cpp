@@ -862,6 +862,135 @@ void test_serve_catalog_with_source_info() {
     CHECK(learned.source_info_count() == 2U);
 }
 
+// A served catalogue that holds actions: the MANIFEST_DATA the producer sends
+// carries the action records (header.action_count + the records themselves),
+// a consumer with an action pool learns them, one without simply skips them,
+// and a NOT_MODIFIED reply carries none.
+//
+// The manifest is bigger than one frame, so the wire check reads the
+// reassembled payload off on_manifest() rather than off a single frame.
+struct ActionManifestCapture {
+    std::vector<std::uint8_t> payload;
+};
+void capture_action_manifest(void* ctx, btp::Node&, const btp::NodeManifest& m) {
+    ActionManifestCapture* c = static_cast<ActionManifestCapture*>(ctx);
+    c->payload.assign(m.payload.data, m.payload.data + m.payload.size);
+}
+
+void test_serve_catalog_with_actions() {
+    const std::uint8_t uuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
+                                   9, 10, 11, 12, 13, 14, 15, 16};
+
+    Sink prod_tx;
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
+    btp::StaticCatalog<4, 32, 1024, 0, /*Actions=*/2> served;
+    served.set_config_revision_auto();
+    CHECK(served.add_topic(0x0101U, 2U, "drive_status", kDriveFields) ==
+          btp::MessageError::Ok);
+    CHECK(served.action(0x0201U, 1U, "set_target")
+              .f32("x_mm", "mm")
+              .f32("y_mm", "mm")
+              .stream()
+              .timeout_ms(50U)
+              .end() == btp::MessageError::Ok);
+    const std::uint32_t revision = served.config_revision();
+    producer.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           uuid, "example-robot");
+    producer.begin();
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    btp::StaticCatalog<4, 32, 1024, 0, 2> learned;
+    ActionManifestCapture capture;
+    consumer.learn_catalog(&learned);
+    consumer.on_manifest(&capture_action_manifest, &capture);
+    consumer.begin();
+
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(prod_tx.count() >= 1U);
+    deliver(consumer, prod_tx, 0U, &msg);
+
+    // The wire: header.action_count == 1, one STREAM action record.
+    CHECK(!capture.payload.empty());
+    {
+        btp::ManifestReader r(capture.payload.data(), capture.payload.size());
+        btp::ManifestHeader h{};
+        CHECK(r.header(&h) == btp::MessageError::Ok);
+        CHECK(h.topic_count == 1U);
+        CHECK(h.action_count == 1U);
+        CHECK(h.config_revision == revision);
+        btp::TopicRecord topic{};
+        btp::ByteView field_bytes{};
+        CHECK(r.next_topic(&topic, &field_bytes) == btp::ManifestStep::Item);
+        btp::ActionRecord action{};
+        btp::ByteView params{};
+        btp::ByteView results{};
+        btp::ByteView errors{};
+        CHECK(r.next_action(&action, &params, &results, &errors) ==
+              btp::ManifestStep::Item);
+        CHECK(action.action_id == 0x0201U && action.action_version == 1U);
+        CHECK((action.flags & btp::kActionStream) != 0U);
+        CHECK(action.parameter_field_count == 2U);
+        CHECK(action.result_field_count == 0U);
+        CHECK(action.execution_timeout_ms == 50U);
+        CHECK(action.name.size == 10U &&
+              std::memcmp(action.name.data, "set_target", 10U) == 0);
+        CHECK(r.next_action(&action, &params, &results, &errors) ==
+              btp::ManifestStep::End);
+        CHECK(r.finish() == btp::MessageError::Ok);
+    }
+
+    // The consumer learned the topic and the action.
+    CHECK(learned.topic(0x0101U) != nullptr);
+    CHECK(learned.action_count() == 1U);
+    const btp::CatalogAction* learned_action = learned.action(0x0201U, 1U);
+    CHECK(learned_action != nullptr);
+    if (learned_action != nullptr) {
+        CHECK((learned_action->flags & btp::kActionStream) != 0U);
+        CHECK(learned_action->parameter_count == 2U);
+        CHECK(std::strcmp(learned.field_name(*learned_action, 1), "y_mm") == 0);
+        CHECK(std::strcmp(learned.field_unit(*learned_action, 0), "mm") == 0);
+    }
+    CHECK(learned.content_revision() == served.content_revision());
+
+    // A consumer without an action pool still learns the topic.
+    Sink plain_tx;
+    TestConfig plain_cfg = base_config(kPeerId, kPeerBoot, &plain_tx);
+    TestNode plain(plain_cfg);
+    btp::StaticCatalog<4, 32, 1024> plain_learned;
+    plain.learn_catalog(&plain_learned);
+    plain.begin();
+    prod_tx.clear();
+    CHECK(plain.request_manifest(kSenderId, kSenderBoot, 0U));
+    CHECK(deliver(producer, plain_tx, 0U, &msg) == NodeRx::RequestServed);
+    deliver(plain, prod_tx, 0U, &msg);
+    CHECK(plain_learned.topic(0x0101U) != nullptr);
+    CHECK(plain_learned.action_count() == 0U);
+
+    // NOT_MODIFIED: no records, so no actions either.
+    prod_tx.clear();
+    cons_tx.clear();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, revision));
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(prod_tx.count() == 1U);
+    {
+        btp::DecodedFrame f{};
+        CHECK(btp::decode(prod_tx.frames[0].data(), prod_tx.frames[0].size(),
+                          btp::kEspNowTransport, &f) == btp::Error::Ok);
+        btp::ManifestReader r(f.payload.data, f.payload.size);
+        btp::ManifestHeader h{};
+        CHECK(r.header(&h) == btp::MessageError::Ok);
+        CHECK((h.flags & btp::kManifestNotModified) != 0U);
+        CHECK(h.topic_count == 0U && h.action_count == 0U);
+    }
+    deliver(consumer, prod_tx, 0U, &msg);
+    CHECK(learned.action_count() == 1U);  // kept
+}
+
 // --- consumer sends MANIFEST_REQUEST ---------------------------------------
 
 void test_request_manifest() {
@@ -1974,6 +2103,268 @@ void test_static_node_bundles_commands() {
     CHECK(calls.calls == 1);
     CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::CommandHandled);
     CHECK(consumer.command_outcome().event == CommandEvent::Completed);
+}
+
+// ===========================================================================
+// btp::Node -- STREAM actions (kActionStream, docs/commands.md section 2.7)
+// ===========================================================================
+
+struct StreamCalls {
+    int calls;
+    int invalid_ticket_calls;
+    int valid_ticket_calls;
+    std::uint16_t last_action_id;
+    std::uint16_t last_action_version;
+    std::vector<std::uint8_t> last_params;
+};
+
+void stream_probe_action(void* ctx, std::uint16_t action_id,
+                         std::uint16_t action_version, btp::ByteView parameters,
+                         NodeActionOutcome* outcome,
+                         const NodeCommandTicket& ticket) {
+    StreamCalls* c = static_cast<StreamCalls*>(ctx);
+    ++c->calls;
+    if (ticket.valid()) {
+        ++c->valid_ticket_calls;
+    } else {
+        ++c->invalid_ticket_calls;
+    }
+    c->last_action_id = action_id;
+    c->last_action_version = action_version;
+    c->last_params.assign(parameters.data, parameters.data + parameters.size);
+    // Whatever a stream handler writes to the outcome is ignored: even a
+    // rejection status and pending = true send nothing.
+    outcome->status = static_cast<std::uint8_t>(btp::ResultStatus::Rejected);
+    outcome->pending = true;
+}
+
+constexpr std::uint16_t kStreamActionId = 0x0201U;
+constexpr std::uint16_t kPlainActionId = 0x0202U;
+
+struct StreamResponder {
+    Sink tx;
+    TestConfig cfg;
+    TestNode node;
+    btp::StaticCatalog<4, 32, 1024, 0, /*Actions=*/2> served;
+    StreamCalls calls;
+
+    StreamResponder()
+        : cfg(base_config(kSenderId, kSenderBoot, &tx)),
+          node(cfg),
+          served(),
+          calls() {
+        const std::uint8_t uuid[16] = {1, 2, 3, 4, 5, 6, 7, 8,
+                                       9, 10, 11, 12, 13, 14, 15, 16};
+        served.set_config_revision_auto();
+        CHECK(served.action(kStreamActionId, 1U, "set_target")
+                  .u8("x")
+                  .u8("y")
+                  .stream()
+                  .end() == btp::MessageError::Ok);
+        CHECK(served.action(kPlainActionId, 1U, "reset").u8("mode").end() ==
+              btp::MessageError::Ok);
+        node.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer),
+                           uuid, "stream-test");
+        node.enable_commands(&stream_probe_action, &calls);
+        CHECK(node.begin());
+        tx.clear();  // drop the catalog announcement
+    }
+};
+
+void test_stream_action_runs_every_request_and_never_answers() {
+    StreamResponder responder;
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+    // No command client attached: send_stream() does not need one.
+    initiator.enable_command_client(nullptr);
+    CHECK(initiator.command_client() == nullptr);
+
+    const std::uint8_t params[2] = {7, 9};
+    CHECK(initiator.send_stream(kSenderId, kSenderBoot, kStreamActionId, 1U, params,
+                                sizeof(params)));
+    CHECK(init_tx.count() == 1U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(responder.node, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(responder.calls.calls == 1);
+    CHECK(responder.calls.invalid_ticket_calls == 1);
+    CHECK(responder.calls.valid_ticket_calls == 0);
+    CHECK(responder.calls.last_action_id == kStreamActionId);
+    CHECK(responder.calls.last_action_version == 1U);
+    CHECK(responder.calls.last_params.size() == 2U);
+    CHECK(responder.calls.last_params[0] == 7U &&
+          responder.calls.last_params[1] == 9U);
+    CHECK(responder.tx.count() == 0U);  // no COMMAND_RESULT, not even a rejection
+
+    // The very same request bytes delivered again: executed again, still
+    // unanswered -- a STREAM action bypasses the dedup cache.
+    CHECK(deliver(responder.node, init_tx, 10U, &msg) == NodeRx::CommandServed);
+    CHECK(responder.calls.calls == 2);
+    CHECK(responder.calls.invalid_ticket_calls == 2);
+    CHECK(responder.tx.count() == 0U);
+    CHECK(responder.node.commands() != nullptr);
+    CHECK(responder.node.commands()->stats().replayed == 0U);
+
+    // The handler's ticket is not completable.
+    NodeActionOutcome outcome = {};
+    CHECK(!responder.node.complete_command(NodeCommandTicket{}, outcome));
+
+    // A second sample gets its own sequence and also runs.
+    init_tx.clear();
+    const std::uint8_t params2[2] = {1, 2};
+    CHECK(initiator.send_stream(kSenderId, kSenderBoot, kStreamActionId, 1U, params2,
+                                sizeof(params2)));
+    CHECK(deliver(responder.node, init_tx, 20U, &msg) == NodeRx::CommandServed);
+    CHECK(responder.calls.calls == 3);
+    CHECK(responder.calls.last_params[0] == 1U);
+    CHECK(responder.tx.count() == 0U);
+}
+
+void test_non_stream_action_still_dedups_and_answers() {
+    StreamResponder responder;
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+    const std::uint8_t params[1] = {5};
+    const std::uint32_t local_id = initiator.command(
+        kSenderId, kSenderBoot, kPlainActionId, 1U, params, sizeof(params));
+    CHECK(local_id != 0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(responder.node, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(responder.calls.calls == 1);
+    CHECK(responder.calls.valid_ticket_calls == 1);  // armed, as always
+    CHECK(responder.calls.invalid_ticket_calls == 0);
+    // The probe handler set pending, so nothing is sent yet ...
+    CHECK(responder.tx.count() == 0U);
+    // ... and a retransmission of the same request is a DuplicateInFlight:
+    // dropped, the action does not run again.
+    CHECK(deliver(responder.node, init_tx, 10U, &msg) == NodeRx::CommandServed);
+    CHECK(responder.calls.calls == 1);
+}
+
+// A non-stream action answered synchronously: result sent, retransmission
+// replayed from the dedup cache -- on the same node that serves stream actions.
+void sync_ok_action(void* ctx, std::uint16_t, std::uint16_t, btp::ByteView,
+                    NodeActionOutcome*, const NodeCommandTicket&) {
+    ++*static_cast<int*>(ctx);
+}
+
+void test_non_stream_action_replays_next_to_a_stream_action() {
+    Sink tx;
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx);
+    TestNode node(cfg);
+    btp::StaticCatalog<4, 32, 1024, 0, 2> served;
+    served.set_config_revision_auto();
+    CHECK(served.action(kStreamActionId, 1U, "set_target").u8("x").stream().end() ==
+          btp::MessageError::Ok);
+    CHECK(served.action(kPlainActionId, 1U, "reset").u8("mode").end() ==
+          btp::MessageError::Ok);
+    const std::uint8_t uuid[16] = {1};
+    node.serve_catalog(&served, static_cast<std::uint8_t>(Role::Producer), uuid,
+                       "stream-test");
+    int calls = 0;
+    node.enable_commands(&sync_ok_action, &calls);
+    CHECK(node.begin());
+    tx.clear();
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+    const std::uint8_t params[1] = {5};
+    CHECK(initiator.command(kSenderId, kSenderBoot, kPlainActionId, 1U, params,
+                            sizeof(params)) != 0U);
+
+    ReceivedMessage msg{};
+    CHECK(deliver(node, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls == 1);
+    CHECK(tx.count() == 1U);  // COMMAND_RESULT
+    tx.clear();
+    CHECK(deliver(node, init_tx, 10U, &msg) == NodeRx::CommandServed);
+    CHECK(calls == 1);        // not run again
+    CHECK(tx.count() == 1U);  // the stored result replayed
+}
+
+void test_stream_action_without_served_catalog_keeps_old_behavior() {
+    Sink resp_tx;
+    TestConfig responder_cfg = base_config(kSenderId, kSenderBoot, &resp_tx);
+    TestNode responder(responder_cfg);
+    ActionCalls calls = {};
+    responder.enable_commands(&echo_action, &calls);  // no serve_catalog()
+    CHECK(responder.begin());
+
+    Sink init_tx;
+    TestConfig initiator_cfg = base_config(kPeerId, kPeerBoot, &init_tx);
+    TestNode initiator(initiator_cfg);
+    CHECK(initiator.begin());
+    const std::uint8_t params[2] = {7, 9};
+    CHECK(initiator.send_stream(kSenderId, kSenderBoot, kStreamActionId, 1U, params,
+                                sizeof(params)));
+
+    // Not known to be a stream action here: executed once, answered, and a
+    // retransmission is replayed from the dedup cache.
+    ReceivedMessage msg{};
+    CHECK(deliver(responder, init_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
+    CHECK(resp_tx.count() == 1U);
+    resp_tx.clear();
+    CHECK(deliver(responder, init_tx, 10U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
+    CHECK(resp_tx.count() == 1U);
+}
+
+void test_send_stream_emits_a_command_request() {
+    Sink tx;
+    TestConfig cfg = base_config(kPeerId, kPeerBoot, &tx);
+    TestNode node(cfg);
+    node.enable_command_client(nullptr);
+    CHECK(node.begin());
+
+    const std::uint8_t params[3] = {0xAA, 0xBB, 0xCC};
+    CHECK(node.send_stream(kSenderId, kSenderBoot, kStreamActionId, 3U, params,
+                           sizeof(params)));
+    CHECK(tx.count() == 1U);
+
+    // Decode it with a plain receiver node.
+    Sink rx_tx;
+    TestConfig rx_cfg = base_config(kSenderId, kSenderBoot, &rx_tx);
+    TestNode receiver(rx_cfg);
+    CHECK(receiver.begin());
+    ReceivedMessage msg{};
+    CHECK(deliver(receiver, tx, 0U, &msg) == NodeRx::Complete);
+    CHECK(msg.header.type == MessageType::Command);
+    CHECK(msg.header.object_id == btp::object_id::kCommandRequest);
+    CHECK(msg.header.source_id == kPeerId);
+    CHECK(msg.header.boot_id == kPeerBoot);
+    btp::CommandRequest req = {};
+    CHECK(btp::decode_command_request(msg.payload.data, msg.payload.size, &req) ==
+          btp::MessageError::Ok);
+    CHECK(req.target_source_id == kSenderId);
+    CHECK(req.target_boot_id == kSenderBoot);
+    CHECK(req.action_id == kStreamActionId);
+    CHECK(req.action_version == 3U);
+    CHECK(req.parameters.size == sizeof(params));
+    CHECK(req.parameters.data[0] == 0xAAU && req.parameters.data[2] == 0xCCU);
+
+    // Each sample uses its own sequence.
+    const std::uint32_t first_sequence = msg.header.sequence;
+    tx.clear();
+    CHECK(node.send_stream(kSenderId, kSenderBoot, kStreamActionId, 3U, params,
+                           sizeof(params)));
+    CHECK(deliver(receiver, tx, 1U, &msg) == NodeRx::Complete);
+    CHECK(msg.header.sequence != first_sequence);
+
+    // A request encode_command_request() rejects (zero target) is refused.
+    tx.clear();
+    CHECK(!node.send_stream(0U, kSenderBoot, kStreamActionId, 3U, params,
+                            sizeof(params)));
+    CHECK(tx.count() == 0U);
 }
 
 // cfg.command / cfg.command_ctx wire the responder from construction, same
@@ -3368,6 +3759,7 @@ int main() {
     test_catalog_discovery();
     test_catalog_serve_and_publish();
     test_serve_catalog_with_source_info();
+    test_serve_catalog_with_actions();
     test_request_manifest();
 
     test_connect_handshake_and_effective_limits();
@@ -3387,6 +3779,11 @@ int main() {
     test_node_config_wires_on_terminal();
     test_static_node_bundles_commands();
     test_static_node_config_wires_commands();
+    test_stream_action_runs_every_request_and_never_answers();
+    test_non_stream_action_still_dedups_and_answers();
+    test_non_stream_action_replays_next_to_a_stream_action();
+    test_stream_action_without_served_catalog_keeps_old_behavior();
+    test_send_stream_emits_a_command_request();
 
     test_status_disabled_by_default();
     test_status_sends_after_the_period_and_counts_frames_tx();

@@ -276,6 +276,15 @@ struct NodeCommandTicket {
 //     (any task), call Node::complete_command(ticket, real_outcome) with
 //     pending left false this time -- that call does what returning from
 //     this one synchronously would have.
+// STREAM ACTIONS (docs/commands.md section 2.7): when the served catalog
+// (Node::serve_catalog()) declares the requested (action_id, action_version)
+// with kActionStream, the handler is called for EVERY COMMAND_REQUEST, with no
+// deduplication, and no COMMAND_RESULT is ever sent. The handler recognises
+// such a call by `!ticket.valid()` (the ticket is not armed); `outcome` is a
+// scratch value that is ignored -- `pending` has no effect and nothing is
+// sent whatever it holds -- and complete_command() refuses that ticket.
+// The request is a self-contained sample; ordering / "latest wins" is the
+// handler's concern (put what it needs in the parameters).
 using NodeActionFn = void (*)(void* ctx, std::uint16_t action_id,
                               std::uint16_t action_version, ByteView parameters,
                               NodeActionOutcome* outcome,
@@ -1011,6 +1020,12 @@ public:
 
     // RESPONDER: `cache` deduplicates; `handler` runs a Fresh request,
     // synchronously or not (NodeActionFn above). nullptr for either detaches.
+    // A request for an action the served catalog marks kActionStream bypasses
+    // `cache` and reaches `handler` every time with an invalid ticket (the
+    // handler tells such a call by `!ticket.valid()`), unanswered -- see
+    // NodeActionFn and docs/commands.md section 2.7. That needs a served
+    // catalog (serve_catalog()); without one every request takes the normal
+    // path.
     void enable_commands(DedupCache* cache, NodeActionFn handler, void* ctx) noexcept {
         commands_ = cache;
         on_command_ = handler;
@@ -1049,6 +1064,18 @@ public:
                           std::uint16_t action_id, std::uint16_t action_version,
                           const std::uint8_t* parameters,
                           std::size_t parameters_size) noexcept;
+
+    // INITIATOR of a STREAM action (docs/commands.md section 2.7): sends one
+    // COMMAND_REQUEST (link 0) as a self-contained sample and returns. No
+    // command client is needed -- nothing is held, correlated, timed out or
+    // retried, and no result is expected, so there is no command_outcome().
+    // true when the frame was handed to the transport; false on any failure
+    // (no scratch buffer, no sequence, an encode_command_request() rejection,
+    // or a send failure). The caller sends the next sample on its own period.
+    bool send_stream(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                     std::uint16_t action_id, std::uint16_t action_version,
+                     const std::uint8_t* parameters,
+                     std::size_t parameters_size) noexcept;
 
     // The command event the most recent receive() / tick() produced, and its
     // full detail on Completed (status / error_code / message / result --

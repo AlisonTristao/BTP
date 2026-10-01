@@ -1350,6 +1350,194 @@ void test_manifest_verbatim_wrong_order() {
 }
 
 // ---------------------------------------------------------------------------
+// STREAM actions (kActionStream, docs/commands.md section 2.7)
+// ---------------------------------------------------------------------------
+
+// A one-action manifest header; the caller fills topic_count = 0.
+btp::ManifestHeader stream_test_header() {
+    btp::ManifestHeader header = {};
+    header.manifest_format_version = 1U;
+    header.status = 0U;
+    header.source_role = static_cast<std::uint8_t>(btp::Role::Producer);
+    header.topic_count = 0U;
+    header.action_count = 1U;
+    header.source_name = {reinterpret_cast<const std::uint8_t*>("x"), 1U};
+    return header;
+}
+
+btp::ActionRecord stream_test_action(std::uint16_t flags, std::uint16_t results,
+                                     btp::ActionEncoding result_encoding) {
+    btp::ActionRecord action = {};
+    action.action_id = 0x1234U;
+    action.action_version = 0x5678U;
+    action.flags = flags;
+    action.parameter_encoding = static_cast<std::uint8_t>(btp::ActionEncoding::PackedLe);
+    action.result_encoding = static_cast<std::uint8_t>(result_encoding);
+    action.parameter_field_count = 1U;
+    action.result_field_count = results;
+    action.name = {reinterpret_cast<const std::uint8_t*>("a"), 1U};
+    return action;
+}
+
+btp::FieldRecord stream_test_field(std::uint16_t field_id, const char* name) {
+    btp::FieldRecord f = btp::f32(name);
+    f.field_id = field_id;
+    return f;
+}
+
+// A STREAM action with parameters and no results is written and read back with
+// the flag intact.
+void test_manifest_stream_action_round_trip() {
+    std::uint8_t buffer[256] = {};
+    btp::ManifestWriter writer(buffer, sizeof(buffer));
+    CHECK(writer.begin(stream_test_header()) == btp::MessageError::Ok);
+    CHECK(writer.begin_action(stream_test_action(
+              static_cast<std::uint16_t>(btp::kActionStream | btp::kActionIdempotent), 0U,
+              btp::ActionEncoding::Empty)) == btp::MessageError::Ok);
+    CHECK(writer.add_action_param(stream_test_field(1U, "p")) == btp::MessageError::Ok);
+    CHECK(writer.end_action() == btp::MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+    btp::ManifestReader reader(buffer, written);
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+    btp::ActionRecord action = {};
+    btp::ByteView params = {};
+    btp::ByteView results = {};
+    btp::ByteView errors = {};
+    CHECK(reader.next_action(&action, &params, &results, &errors) == ManifestStep::Item);
+    CHECK((action.flags & btp::kActionStream) != 0U);
+    CHECK((action.flags & btp::kActionIdempotent) != 0U);
+    CHECK((action.flags & btp::kActionDangerous) == 0U);
+    CHECK(action.parameter_field_count == 1U);
+    CHECK(action.result_field_count == 0U);
+    CHECK(action.result_encoding == static_cast<std::uint8_t>(btp::ActionEncoding::Empty));
+    CHECK(reader.next_action(&action, &params, &results, &errors) == ManifestStep::End);
+    CHECK(reader.finish() == btp::MessageError::Ok);
+}
+
+// The writer refuses a STREAM action that describes a result: a result field,
+// or a result_encoding other than EMPTY.
+void test_manifest_stream_action_writer_rejects_results() {
+    {
+        std::uint8_t buffer[256] = {};
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(stream_test_header()) == btp::MessageError::Ok);
+        CHECK(writer.begin_action(stream_test_action(
+                  btp::kActionStream, 1U, btp::ActionEncoding::Empty)) ==
+              btp::MessageError::InvalidArgument);
+    }
+    {
+        std::uint8_t buffer[256] = {};
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(stream_test_header()) == btp::MessageError::Ok);
+        CHECK(writer.begin_action(stream_test_action(
+                  btp::kActionStream, 0U, btp::ActionEncoding::PackedLe)) ==
+              btp::MessageError::InvalidArgument);
+    }
+    {
+        // The same shape without the STREAM bit is a perfectly good action.
+        std::uint8_t buffer[256] = {};
+        btp::ManifestWriter writer(buffer, sizeof(buffer));
+        CHECK(writer.begin(stream_test_header()) == btp::MessageError::Ok);
+        CHECK(writer.begin_action(stream_test_action(
+                  0U, 1U, btp::ActionEncoding::PackedLe)) == btp::MessageError::Ok);
+    }
+}
+
+// The reader refuses a payload whose STREAM bit is set on an action that has
+// results (the writer cannot produce one, so patch the flags in the buffer).
+void test_manifest_stream_action_reader_rejects_results() {
+    std::uint8_t buffer[256] = {};
+    btp::ManifestWriter writer(buffer, sizeof(buffer));
+    CHECK(writer.begin(stream_test_header()) == btp::MessageError::Ok);
+    CHECK(writer.begin_action(stream_test_action(
+              0U, 1U, btp::ActionEncoding::PackedLe)) == btp::MessageError::Ok);
+    CHECK(writer.add_action_param(stream_test_field(1U, "p")) == btp::MessageError::Ok);
+    CHECK(writer.add_action_result(stream_test_field(1U, "r")) == btp::MessageError::Ok);
+    CHECK(writer.end_action() == btp::MessageError::Ok);
+    std::size_t written = 0U;
+    CHECK(writer.finish(&written) == btp::MessageError::Ok);
+
+    // action_id 0x1234 (LE 34 12), action_version 0x5678 (LE 78 56), then the
+    // u16 flags. Find the distinctive id+version and set bit 2 of the flags.
+    std::size_t flags_at = 0U;
+    for (std::size_t i = 0U; i + 6U <= written; ++i) {
+        if (buffer[i] == 0x34U && buffer[i + 1U] == 0x12U && buffer[i + 2U] == 0x78U &&
+            buffer[i + 3U] == 0x56U) {
+            flags_at = i + 4U;
+            break;
+        }
+    }
+    CHECK(flags_at != 0U);
+    CHECK(buffer[flags_at] == 0U && buffer[flags_at + 1U] == 0U);
+    buffer[flags_at] = static_cast<std::uint8_t>(btp::kActionStream & 0xFFU);
+
+    btp::ManifestReader reader(buffer, written);
+    btp::ManifestHeader header = {};
+    CHECK(reader.header(&header) == btp::MessageError::Ok);
+    btp::ActionRecord action = {};
+    btp::ByteView params = {};
+    btp::ByteView results = {};
+    btp::ByteView errors = {};
+    CHECK(reader.next_action(&action, &params, &results, &errors) == ManifestStep::Error);
+    CHECK(reader.error() == btp::MessageError::InvalidValue);
+}
+
+// The checked-in vectors (tools/test_messages.py): a valid STREAM action, and
+// the two ways a STREAM action may not be shaped (a result field, a
+// result_encoding other than EMPTY).
+void test_manifest_stream_action_vectors() {
+    {
+        const std::vector<std::uint8_t> bytes =
+            read_vector("manifest_data/valid/manifest_data_stream_action.bin");
+        btp::ManifestReader reader(bytes.data(), bytes.size());
+        btp::ManifestHeader header = {};
+        CHECK(reader.header(&header) == btp::MessageError::Ok);
+        CHECK(header.action_count == 1U);
+        btp::SourceInfoEntry si = {};
+        while (reader.next_source_info(&si) == ManifestStep::Item) {
+        }
+        btp::ActionRecord action = {};
+        btp::ByteView params = {};
+        btp::ByteView results = {};
+        btp::ByteView errors = {};
+        CHECK(reader.next_action(&action, &params, &results, &errors) ==
+              ManifestStep::Item);
+        CHECK(action.action_id == 2U && action.action_version == 1U);
+        CHECK((action.flags & btp::kActionStream) != 0U);
+        CHECK((action.flags & btp::kActionIdempotent) != 0U);
+        CHECK(action.parameter_field_count == 2U);
+        CHECK(action.result_field_count == 0U);
+        CHECK(action.result_encoding ==
+              static_cast<std::uint8_t>(btp::ActionEncoding::Empty));
+        CHECK(reader.next_action(&action, &params, &results, &errors) ==
+              ManifestStep::End);
+        CHECK(reader.finish() == btp::MessageError::Ok);
+    }
+    const char* const invalid[] = {
+        "manifest_data/invalid/manifest_stream_with_result_field.bin",
+        "manifest_data/invalid/manifest_stream_with_result_encoding.bin"};
+    for (std::size_t i = 0U; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        const std::vector<std::uint8_t> bytes = read_vector(invalid[i]);
+        btp::ManifestReader reader(bytes.data(), bytes.size());
+        btp::ManifestHeader header = {};
+        CHECK(reader.header(&header) == btp::MessageError::Ok);
+        btp::SourceInfoEntry si = {};
+        while (reader.next_source_info(&si) == ManifestStep::Item) {
+        }
+        btp::ActionRecord action = {};
+        btp::ByteView params = {};
+        btp::ByteView results = {};
+        btp::ByteView errors = {};
+        CHECK(reader.next_action(&action, &params, &results, &errors) ==
+              ManifestStep::Error);
+        CHECK(reader.error() == btp::MessageError::InvalidValue);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // negotiate() and is_message_object()
 // ---------------------------------------------------------------------------
 
@@ -1532,6 +1720,10 @@ int main() {
     test_manifest_verbatim_roundtrip();
     test_manifest_verbatim_truncates();
     test_manifest_verbatim_wrong_order();
+    test_manifest_stream_action_round_trip();
+    test_manifest_stream_action_writer_rejects_results();
+    test_manifest_stream_action_reader_rejects_results();
+    test_manifest_stream_action_vectors();
     test_negotiate();
     test_is_message_object();
     test_priority_class();

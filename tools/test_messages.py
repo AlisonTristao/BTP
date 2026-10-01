@@ -861,6 +861,10 @@ def _read_action(r, fmt):
     a["name"] = ar.utf8_u16(MAX_NAME).decode("utf-8")
     a["description"] = ar.utf8_u16().decode("utf-8")
     a["confirmation_text"] = ar.utf8_u16().decode("utf-8")
+    # A STREAM action (flags bit 2, docs/commands.md section 2.7) is never
+    # answered, so it cannot describe a result.
+    if a["flags"] & 0x0004 and (result_count != 0 or a["result_encoding"] != 0):
+        raise ValueError("InvalidValue")
     params = [_read_field(ar, fmt) for _ in range(param_count)]
     results = [_read_field(ar, fmt) for _ in range(result_count)]
     error_count = ar.u16()

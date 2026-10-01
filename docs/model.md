@@ -187,6 +187,8 @@ The request and result model allows the requester to determine whether an operat
 
 Command retries preserve the identity of the original request so that repeated transmission does not necessarily cause repeated execution.
 
+A **stream action** ([Commands and discovery §2.7](commands.md#27-stream-actions)) is the exception: each `COMMAND_REQUEST` is a self-contained sample, executed without deduplication and never answered by a `COMMAND_RESULT`.
+
 ### 3.4 TERMINAL
 
 `TERMINAL` carries interactive byte data in both directions.
@@ -428,6 +430,8 @@ When retrying the same command, the requester preserves the identity and payload
 This allows the receiver to identify duplicate requests and avoid executing the same operation multiple times.
 
 A request using a new `sequence` represents a new command operation.
+
+Requests for a stream action ([Commands and discovery §2.7](commands.md#27-stream-actions)) are the exception: there is no `COMMAND_RESULT` to wait for and no deduplication, and the requester does not retry.
 
 ---
 

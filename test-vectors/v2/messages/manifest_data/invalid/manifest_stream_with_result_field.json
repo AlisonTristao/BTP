@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_stream_with_result_field",
+  "object": "manifest_data",
+  "base": "manifest_data_stream_action",
+  "description": "A STREAM action (flags bit 2) declares a result field: result_field_count is 1. A stream action is never answered, so it cannot describe a result (docs/commands.md section 3.9).",
+  "mutations": [
+    {
+      "operation": "set_u16_le",
+      "offset": 87,
+      "value": 1
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

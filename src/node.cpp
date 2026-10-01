@@ -766,6 +766,27 @@ void Node::serve_command(NodeLinkSlot& link, const Header& request,
         return;
     }
 
+    // A STREAM action (docs/commands.md section 2.7): every request is a
+    // self-contained sample -- run it every time, no DedupCache, never a
+    // COMMAND_RESULT (not even a rejection). Only an action the served
+    // catalog declares kActionStream takes this path; without a catalog, or
+    // for any other action, the normal dedup path below is unchanged.
+    if (serve_catalog_ != nullptr) {
+        const CatalogAction* action =
+            serve_catalog_->action(req.action_id, req.action_version);
+        if (action != nullptr && (action->flags & kActionStream) != 0U) {
+            NodeActionOutcome ignored = {};
+            NodeCommandTicket ticket{};  // armed == false: valid() is false
+            ticket.request = request;
+            ticket.action_id = req.action_id;
+            ticket.action_version = req.action_version;
+            ticket.link = ref_of(index_of(link), link);
+            on_command_(on_command_ctx_, req.action_id, req.action_version,
+                       req.parameters, &ignored, ticket);
+            return;
+        }
+    }
+
     const DedupKey key{request.source_id, request.boot_id, request.sequence};
     std::size_t slot = 0U;
     ByteView stored{};
@@ -930,6 +951,33 @@ std::uint32_t Node::command(std::uint32_t peer_source_id, std::uint32_t peer_boo
                       object_id::kCommandRequest, scratch_buffer_, written,
                       now_ms * 1000ULL);
     return local_id;
+}
+
+bool Node::send_stream(std::uint32_t peer_source_id, std::uint32_t peer_boot_id,
+                       std::uint16_t action_id, std::uint16_t action_version,
+                       const std::uint8_t* parameters,
+                       std::size_t parameters_size) noexcept {
+    if (scratch_buffer_ == nullptr) return false;
+    SharedLock guard(cfg_);
+    CommandRequest req = {};
+    req.target_source_id = peer_source_id;
+    req.target_boot_id = peer_boot_id;
+    req.action_id = action_id;
+    req.action_version = action_version;
+    req.parameters = ByteView{parameters, parameters_size};
+
+    std::size_t written = 0U;
+    if (encode_command_request(req, scratch_buffer_, scratch_capacity_, &written) !=
+        MessageError::Ok) {
+        return false;
+    }
+    std::uint32_t sequence = 0U;
+    if (!endpoint_.reserve_sequence(&sequence)) return false;
+    // No CommandClient slot: a STREAM action is never answered, so there is
+    // nothing to correlate, time out or retry.
+    return transmit_reserved(link0_, sequence, MessageType::Command,
+                             object_id::kCommandRequest, scratch_buffer_, written,
+                             resolve_now(0U) * 1000ULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,6 +1327,10 @@ void Node::emit_manifest(NodeLinkSlot& link, const Header& request,
         with_topics
             ? static_cast<std::uint16_t>(serve_catalog_->topic_count())
             : 0U;
+    header.action_count =
+        with_topics
+            ? static_cast<std::uint16_t>(serve_catalog_->action_count())
+            : 0U;
     if (serve_name_ != nullptr) {
         header.source_name =
             ByteView{reinterpret_cast<const std::uint8_t*>(serve_name_),
@@ -1292,6 +1344,9 @@ void Node::emit_manifest(NodeLinkSlot& link, const Header& request,
         return;
     }
     if (with_topics && serve_catalog_->write_topics(&writer) != MessageError::Ok) {
+        return;
+    }
+    if (with_topics && serve_catalog_->write_actions(&writer) != MessageError::Ok) {
         return;
     }
     std::size_t written = 0U;

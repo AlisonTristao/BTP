@@ -23,11 +23,15 @@
 // ahead of the topics (fw version, chip, partition; docs/commands.md section
 // 3.12), producer-set with add_source_info() and consumer-read back with
 // source_info_at() after ingest(); it needs its own small pool
-// (StaticCatalog's SourceInfoEntries template argument). NOT yet: a topic's
-// own description, enum labels, action (command) records. A round-tripped
-// manifest keeps what the sample codec needs, the names, the field-level UI
-// labels (unit/description) and the source_info rows; a topic-level
-// description still does not round-trip.
+// (StaticCatalog's SourceInfoEntries template argument). Also action
+// (command) records -- id, version, flags (idempotent / dangerous / STREAM),
+// encodings, timeout, name, description, confirmation text and the parameter +
+// result fields -- kept in their own CatalogAction pool (StaticCatalog's
+// Actions template argument) but sharing the topics' field pools. NOT yet: a
+// topic's own description, enum labels, the action-specific error entries. A
+// round-tripped manifest keeps what the sample codec needs, the names, the
+// field-level UI labels (unit/description) and the source_info rows; a
+// topic-level description still does not round-trip.
 
 #include "btp/messages.hpp"   // ManifestReader/Writer, FieldRecord, TelemetryEncoding, MessageError
 #include "btp/telemetry.hpp"  // FieldSpec, SampleWriter, SampleLayout, the f32/u16/... helpers
@@ -39,6 +43,7 @@
 namespace btp {
 
 class TopicBuilder;  // below Catalog -- topic() returns one
+class ActionBuilder;  // below Catalog -- action() returns one
 
 // ---------------------------------------------------------------------------
 // One topic in a Catalog
@@ -95,6 +100,46 @@ struct CatalogTopic {
 };
 
 // ---------------------------------------------------------------------------
+// One action (command) in a Catalog
+// ---------------------------------------------------------------------------
+//
+// Mirrors CatalogTopic. `fields` holds the parameter fields first, then the
+// result fields, contiguously: parameter_count entries followed by
+// result_count ones, and every pointer array below is indexed the same way
+// (Catalog::field_name() & co. take that combined index). All pointers point
+// into the Catalog's caller-owned pools -- the same field / name / unit /
+// description / min / max / string pools the topics use -- and are valid until
+// the next add_action() / ingest() / clear().
+//
+// A STREAM action (flags & kActionStream) is a self-contained sample per
+// COMMAND_REQUEST, never answered: it has no result fields and an EMPTY
+// result_encoding (docs/commands.md section 2.7).
+
+struct CatalogAction {
+    std::uint16_t action_id;
+    std::uint16_t action_version;
+    std::uint16_t flags;               // kActionIdempotent | kActionDangerous | kActionStream
+    std::uint8_t parameter_encoding;   // ActionEncoding
+    std::uint8_t result_encoding;      // ActionEncoding
+    std::uint32_t execution_timeout_ms;
+
+    const char* name;                  // NUL-terminated; "" without a string pool
+    const char* description;           // ditto
+    const char* confirmation_text;     // ditto
+
+    const FieldSpec* fields;           // parameter_count + result_count entries
+    std::size_t parameter_count;
+    std::size_t result_count;
+
+    // nullptr when the matching pool was not set -- see CatalogTopic.
+    const char* const* field_names;
+    const char* const* field_units;
+    const char* const* field_descriptions;
+    const double* field_mins;
+    const double* field_maxs;
+};
+
+// ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------
 
@@ -109,7 +154,12 @@ public:
     // -- names, units, descriptions alike -- share the one `string_pool`.
     // `min_pool` / `max_pool` are the same idea again but hold doubles
     // directly (no interning) -- an unset entry reads back as NaN via
-    // field_min() / field_max(). btp::StaticCatalog bundles all these pools.
+    // field_min() / field_max(). `action_pool` holds the action records; it is
+    // optional ({nullptr, 0}: a producer's add_action() is then refused and a
+    // consumer's ingest() skips actions), and an action's fields draw on the
+    // same field / name / unit / description / min / max / string pools as the
+    // topics' do -- size them for both. btp::StaticCatalog bundles all these
+    // pools.
     Catalog(CatalogTopic* topics, std::size_t topic_capacity,
             FieldSpec* field_pool, std::size_t field_pool_capacity,
             const char** name_ptr_pool, std::size_t name_ptr_capacity,
@@ -121,14 +171,15 @@ public:
             SourceInfoEntry* source_info_pool = nullptr,
             std::size_t source_info_capacity = 0U,
             double* min_pool = nullptr, std::size_t min_pool_capacity = 0U,
-            double* max_pool = nullptr,
-            std::size_t max_pool_capacity = 0U) noexcept;
+            double* max_pool = nullptr, std::size_t max_pool_capacity = 0U,
+            CatalogAction* action_pool = nullptr,
+            std::size_t action_capacity = 0U) noexcept;
 
     // True when the topic slots and the field pool are non-null and non-empty.
     // Check once after construction.
     bool valid() const noexcept { return valid_; }
 
-    // Drop every topic and reset the pools. config_revision() is kept.
+    // Drop every topic and action and reset the pools. config_revision() is kept.
     void clear() noexcept;
 
     // The revision a producer announces (MANIFEST_DATA, HELLO_RESULT) and a
@@ -154,7 +205,11 @@ public:
     // A 32-bit FNV-1a digest of everything the manifest describes about each
     // topic, in catalogue order: ids, versions, encoding, flags, rates, names,
     // and every field's id/order/type/flags/counts/scale/offset/range/name/
-    // unit/description. source_info is NOT included (commands.md 3.12: it is
+    // unit/description. Actions follow the topics, hashed the same way (ids,
+    // versions, flags, encodings, timeout, names, every parameter and result
+    // field) -- but ONLY when the catalogue holds at least one, so a catalogue
+    // without actions keeps the revision it had before actions existed.
+    // source_info is NOT included (commands.md 3.12: it is
     // not covered by config_revision). Never 0 (0 means "no manifest",
     // session-and-terminal.md 1.2). Stable across builds and platforms: it
     // hashes little-endian encodings, never struct memory.
@@ -185,6 +240,25 @@ public:
     // on that side (manifest_format_version >= 3 only).
     double field_min(const CatalogTopic& t, std::size_t index) const noexcept;
     double field_max(const CatalogTopic& t, std::size_t index) const noexcept;
+
+    // ----- actions -----------------------------------------------------------
+    std::size_t action_count() const noexcept { return action_count_; }
+    // nullptr when no action has that (id, version) (or index is out of range).
+    const CatalogAction* action(std::uint16_t action_id,
+                                std::uint16_t action_version) const noexcept;
+    const CatalogAction* action_at(std::size_t index) const noexcept;
+
+    // Same accessors for an action's fields; `index` runs over the parameters
+    // first, then the results (0 .. parameter_count + result_count - 1). "" /
+    // NaN under the same conditions as the topic overloads.
+    const char* field_name(const CatalogAction& a,
+                           std::size_t index) const noexcept;
+    const char* field_unit(const CatalogAction& a,
+                           std::size_t index) const noexcept;
+    const char* field_description(const CatalogAction& a,
+                                  std::size_t index) const noexcept;
+    double field_min(const CatalogAction& a, std::size_t index) const noexcept;
+    double field_max(const CatalogAction& a, std::size_t index) const noexcept;
 
     // ----- producer: fill the catalogue by hand -----------------------------
     // Copies the topic metadata, field_spec() of each FieldRecord, and (when
@@ -241,6 +315,42 @@ public:
                        bool subscribable = true,
                        std::uint32_t max_rate_millihz = 0U) noexcept;
 
+    // ----- producer: add an action (command) --------------------------------
+    // Copies the action metadata, field_spec() of each parameter then each
+    // result FieldRecord, and (when the matching pool is set) the names, units,
+    // descriptions and min/max -- exactly as add_topic() does for a topic's
+    // fields, into the same pools. Field ids default per SIDE: a parameter or
+    // result with field_id 0 gets 1, 2, 3, ... within its own side; an explicit
+    // id is kept. `order` must be 0 or the position within the side.
+    // `description` / `confirmation_text` may be null or empty. Action-specific
+    // error entries are not representable here (see ingest()).
+    //   Ok                 -- stored.
+    //   BufferTooSmall     -- the action pool or a field pool is full.
+    //   CountTooLarge      -- more than kMaxFieldsPerSide parameters or results.
+    //   InvalidArgument    -- no action pool, a zero action_id / action_version,
+    //                         a duplicate (action_id, action_version), `params`
+    //                         / `results` null while its count is non-zero,
+    //                         field orders not 0,1,2,... per side, an EMPTY
+    //                         encoding that has fields, or a STREAM action
+    //                         (kActionStream) with results or a result_encoding
+    //                         other than Empty.
+    MessageError add_action(std::uint16_t action_id, std::uint16_t action_version,
+                            std::uint16_t flags, ActionEncoding parameter_encoding,
+                            const char* name, const FieldRecord* params,
+                            std::size_t param_count,
+                            const FieldRecord* results = nullptr,
+                            std::size_t result_count = 0U,
+                            ActionEncoding result_encoding = ActionEncoding::Empty,
+                            std::uint32_t execution_timeout_ms = 0U,
+                            const char* description = "",
+                            const char* confirmation_text = "") noexcept;
+
+    // The chained alternative for the common parameters-only action:
+    // catalog.action(0x0010, 1, "set_target").f32("x_mm", "mm").stream().end().
+    // See ActionBuilder below. Nothing is stored until end() runs.
+    ActionBuilder action(std::uint16_t action_id, std::uint16_t action_version,
+                         const char* name) noexcept;
+
     // ----- producer: the format-2 source_info block ------------------------
     // Informational key/label/value rows (docs/commands.md section 3.12) --
     // fw version, chip id, running partition, ... -- copied into the string
@@ -272,8 +382,11 @@ public:
 
     // ----- consumer: learn from a MANIFEST_DATA payload ---------------------
     // Walks `payload` (a whole logical MANIFEST_DATA, post-reassembly) and
-    // REPLACES the catalogue with the topics it describes. Also copies the
-    // header's config_revision into config_revision().
+    // REPLACES the catalogue with the topics it describes -- and, when the
+    // Catalog was given an action pool, its actions (parameter + result
+    // fields); without one the action records are walked past and dropped.
+    // The action-specific ERROR entries (commands.md 3.10) are never stored.
+    // Also copies the header's config_revision into config_revision().
     //   Ok                 -- replaced (or, on a NOT_MODIFIED response, kept).
     //   <ManifestReader error>  -- malformed manifest; catalogue left cleared.
     //   BufferTooSmall     -- a pool overflowed; catalogue left cleared.
@@ -282,11 +395,18 @@ public:
     // ----- producer: serialise the topics into an open ManifestWriter -------
     // begin_topic / add_field / end_topic for every topic. The caller opened
     // `writer` with a header whose topic_count == topic_count(); afterwards it
-    // adds actions (none in v1) and calls finish(). Field units and
+    // calls write_actions() and finish(). Field units and
     // descriptions round-trip (whatever field_unit()/field_description() would
     // return); the topic's own description is still written empty -- see this
     // header's top comment.
     MessageError write_topics(ManifestWriter* writer) const noexcept;
+
+    // ----- producer: serialise the actions into an open ManifestWriter ------
+    // begin_action / add_action_param* / add_action_result* / end_action for
+    // every action, after write_topics(). The caller opened `writer` with a
+    // header whose action_count == action_count(). Written with error_count 0
+    // (the action-specific error entries are not kept).
+    MessageError write_actions(ManifestWriter* writer) const noexcept;
 
 private:
     // Copy into the string pool and return a NUL-terminated pointer, or "" when
@@ -297,6 +417,10 @@ private:
     // input was empty or the pool had no room.
     ByteView intern_view(const std::uint8_t* data, std::size_t len) noexcept;
     bool has_topic(std::uint16_t topic_id) const noexcept;
+    // Store one field at slot `slot` past the current *_used_ counters of
+    // every pool (the counters are advanced by the caller, once per action).
+    void put_field(std::size_t slot, const FieldRecord& record,
+                   const FieldSpec& spec) noexcept;
 
     CatalogTopic* topics_;
     std::size_t topic_capacity_;
@@ -333,6 +457,10 @@ private:
     SourceInfoEntry* source_info_pool_;
     std::size_t source_info_capacity_;
     std::size_t source_info_count_;
+
+    CatalogAction* actions_;
+    std::size_t action_capacity_;
+    std::size_t action_count_;
 
     std::uint32_t config_revision_;
     bool auto_revision_;
@@ -525,6 +653,182 @@ inline TopicBuilder Catalog::topic(std::uint16_t topic_id,
 }
 
 // ---------------------------------------------------------------------------
+// ActionBuilder -- declare an action's parameters one field at a time
+// ---------------------------------------------------------------------------
+//
+// The chained counterpart of TopicBuilder for a parameters-only action:
+//
+//   catalog.action(0x0010, /*action_version=*/1, "set_target")
+//       .f32("x_mm", "mm").range(-100.0, 100.0)
+//       .f32("y_mm", "mm")
+//       .stream()                      // sample per request, never answered
+//       .timeout_ms(50)
+//       .end();
+//
+// Parameters are PackedLe (EMPTY when none were declared) and buffered on the
+// STACK (kMaxFields); an action with RESULT fields goes through
+// Catalog::add_action() directly. `name`, `description` and `confirmation`
+// strings are only borrowed until end(). Same one-shot, sticky-error rules as
+// TopicBuilder.
+
+class ActionBuilder {
+public:
+    static const std::size_t kMaxFields = 32U;
+
+    ActionBuilder& u8(const char* name, double scale = 1.0, const char* unit = "",
+                      bool is_nullable = false) noexcept {
+        return add(btp::u8(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& u16(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u16(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& u32(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u32(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& u64(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::u64(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& i8(const char* name, double scale = 1.0, const char* unit = "",
+                      bool is_nullable = false) noexcept {
+        return add(btp::i8(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& i16(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i16(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& i32(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i32(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& i64(const char* name, double scale = 1.0,
+                       const char* unit = "", bool is_nullable = false) noexcept {
+        return add(btp::i64(name, scale, unit), is_nullable);
+    }
+    ActionBuilder& f32(const char* name, const char* unit = "",
+                       bool is_nullable = false) noexcept {
+        return add(btp::f32(name, unit), is_nullable);
+    }
+    ActionBuilder& f64(const char* name, const char* unit = "",
+                       bool is_nullable = false) noexcept {
+        return add(btp::f64(name, unit), is_nullable);
+    }
+    ActionBuilder& boolean(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::boolean(name), is_nullable);
+    }
+    ActionBuilder& enum8(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::enum8(name), is_nullable);
+    }
+    ActionBuilder& enum16(const char* name, bool is_nullable = false) noexcept {
+        return add(btp::enum16(name), is_nullable);
+    }
+
+    // Explicit field_id -- mirrors btp::field().
+    ActionBuilder& field(std::uint16_t field_id, WireType type, const char* name,
+                         double scale = 1.0, const char* unit = "",
+                         double offset = 0.0, bool is_nullable = false) noexcept {
+        return add(btp::field(field_id, type, name, scale, unit, offset),
+                   is_nullable);
+    }
+
+    // Min/max value bound on the parameter just added -- see
+    // TopicBuilder::range().
+    ActionBuilder& range(double min_value, double max_value) noexcept {
+        if (error_ != MessageError::Ok) return *this;
+        if (count_ == 0U) {
+            error_ = MessageError::WrongOrder;
+            return *this;
+        }
+        fields_[count_ - 1U].min_value = min_value;
+        fields_[count_ - 1U].max_value = max_value;
+        return *this;
+    }
+
+    // Action flags (kActionStream / kActionDangerous / kActionIdempotent).
+    ActionBuilder& stream() noexcept { return flag(kActionStream); }
+    ActionBuilder& dangerous() noexcept { return flag(kActionDangerous); }
+    ActionBuilder& idempotent() noexcept { return flag(kActionIdempotent); }
+
+    ActionBuilder& description(const char* text) noexcept {
+        description_ = text;
+        return *this;
+    }
+    ActionBuilder& confirmation(const char* text) noexcept {
+        confirmation_ = text;
+        return *this;
+    }
+    ActionBuilder& timeout_ms(std::uint32_t execution_timeout_ms) noexcept {
+        timeout_ms_ = execution_timeout_ms;
+        return *this;
+    }
+
+    // Commits with one add_action() call; same errors, plus a sticky chain
+    // error (CountTooLarge past kMaxFields, WrongOrder for a range() with no
+    // field before it).
+    MessageError end() noexcept {
+        if (error_ != MessageError::Ok) return error_;
+        error_ = catalog_->add_action(
+            action_id_, action_version_, flags_,
+            count_ != 0U ? ActionEncoding::PackedLe : ActionEncoding::Empty,
+            name_, fields_, count_, nullptr, 0U, ActionEncoding::Empty,
+            timeout_ms_, description_, confirmation_);
+        return error_;
+    }
+
+private:
+    friend class Catalog;
+
+    ActionBuilder(Catalog* catalog, std::uint16_t action_id,
+                  std::uint16_t action_version, const char* name) noexcept
+        : catalog_(catalog),
+          action_id_(action_id),
+          action_version_(action_version),
+          flags_(0U),
+          name_(name),
+          description_(""),
+          confirmation_(""),
+          timeout_ms_(0U),
+          count_(0U),
+          error_(MessageError::Ok) {}
+
+    ActionBuilder& flag(std::uint16_t bit) noexcept {
+        flags_ = static_cast<std::uint16_t>(flags_ | bit);
+        return *this;
+    }
+
+    ActionBuilder& add(FieldRecord field, bool is_nullable) noexcept {
+        if (error_ != MessageError::Ok) return *this;
+        if (count_ >= kMaxFields) {
+            error_ = MessageError::CountTooLarge;
+            return *this;
+        }
+        if (is_nullable) field.flags |= kFieldNullable;
+        fields_[count_++] = field;
+        return *this;
+    }
+
+    Catalog* catalog_;
+    std::uint16_t action_id_;
+    std::uint16_t action_version_;
+    std::uint16_t flags_;
+    const char* name_;
+    const char* description_;
+    const char* confirmation_;
+    std::uint32_t timeout_ms_;
+    FieldRecord fields_[kMaxFields];
+    std::size_t count_;
+    MessageError error_;
+};
+
+inline ActionBuilder Catalog::action(std::uint16_t action_id,
+                                     std::uint16_t action_version,
+                                     const char* name) noexcept {
+    return ActionBuilder(this, action_id, action_version, name);
+}
+
+// ---------------------------------------------------------------------------
 // NamedSampleWriter -- SampleWriter, checked by field name
 // ---------------------------------------------------------------------------
 //
@@ -629,7 +933,7 @@ private:
 namespace detail {
 
 template <std::size_t Topics, std::size_t Fields, std::size_t StringBytes,
-          std::size_t SourceInfoEntries = 0>
+          std::size_t SourceInfoEntries = 0, std::size_t Actions = 0>
 struct CatalogStorage {
     CatalogTopic topics[Topics];
     FieldSpec field_pool[Fields];
@@ -646,6 +950,11 @@ struct CatalogStorage {
     SourceInfoEntry* source_info_pool() noexcept {
         return SourceInfoEntries != 0U ? source_info_storage : nullptr;
     }
+    // Same zero-length trick for the action pool.
+    CatalogAction action_storage[Actions ? Actions : 1];
+    CatalogAction* action_pool() noexcept {
+        return Actions != 0U ? action_storage : nullptr;
+    }
 };
 
 }  // namespace detail
@@ -655,15 +964,18 @@ struct CatalogStorage {
 // share this same pool, so the same field count needs more of it), and NO
 // source_info pool -- a producer that emits the format-2 block passes a
 // non-zero SourceInfoEntries (and usually a bigger StringBytes, since the
-// key/label/value bytes intern into the same pool).
+// key/label/value bytes intern into the same pool). Likewise NO action pool
+// unless Actions is non-zero; an action's fields count against Fields and its
+// strings against StringBytes, together with the topics'.
 template <std::size_t Topics = 8, std::size_t Fields = 64,
-          std::size_t StringBytes = 1536, std::size_t SourceInfoEntries = 0>
+          std::size_t StringBytes = 1536, std::size_t SourceInfoEntries = 0,
+          std::size_t Actions = 0>
 class StaticCatalog
     : private detail::CatalogStorage<Topics, Fields, StringBytes,
-                                     SourceInfoEntries>,
+                                     SourceInfoEntries, Actions>,
       public Catalog {
     using Storage = detail::CatalogStorage<Topics, Fields, StringBytes,
-                                           SourceInfoEntries>;
+                                           SourceInfoEntries, Actions>;
 
 public:
     StaticCatalog() noexcept
@@ -673,7 +985,8 @@ public:
                   StringBytes, Storage::unit_ptr_pool, Fields,
                   Storage::description_ptr_pool, Fields,
                   Storage::source_info_pool(), SourceInfoEntries,
-                  Storage::min_pool, Fields, Storage::max_pool, Fields) {}
+                  Storage::min_pool, Fields, Storage::max_pool, Fields,
+                  Storage::action_pool(), Actions) {}
 };
 
 }  // namespace btp

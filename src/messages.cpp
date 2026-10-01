@@ -1422,6 +1422,13 @@ ManifestReader::Step ManifestReader::next_action(ActionRecord* out,
         error_ = MessageError::CountTooLarge;
         return Step::Error;
     }
+    // A STREAM action is never answered, so it cannot describe a result.
+    if ((out->flags & kActionStream) != 0U &&
+        (out->result_field_count != 0U ||
+         out->result_encoding != static_cast<std::uint8_t>(ActionEncoding::Empty))) {
+        error_ = MessageError::InvalidValue;
+        return Step::Error;
+    }
 
     // Partition the action record body: parameter records, result records,
     // then error_count and the error entries that run to the record end.
@@ -2164,6 +2171,13 @@ MessageError ManifestWriter::begin_action(const ActionRecord& action) noexcept {
     if (action.parameter_field_count > kMaxFieldsPerSide ||
         action.result_field_count > kMaxFieldsPerSide) {
         error_ = MessageError::CountTooLarge;
+        return error_;
+    }
+    // A STREAM action is never answered, so it cannot describe a result.
+    if ((action.flags & kActionStream) != 0U &&
+        (action.result_field_count != 0U ||
+         action.result_encoding != static_cast<std::uint8_t>(ActionEncoding::Empty))) {
+        error_ = MessageError::InvalidArgument;
         return error_;
     }
     record_start_ = cursor_;

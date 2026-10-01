@@ -337,6 +337,8 @@ REQUEST_CONFLICT
 
 A request sequence therefore cannot identify two different commands within the same requester boot.
 
+Requests for a **stream action** ([§2.7](#27-stream-actions)) are exempt: they are not deduplicated and never produce a `COMMAND_RESULT`.
+
 ---
 
 ### 2.6 Deduplication capacity
@@ -353,6 +355,53 @@ CAPACITY_EXHAUSTED
 Existing entries are not discarded in a way that would permit a previously processed command to be executed again under the same request identity.
 
 The deduplication state is scoped to the executor boot.
+
+---
+
+### 2.7 Stream actions
+
+A **stream action** is an action whose requests are self-contained samples
+rather than transactions -- a periodic setpoint, a steering value, a throttle.
+It is declared by the `STREAM` action flag (bit 2, [§3.9](#39-action-records)) in
+the manifest.
+
+Each `COMMAND_REQUEST` of a stream action:
+
+* is executed by the target **without deduplication** (the identity cache of
+  [§2.5](#25-command-deduplication) is not consulted and not filled, so the
+  same request delivered twice is executed twice);
+* is answered with **no `COMMAND_RESULT`** -- not on success, and not as a
+  rejection either (no `REQUEST_CONFLICT`, no `CAPACITY_EXHAUSTED`);
+* is never retried by the requester, which expects no result and keeps no
+  state for it. A lost sample is simply replaced by the next one.
+
+```text
+Requester                              Target
+   |                                     |
+   |--------- COMMAND_REQUEST ---------->|  executed
+   |--------- COMMAND_REQUEST ---------->|  executed
+   |                  (no COMMAND_RESULT) |
+```
+
+The `COMMAND_REQUEST` encoding ([§2.1](#21-command_request)) and its
+transmission priority ([Protocol model §8](model.md#8-traffic-priority)) are
+unchanged. Ordering and "latest wins" are the application's concern: the
+transport may reorder or duplicate frames, so a sample carries whatever the
+target needs to decide (a counter, a timestamp, or simply absolute values that
+make an old sample harmless).
+
+A stream action never declares result fields, and its `result_encoding` is
+`EMPTY` ([§3.9](#39-action-records)); a manifest that says otherwise is
+invalid.
+
+A target recognises a stream request from its own manifest: it knows which of
+its actions carry the flag. A target that does not declare the flag keeps the
+behavior of [§2.5](#25-command-deduplication) for all its actions.
+
+**Compatibility.** A consumer that does not know bit 2 sees an ordinary action
+and may send requests normally (it then waits for a result that never comes and
+times out). No existing target declares the flag, so adding it changes nothing
+for them.
 
 ---
 
@@ -744,7 +793,10 @@ Action flags currently define:
 ```text
 bit 0 -> IDEMPOTENT
 bit 1 -> DANGEROUS
+bit 2 -> STREAM
 ```
+
+`STREAM` marks a stream action ([§2.7](#27-stream-actions)): its requests are executed without deduplication and are never answered. A `STREAM` action must have `result_encoding` `EMPTY` and `result_field_count` zero; a manifest in which it does not is rejected as invalid.
 
 The protocol-defined action encodings are:
 

@@ -2950,7 +2950,7 @@ the manifest and `btp::telemetry` decodes the sample — the piece between,
 (`btp/catalog.hpp`, target `btp::catalog`), with the storage still the caller's.
 
 `btp::Catalog` (or `btp::StaticCatalog<Topics, Fields, StringBytes,
-SourceInfoEntries>`, which owns the pools) holds one topic per entry —
+SourceInfoEntries, Actions>`, which owns the pools) holds one topic per entry —
 `topic_id`, `schema_version`, encoding, `max_rate_millihz`, subscribable, a
 `FieldSpec[]`, the topic + field names, and (since 2.28.0) each field's unit and
 description, read back with `field_unit()`/`field_description()` next to
@@ -3038,6 +3038,64 @@ catalog.topic(0x0101, /*schema_version=*/3, "drive_status")
     .i16("temp_c", 0.1, "Cel", /*is_nullable=*/true)
     .end();
 ```
+
+**Actions.** The catalogue also holds the **action (command) records** of a
+`MANIFEST_DATA` ([Commands and discovery
+§3.9](commands.md#39-action-records)), in their own `CatalogAction` pool: the
+caller-owned `CatalogAction*` passed as the trailing optional constructor
+arguments, or `StaticCatalog`'s `Actions` template argument (default `0`, no
+pool -- every existing instantiation compiles unchanged). An action's parameter
+and result fields draw on the **same** field / name / unit / description /
+min / max / string pools as the topics', so size `Fields` and `StringBytes`
+for both. A `CatalogAction` carries `action_id`, `action_version`, `flags`
+(`kActionIdempotent`, `kActionDangerous`, `kActionStream`), the parameter and
+result encodings, `execution_timeout_ms`, `name` / `description` /
+`confirmation_text`, and `fields` -- the parameters first, then the results,
+`parameter_count` + `result_count` entries in all.
+
+```cpp
+static const btp::FieldRecord kArmParams[] = {btp::f32("speed", "mm/s"), btp::u8("mode")};
+static const btp::FieldRecord kArmResults[] = {btp::f32("ack_time", "ms")};
+
+btp::StaticCatalog<4, 32, 1024, 0, /*Actions=*/4> catalog;
+catalog.add_action(0x0201, /*action_version=*/1,
+                   btp::kActionDangerous | btp::kActionIdempotent,
+                   btp::ActionEncoding::PackedLe, "arm",
+                   kArmParams, 2, kArmResults, 1, btp::ActionEncoding::PackedLe,
+                   /*execution_timeout_ms=*/1500, "Arm the drive", "Really arm?");
+
+catalog.action(0x0202, 1, "set_target")        // parameters only: the chained form
+    .f32("x_mm", "mm").range(-100.0, 100.0)
+    .f32("y_mm", "mm")
+    .stream()                                  // also .dangerous() / .idempotent()
+    .timeout_ms(50)                            // and .description() / .confirmation()
+    .end();
+
+const btp::CatalogAction* a = catalog.action(0x0201, 1);   // nullptr if absent
+catalog.field_name(*a, 2);                     // index runs over params, then results
+```
+
+`add_action()` mirrors `add_topic()`: field ids default per side (1, 2, 3, ...
+for the parameters and again for the results), an explicit `order` must equal
+the position, and it returns `InvalidArgument` for no action pool, a zero id or
+version, a duplicate `(action_id, action_version)`, a null field array with a
+non-zero count, an `Empty` encoding that has fields, or a STREAM action with
+results; `BufferTooSmall` when the action pool or a field pool is full. A
+**STREAM** action (`kActionStream`) is a self-contained sample per
+`COMMAND_REQUEST`: it is executed without deduplication and never answered, so
+it has no result fields and an `Empty` result encoding -- `ManifestWriter` and
+`ManifestReader` enforce the same. `ActionBuilder` covers parameters only
+(`PackedLe`, or `Empty` with none); an action with results goes through
+`add_action()`. Reading: `action_count()`, `action(id, version)`,
+`action_at(i)`, and the `field_name` / `field_unit` / `field_description` /
+`field_min` / `field_max` overloads taking a `CatalogAction`.
+
+`write_actions(ManifestWriter*)` serialises them after `write_topics()` --
+`node.serve_catalog()` does both and sets `header.action_count` -- and
+`ingest()` keeps them when the catalogue has an action pool (without one the
+records are walked past, as before). The action-specific *error* entries
+([§3.10](commands.md#310-action-specific-errors)) are neither stored nor written
+(`error_count` 0).
 
 And `fill_drive_status` above is positional -- `put_f64()` per field, in
 schema order, with nothing stopping two calls from landing swapped and
@@ -3163,8 +3221,9 @@ peer's `HELLO_RESULT` identity -- the stable one, unlike
 A cache is only as good as `config_revision`: a schema edited without a bump
 would be served from the cache forever. `catalog.set_config_revision_auto()`
 makes `config_revision()` a digest of the content (`content_revision()`,
-32-bit FNV-1a over every topic and field attribute the manifest carries, never
-0, `source_info` excluded) recomputed on each call, so it follows every
+32-bit FNV-1a over every topic and field attribute the manifest carries, then
+every action's, never 0, `source_info` excluded; a catalogue without actions
+hashes exactly as it did before actions existed) recomputed on each call, so it follows every
 later edit. A producer that also announces the revision in `HELLO_RESULT`
 passes `catalog.config_revision()` there, not a constant.
 
@@ -3404,6 +3463,40 @@ const std::uint32_t id = node.command(robot_source_id, robot_boot_id, kArmMotors
 //     is), tick() times it out after kCommandTimeoutMs with no retry --
 //     the same stance connect() / subscribe() take ...
 ```
+
+**Stream actions.** When the node's served catalogue (`node.serve_catalog()`,
+[§16.4](#164-the-schema-catalogue-btpcatalog)) declares an action with
+`kActionStream` ([Commands and discovery
+§2.7](commands.md#27-stream-actions)), a `COMMAND_REQUEST` for it skips the
+`DedupCache` entirely: the handler is called for *every* request -- the same
+bytes delivered twice run twice -- with a ticket whose `valid()` is `false`,
+and **no** `COMMAND_RESULT` is ever sent, not even a rejection. The handler
+tells such a call by `!ticket.valid()`; the `outcome` it receives is a scratch
+value that is ignored (`pending` included), and `complete_command()` refuses
+that ticket. `receive()` still returns `NodeRx::CommandServed`. Without a
+served catalogue, or for any action the catalogue does not mark `kActionStream`,
+nothing changes. Ordering and "latest wins" are the handler's concern: the
+request carries its own data.
+
+```cpp
+void set_target(void* ctx, std::uint16_t action_id, std::uint16_t version,
+                btp::ByteView parameters, btp::NodeActionOutcome*,
+                const btp::NodeCommandTicket& ticket) {
+    if (!ticket.valid()) {            // a stream sample: just apply it
+        robot.apply_setpoint(parameters);
+        return;
+    }
+    // ... a normal action, answered as above ...
+}
+```
+
+The initiator side is `node.send_stream(peer_source_id, peer_boot_id,
+action_id, action_version, parameters, size)`: it reserves a sequence, encodes
+one `COMMAND_REQUEST` and sends it on link 0. It needs **no** `CommandClient`
+-- nothing is held, correlated, timed out or retried -- and returns `true` once
+the frame went to the transport, `false` on any failure (no scratch buffer, no
+sequence, an encode error, a send failure). Call it once per sample, on the
+application's own period.
 
 ### 16.8 STATUS (`node.enable_status()`)
 

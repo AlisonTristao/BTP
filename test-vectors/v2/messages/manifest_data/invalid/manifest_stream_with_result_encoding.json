@@ -1,0 +1,15 @@
+{
+  "format": "btp-test-vector-msg-v2",
+  "id": "manifest_stream_with_result_encoding",
+  "object": "manifest_data",
+  "base": "manifest_data_stream_action",
+  "description": "A STREAM action (flags bit 2) names a result_encoding other than EMPTY (PACKED_LE, 5) while declaring no result field.",
+  "mutations": [
+    {
+      "operation": "set_u8",
+      "offset": 84,
+      "value": 5
+    }
+  ],
+  "expected_error": "InvalidValue"
+}

@@ -256,6 +256,11 @@ static const std::uint8_t kFieldHasRange = 0x04U;
 static const double kNoRangeBound = std::numeric_limits<double>::quiet_NaN();
 static const std::uint16_t kActionIdempotent = 0x0001U;       // action flags bit 0
 static const std::uint16_t kActionDangerous = 0x0002U;        // action flags bit 1
+// action flags bit 2 -- a STREAM action (docs/commands.md section 2.7): each
+// request is a self-contained sample, executed without deduplication and
+// answered with no COMMAND_RESULT. Requires result_encoding EMPTY and no
+// result fields; ManifestWriter / ManifestReader reject anything else.
+static const std::uint16_t kActionStream = 0x0004U;
 static const std::uint16_t kStatusDegraded = 0x0001U;         // STATUS flags bit 0
 
 // ---------------------------------------------------------------------------
@@ -520,7 +525,7 @@ struct EnumEntry {
 struct ActionRecord {
     std::uint16_t action_id;         // non-zero
     std::uint16_t action_version;    // non-zero
-    std::uint16_t flags;             // kActionIdempotent | kActionDangerous
+    std::uint16_t flags;             // kActionIdempotent | kActionDangerous | kActionStream
     std::uint8_t parameter_encoding; // ActionEncoding
     std::uint8_t result_encoding;    // ActionEncoding
     std::uint16_t parameter_field_count;
