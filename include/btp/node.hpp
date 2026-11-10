@@ -68,6 +68,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace btp {
 
@@ -175,6 +176,39 @@ struct NodeManifest {
 // Called by receive() for each MANIFEST_DATA SUCCESS -- see NodeManifest.
 // `node` is this node, mid-receive(); sending from here is fine.
 using NodeManifestFn = void (*)(void* ctx, Node& node, const NodeManifest& manifest);
+
+// The same callbacks as interfaces (library 2.51.0) -- the NodeConfig style:
+// a class you inherit, a method you override, no void* to cast back. Each
+// Node method that takes a (function, ctx) pair also takes one of these by
+// reference; the object must outlive its registration (detach with the
+// (nullptr, nullptr) form). Both forms stay; pick one per callback.
+class NodeSampleHandler {
+public:
+    virtual ~NodeSampleHandler() = default;
+    // NodeSampleFn: one TELEMETRY sample of a topic the learn catalogue knows.
+    virtual void on_sample(const CatalogTopic& topic, SampleReader& reader) = 0;
+};
+
+class NodeManifestHandler {
+public:
+    virtual ~NodeManifestHandler() = default;
+    // NodeManifestFn: one MANIFEST_DATA SUCCESS, from whichever source.
+    virtual void on_manifest(Node& node, const NodeManifest& manifest) = 0;
+};
+
+class NodeFiller {
+public:
+    virtual ~NodeFiller() = default;
+    // NodeFillFn: the fields of one sample, in schema order.
+    virtual void fill(SampleWriter& writer) = 0;
+};
+
+class NodeNamedFiller {
+public:
+    virtual ~NodeNamedFiller() = default;
+    // NodeNamedFillFn: the fields of one sample, by name.
+    virtual void fill(NamedSampleWriter& writer) = 0;
+};
 
 // What the last non-SUCCESS MANIFEST_DATA said (NodeRx::ManifestRejected). A
 // rejection describes no source on the wire (commands.md 3.2), so
@@ -552,11 +586,11 @@ public:
     // Runs a Fresh COMMAND_REQUEST's action -- synchronously or not, see
     // NodeActionFn's own comment for the parameters (this is that same
     // signature). has_command() false (the default) means COMMAND_REQUEST
-    // goes unanswered. Unlike terminal() above, this ONLY takes effect on a
-    // StaticNode<> -- it owns the DedupCache this needs and wires it from
-    // here in its own constructor; a bare Node has no such storage to bind
-    // it to, and ignores this -- call Node::enable_commands(cache, handler,
-    // ctx) yourself there instead, as always.
+    // goes unanswered. A StaticNode<> owns the DedupCache this needs and
+    // wires it in its own constructor. A bare Node has no such storage: give
+    // it one with Node::enable_commands(cache, nullptr, nullptr) and begin()
+    // wires this method to it (2.51.0); with has_command() true and no cache
+    // at all, begin() fails instead of ignoring every COMMAND_REQUEST.
     virtual bool has_command() const noexcept { return false; }
     virtual void command(std::uint16_t action_id, std::uint16_t action_version,
                          ByteView parameters, NodeActionOutcome* outcome,
@@ -568,6 +602,117 @@ public:
         (void)ticket;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Compile-time check of a NodeConfig / NodeLink subclass (library 2.51.0)
+// ---------------------------------------------------------------------------
+//
+// Every optional axis above is a PAIR -- has_X() and X() -- and the node only
+// calls X() when has_X() says true. Overriding one without the other fails
+// silently, and for seal() the silence is dangerous: seal() overridden,
+// has_seal() forgotten, and every message goes out in the clear.
+//
+// node_config_check<C> looks at the concrete class and tells, per pair,
+// whether exactly one half is overridden. StaticNode<>'s constructor and
+// Node::attach_link() run it on the type they are handed (a static_assert,
+// so the mistake is a compile error naming the pair); a caller building a
+// bare Node runs it with btp::check_node_config<C>(). Only the concrete type
+// is visible: through a plain NodeConfig& nothing can be checked, and nothing
+// is. An override declared private cannot be seen from here and counts as
+// "not overridden" for its own pair only.
+namespace detail {
+
+template <class... T>
+struct node_check_void {
+    typedef void type;
+};
+
+// overrides_<m><C>::value: C (or a class between C and NodeLink) declares
+// its own <m>. &C::m has type `R (NodeLink::*)(...)` while it is inherited
+// and `R (D::*)(...)` once some D overrides it.
+#define BTP_DETAIL_NODE_OVERRIDE_TRAIT(method, base)                                   \
+    template <class C, class = void>                                                   \
+    struct overrides_##method {                                                        \
+        static const bool value = false;                                               \
+    };                                                                                 \
+    template <class C>                                                                 \
+    struct overrides_##method<C, typename node_check_void<decltype(&C::method)>::type> { \
+        static const bool value =                                                      \
+            !std::is_same<decltype(&C::method), decltype(&base::method)>::value;      \
+    };
+
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_seal, NodeLink)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(seal, NodeLink)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_open, NodeLink)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(open, NodeLink)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_clock, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(clock, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_terminal, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(terminal, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(terminal_on, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_manifest_cache, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(manifest_load, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(manifest_store, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(has_command, NodeConfig)
+BTP_DETAIL_NODE_OVERRIDE_TRAIT(command, NodeConfig)
+
+#undef BTP_DETAIL_NODE_OVERRIDE_TRAIT
+
+}  // namespace detail
+
+// Per pair: true when it is consistent (both halves overridden, or neither).
+template <class C>
+struct node_link_check {
+    static const bool seal =
+        detail::overrides_has_seal<C>::value == detail::overrides_seal<C>::value;
+    static const bool open =
+        detail::overrides_has_open<C>::value == detail::overrides_open<C>::value;
+    static const bool ok = seal && open;
+};
+
+template <class C>
+struct node_config_check {
+    static const bool seal = node_link_check<C>::seal;
+    static const bool open = node_link_check<C>::open;
+    static const bool clock =
+        detail::overrides_has_clock<C>::value == detail::overrides_clock<C>::value;
+    static const bool terminal =
+        detail::overrides_has_terminal<C>::value ==
+        (detail::overrides_terminal<C>::value || detail::overrides_terminal_on<C>::value);
+    static const bool manifest_cache =
+        detail::overrides_has_manifest_cache<C>::value ==
+        (detail::overrides_manifest_load<C>::value || detail::overrides_manifest_store<C>::value);
+    static const bool command =
+        detail::overrides_has_command<C>::value == detail::overrides_command<C>::value;
+    static const bool ok = seal && open && clock && terminal && manifest_cache && command;
+};
+
+// The static_asserts, one message per pair. Call it anywhere with the
+// concrete type: btp::check_node_config<MyLink>();
+template <class C>
+inline void check_node_link() noexcept {
+    static_assert(node_link_check<C>::seal,
+                  "btp::NodeLink: seal() and has_seal() must be overridden together -- with "
+                  "seal() alone the node never calls it and sends in the CLEAR");
+    static_assert(node_link_check<C>::open,
+                  "btp::NodeLink: open() and has_open() must be overridden together -- with "
+                  "open() alone received messages are handed back still sealed");
+}
+
+template <class C>
+inline void check_node_config() noexcept {
+    check_node_link<C>();
+    static_assert(node_config_check<C>::clock,
+                  "btp::NodeConfig: clock() and has_clock() must be overridden together");
+    static_assert(node_config_check<C>::terminal,
+                  "btp::NodeConfig: terminal() (or terminal_on()) and has_terminal() must be "
+                  "overridden together");
+    static_assert(node_config_check<C>::manifest_cache,
+                  "btp::NodeConfig: manifest_load()/manifest_store() and has_manifest_cache() "
+                  "must be overridden together");
+    static_assert(node_config_check<C>::command,
+                  "btp::NodeConfig: command() and has_command() must be overridden together");
+}
 
 // ---------------------------------------------------------------------------
 // The outcome of one receive()
@@ -1174,6 +1319,9 @@ public:
         on_manifest_ = callback;
         on_manifest_ctx_ = ctx;
     }
+    void on_manifest(NodeManifestHandler& handler) noexcept {
+        on_manifest(&Node::manifest_handler_thunk, &handler);
+    }
 
     // request_manifest() with known_config_revision filled in from the
     // manifest cache (NodeConfig::manifest_load()) -- 0 on a miss or with no
@@ -1209,6 +1357,9 @@ public:
     // knows. Without this, a TELEMETRY frame comes back as NodeRx::Complete for
     // the caller to decode itself.
     void on_sample(NodeSampleFn callback, void* ctx) noexcept;
+    void on_sample(NodeSampleHandler& handler) noexcept {
+        on_sample(&Node::sample_handler_thunk, &handler);
+    }
 
     // ---- discovery: producer side (opt-in) -------------------------------
     // Attach a catalogue the node SERVES: on a MANIFEST_REQUEST for this source
@@ -1240,6 +1391,15 @@ public:
     // catalog.hpp's NamedSampleWriter for what this buys over publish().
     bool publish_named(std::uint16_t topic_id, NodeNamedFillFn fill, void* ctx,
                        std::uint64_t timestamp_us) noexcept;
+
+    // publish() / publish_named() with a filler object instead of (fill, ctx).
+    bool publish(std::uint16_t topic_id, NodeFiller& filler, std::uint64_t timestamp_us) noexcept {
+        return publish(topic_id, &Node::filler_thunk, &filler, timestamp_us);
+    }
+    bool publish_named(std::uint16_t topic_id, NodeNamedFiller& filler,
+                       std::uint64_t timestamp_us) noexcept {
+        return publish_named(topic_id, &Node::named_filler_thunk, &filler, timestamp_us);
+    }
 
     // publish() / publish_named(), sealed with `seal` for THIS sample instead
     // of cfg.seal() -- the publish-side mirror of send_with() (a producer
@@ -1279,6 +1439,10 @@ public:
     // the registry is full.
     bool on_publish(std::uint16_t topic_id, NodeNamedFillFn fill,
                     void* ctx) noexcept;
+    // Same with a filler object, which must outlive the registration.
+    bool on_publish(std::uint16_t topic_id, NodeNamedFiller& filler) noexcept {
+        return on_publish(topic_id, &Node::named_filler_thunk, &filler);
+    }
 
     // Call once per loop pass, in place of your own due() / publish_named() /
     // note_published() dance: walks every on_publish()-registered topic, and
@@ -1443,6 +1607,21 @@ private:
     // EndpointSendFn/EndpointSealFn.
     static void terminal_thunk(void* ctx, Node& node, const Header& header,
                                ByteView payload, std::uint64_t now_ms) noexcept;
+
+    // The interface forms of the callbacks (NodeSampleHandler & co.) ride the
+    // (function, ctx) slots through these.
+    static void sample_handler_thunk(void* ctx, const CatalogTopic& topic, SampleReader& reader) {
+        static_cast<NodeSampleHandler*>(ctx)->on_sample(topic, reader);
+    }
+    static void manifest_handler_thunk(void* ctx, Node& node, const NodeManifest& manifest) {
+        static_cast<NodeManifestHandler*>(ctx)->on_manifest(node, manifest);
+    }
+    static void filler_thunk(void* ctx, SampleWriter& writer) {
+        static_cast<NodeFiller*>(ctx)->fill(writer);
+    }
+    static void named_filler_thunk(void* ctx, NamedSampleWriter& writer) {
+        static_cast<NodeNamedFiller*>(ctx)->fill(writer);
+    }
 
   protected:
     // StaticNode<>'s own constructor (a template, defined inline below) needs
@@ -1753,6 +1932,20 @@ class StaticNode
     detail::ExtraLinks<Links - 1U, Slots, SlotBytes, MaxSubscriptions> extra_links_;
 
 public:
+    // The same, with the concrete config type in view (library 2.51.0): its
+    // has_X()/X() pairs are checked at compile time first -- see
+    // check_node_config(). Picked over the NodeConfig& overload below for
+    // any subclass passed by its own type, which is the usual call.
+    template <class Config,
+              class = typename std::enable_if<std::is_base_of<NodeConfig, Config>::value &&
+                                              !std::is_same<Config, NodeConfig>::value>::type>
+    explicit StaticNode(Config& cfg,
+                        std::uint64_t reassembly_timeout_ms =
+                            kNodeDefaultReassemblyTimeoutMs) noexcept
+        : StaticNode(static_cast<NodeConfig&>(cfg), reassembly_timeout_ms) {
+        check_node_config<Config>();
+    }
+
     explicit StaticNode(
         NodeConfig& cfg,
         std::uint64_t reassembly_timeout_ms =
@@ -1810,6 +2003,18 @@ public:
 
     // Node::attach_link() with this node's own storage for `link`
     // (1..Links-1) and its own subscription table. False past Links.
+    // With the concrete link type in view: its seal/open pairs are checked
+    // at compile time first (check_node_link()).
+    template <class Link,
+              class = typename std::enable_if<std::is_base_of<NodeLink, Link>::value &&
+                                              !std::is_same<Link, NodeLink>::value>::type>
+    bool attach_link(std::uint8_t link, Link& cfg,
+                     std::uint64_t reassembly_timeout_ms =
+                         kNodeDefaultReassemblyTimeoutMs) noexcept {
+        check_node_link<Link>();
+        return attach_link(link, static_cast<NodeLink&>(cfg), reassembly_timeout_ms);
+    }
+
     bool attach_link(std::uint8_t link, NodeLink& cfg,
                      std::uint64_t reassembly_timeout_ms =
                          kNodeDefaultReassemblyTimeoutMs) noexcept {
@@ -1989,6 +2194,47 @@ using SizedNode =
               detail::NodeSizeTraits<Size>::MaxSubscriptions,
               detail::NodeSizeTraits<Size>::MaxCommands,
               detail::NodeSizeTraits<Size>::CommandBytes>;
+
+// ---------------------------------------------------------------------------
+// NodeCapacities / NodeWith<> -- StaticNode<> sized by NAME (library 2.51.0)
+// ---------------------------------------------------------------------------
+//
+// StaticNode<4, 600, 2048, 512, 8, 64, 1536, 8, 4, 128, 0, 1> says nothing
+// about which number is which, and changing the 11th means spelling out the
+// ten before it. Derive from NodeCapacities instead, restate only what
+// differs, and build the node with NodeWith<>:
+//
+//   struct HubCapacities : btp::NodeCapacities {
+//       static const std::size_t CatalogTopics = 32U;
+//       static const std::size_t Links = 2U;
+//   };
+//   btp::NodeWith<HubCapacities> node(link);
+//
+// Every default is StaticNode<>'s own, so NodeWith<NodeCapacities> is exactly
+// StaticNode<>. The member names are StaticNode<>'s parameter names (and
+// NodeSizeTraits'), documented on StaticNode<> above.
+struct NodeCapacities {
+    static const std::size_t Slots = 4U;
+    static const std::size_t SlotBytes = 600U;
+    static const std::size_t SealBytes = 2048U;
+    static const std::size_t ScratchBytes = 512U;
+    static const std::size_t CatalogTopics = 8U;
+    static const std::size_t CatalogFields = 64U;
+    static const std::size_t CatalogStringBytes = 1536U;
+    static const std::size_t MaxSubscriptions = 8U;
+    static const std::size_t MaxCommands = 4U;
+    static const std::size_t CommandBytes = 128U;
+    static const std::size_t CatalogSourceInfo = 0U;
+    static const std::size_t Links = 1U;
+};
+
+template <class Capacities>
+using NodeWith = StaticNode<Capacities::Slots, Capacities::SlotBytes, Capacities::SealBytes,
+                            Capacities::ScratchBytes, Capacities::CatalogTopics,
+                            Capacities::CatalogFields, Capacities::CatalogStringBytes,
+                            Capacities::MaxSubscriptions, Capacities::MaxCommands,
+                            Capacities::CommandBytes, Capacities::CatalogSourceInfo,
+                            Capacities::Links>;
 
 }  // namespace btp
 

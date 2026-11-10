@@ -88,6 +88,25 @@ Later changes:
   conventions layered on BTP (not part of the protocol), starting with the
   closed-loop `loop` profile and the optional `btp/profiles/loop.hpp` /
   `loopctl.h` headers. Wire compatible.
+* `2.51`: API safety, no wire change. `StaticNode<>`'s constructor and
+  `attach_link()` check the concrete config type at compile time: a `has_X()`
+  overridden without its `X()`, or the reverse, is a `static_assert` naming the
+  pair -- above all `seal()` without `has_seal()`, which used to send in the
+  clear without a word (`node_config_check<C>`, `check_node_config<C>()` for a
+  bare `Node`). `NodeCapacities` + `NodeWith<C>`: a `StaticNode<>` sized by
+  name instead of twelve positional numbers. `NodeSampleHandler`,
+  `NodeManifestHandler`, `NodeFiller`, `NodeNamedFiller`: the callbacks as
+  interfaces, accepted next to every `(function, void* ctx)` form
+  (`on_sample()`, `on_manifest()`, `publish()`, `publish_named()`,
+  `on_publish()`). `NodeConfig::has_command()` is honoured on any `Node`:
+  `begin()` wires `command()` when it was not wired yet (a `has_command()`
+  that became true after construction, or a bare `Node` given a cache with
+  `enable_commands(cache, nullptr, nullptr)`).
+
+2.51 changes `begin()` for a bare `Node` (not a `StaticNode<>`) whose
+`NodeConfig::has_command()` is true and that has no dedup cache: `begin()` now
+returns false instead of leaving every `COMMAND_REQUEST` unanswered. Give it a
+cache with `enable_commands()`, or return false from `has_command()`.
 
 2.46 changes receive behavior for any `Node` whose `NodeConfig::has_open()` is
 true: a message that arrives without `ENCRYPTED` is now dropped instead of

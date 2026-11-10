@@ -287,6 +287,18 @@ bool Node::begin(bool arm_and_announce) noexcept {
     // receive-only node's own override just returns false unconditionally,
     // so there is nothing to check here any more.
 
+    // cfg.has_command() is honoured on any Node (2.51.0), not only on a
+    // StaticNode<>, whose constructor wires it: a bare Node given a dedup
+    // cache with enable_commands() but no handler gets cfg.command() here.
+    // Without a cache there is nowhere to keep the request/result pairs --
+    // a configuration error, reported instead of leaving every
+    // COMMAND_REQUEST silently unanswered.
+    if (cfg_.has_command() && on_command_ == nullptr) {
+        if (commands_ == nullptr) return false;
+        on_command_ = &Node::command_thunk;
+        on_command_ctx_ = &cfg_;
+    }
+
     if (arm_and_announce) {
         if (link0_.session_on_) arm_session();
         if (serve_catalog_ != nullptr) announce_catalog();

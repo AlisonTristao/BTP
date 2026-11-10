@@ -1206,6 +1206,70 @@ void test_publish_named_round_trips() {
     CHECK(!producer.publish_named(0x0999U, &fill_drive_by_name, nullptr, 1ULL));
 }
 
+// The interface forms (2.51.0): the same round trip with a NodeNamedFiller
+// on the producer and a NodeSampleHandler / NodeManifestHandler on the
+// consumer -- no void* anywhere.
+struct DriveFiller : btp::NodeNamedFiller {
+    int calls = 0;
+    void fill(btp::NamedSampleWriter& w) override {
+        ++calls;
+        fill_drive_by_name(nullptr, w);
+    }
+};
+struct SampleSink : btp::NodeSampleHandler {
+    SampleCapture capture = {};
+    void on_sample(const btp::CatalogTopic& topic, btp::SampleReader& reader) override {
+        capture_sample(&capture, topic, reader);
+    }
+};
+struct ManifestSink : btp::NodeManifestHandler {
+    int calls = 0;
+    std::uint32_t last_source = 0U;
+    void on_manifest(btp::Node&, const btp::NodeManifest& m) override {
+        ++calls;
+        last_source = m.header.described_source_id;
+    }
+};
+
+void test_handler_interfaces_round_trip() {
+    Sink prod_tx;
+    TestConfig producer_cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(producer_cfg);
+    CHECK(producer.topic(0x0101U, 2U, "drive_status")
+             .f32("left_rpm")
+             .f32("right_rpm")
+             .u16("battery_v", 0.001, "", /*is_nullable=*/true)
+             .end() == MessageError::Ok);
+    producer.serve_catalog();
+    producer.begin();
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    consumer.learn_catalog();
+    SampleSink samples;
+    ManifestSink manifests;
+    consumer.on_sample(samples);
+    consumer.on_manifest(manifests);
+    consumer.begin();
+    CHECK(consumer.request_manifest(kSenderId, kSenderBoot, 0U));
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::RequestServed);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::ManifestHandled);
+    CHECK(manifests.calls == 1 && manifests.last_source == kSenderId);
+
+    prod_tx.clear();
+    DriveFiller filler;
+    CHECK(producer.publish_named(0x0101U, filler, 4ULL));
+    CHECK(filler.calls == 1);
+    CHECK(deliver(consumer, prod_tx, 0U, &msg) == NodeRx::SampleDelivered);
+    CHECK(samples.capture.calls == 1);
+    CHECK(samples.capture.values[0] == 1450.0 && samples.capture.values[2] == -999.0);
+
+    // on_publish() with the same filler object.
+    CHECK(producer.on_publish(0x0101U, filler));
+}
+
 // publish_with()/publish_named_with() take the seal for THIS sample instead
 // of cfg.seal -- checked the same way send_with()'s own contract reads: a
 // null override forces cleartext regardless of cfg.seal, so the two sends
@@ -2391,6 +2455,68 @@ void test_static_node_config_wires_commands() {
     ReceivedMessage msg{};
     CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::CommandServed);
     CHECK(calls.calls == 1);
+}
+
+// has_command() turning true after construction (2.51.0): the StaticNode<>
+// constructor saw it false, begin() wires it now -- before, every
+// COMMAND_REQUEST went unanswered.
+void test_has_command_set_after_construction_is_wired_by_begin() {
+    Sink prod_tx;
+    ActionCalls calls = {};
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &prod_tx);
+    TestNode producer(cfg);  // has_command() false here
+    cfg.command_fn = &echo_action;
+    cfg.command_ctx = &calls;
+    CHECK(producer.begin());
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    CHECK(consumer.begin());
+    const std::uint8_t params[2] = {1, 2};
+    CHECK(consumer.command(kSenderId, kSenderBoot, 7U, 1U, params, sizeof(params)) != 0U);
+    ReceivedMessage msg{};
+    CHECK(deliver(producer, cons_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1);
+}
+
+// A bare Node has no dedup cache of its own: has_command() true without one
+// is a configuration error begin() reports (2.51.0); with one, begin() wires
+// cfg.command() to it.
+void test_bare_node_has_command_needs_a_cache() {
+    Sink tx;
+    ActionCalls calls = {};
+    TestConfig cfg = base_config(kSenderId, kSenderBoot, &tx);
+    cfg.command_fn = &echo_action;
+    cfg.command_ctx = &calls;
+
+    btp::ReassemblySlot slots[2];
+    std::uint8_t slot_bytes[2][700];
+    btp::ReassemblyStorage storage[2] = {{slot_bytes[0], 700}, {slot_bytes[1], 700}};
+    std::uint8_t rx[700];
+    std::uint8_t scratch[512];
+    btp::Node node(cfg, slots, storage, 2, 1000U, rx, sizeof(rx), nullptr, 0U, nullptr, 0U,
+                   scratch, sizeof(scratch));
+    CHECK(!node.begin());  // nowhere to keep request/result pairs
+
+    DedupSlot dedup_slots[4];
+    std::uint8_t dedup_bytes[4][64];
+    DedupStorage dedup_storage[4];
+    for (std::size_t i = 0; i < 4; ++i) dedup_storage[i] = {dedup_bytes[i], 64};
+    DedupRequester dedup_requesters[2];
+    DedupCache dedup(dedup_slots, dedup_storage, 4, dedup_requesters, 2);
+    node.enable_commands(&dedup, nullptr, nullptr);
+    CHECK(node.begin());
+
+    Sink cons_tx;
+    TestConfig consumer_cfg = base_config(kPeerId, kPeerBoot, &cons_tx);
+    TestNode consumer(consumer_cfg);
+    CHECK(consumer.begin());
+    const std::uint8_t params[1] = {5};
+    CHECK(consumer.command(kSenderId, kSenderBoot, 3U, 1U, params, sizeof(params)) != 0U);
+    ReceivedMessage msg{};
+    CHECK(deliver(node, cons_tx, 0U, &msg) == NodeRx::CommandServed);
+    CHECK(calls.calls == 1 && calls.last_action_id == 3U);
 }
 
 // ===========================================================================
@@ -3740,7 +3866,82 @@ void test_seal_manifest_request_hook() {
     CHECK(encrypted());  // the hook only touches MANIFEST_REQUEST
 }
 
+// ---- compile-time pair check (2.51.0) ------------------------------------
+
+struct PlainLink : NodeConfig {
+    bool send(const std::uint8_t*, std::size_t) override { return true; }
+};
+struct SealedLink : PlainLink {
+    bool has_seal() const noexcept override { return true; }
+    bool seal(const btp::Header&, std::uint16_t, const std::uint8_t*, std::uint8_t*) override {
+        return true;
+    }
+};
+struct SealWithoutHas : PlainLink {  // the dangerous one: would send in the clear
+    bool seal(const btp::Header&, std::uint16_t, const std::uint8_t*, std::uint8_t*) override {
+        return true;
+    }
+};
+struct HasOpenWithoutOpen : PlainLink {
+    bool has_open() const noexcept override { return true; }
+};
+struct TerminalOnOnly : PlainLink {  // terminal_on() alone satisfies has_terminal()
+    bool has_terminal() const noexcept override { return true; }
+    void terminal_on(btp::Node&, const btp::LinkRef&, const btp::Header&, btp::ByteView,
+                     std::uint64_t) override {}
+};
+struct CommandWithoutHas : PlainLink {
+    void command(std::uint16_t, std::uint16_t, btp::ByteView, btp::NodeActionOutcome*,
+                 const btp::NodeCommandTicket&) override {}
+};
+struct ClockSplitAcrossLevels : PlainLink {
+    bool has_clock() const noexcept override { return true; }
+};
+struct ClockSplitDerived : ClockSplitAcrossLevels {  // clock() one level further down
+    std::uint64_t clock() override { return 1U; }
+};
+
+static_assert(btp::node_config_check<NodeConfig>::ok, "the base itself is consistent");
+static_assert(btp::node_config_check<PlainLink>::ok, "nothing optional overridden");
+static_assert(btp::node_config_check<SealedLink>::ok, "both halves of seal");
+static_assert(!btp::node_config_check<SealWithoutHas>::seal, "seal() without has_seal()");
+static_assert(!btp::node_config_check<SealWithoutHas>::ok, "seal() without has_seal()");
+static_assert(btp::node_config_check<SealWithoutHas>::open, "only the seal pair is wrong");
+static_assert(!btp::node_link_check<HasOpenWithoutOpen>::open, "has_open() without open()");
+static_assert(btp::node_config_check<TerminalOnOnly>::ok, "terminal_on() counts as terminal()");
+static_assert(!btp::node_config_check<CommandWithoutHas>::command, "command() without has_command()");
+static_assert(!btp::node_config_check<ClockSplitAcrossLevels>::clock, "has_clock() alone");
+static_assert(btp::node_config_check<ClockSplitDerived>::ok, "the pair may span two levels");
+
+// NodeWith<>: the defaults are StaticNode<>'s; one restated member changes
+// only that capacity.
+struct TwoLinkCapacities : btp::NodeCapacities {
+    static const std::size_t CatalogTopics = 16U;
+    static const std::size_t Links = 2U;
+};
+static_assert(std::is_same<btp::NodeWith<btp::NodeCapacities>, btp::StaticNode<> >::value,
+              "NodeWith<NodeCapacities> is StaticNode<>");
+static_assert(std::is_same<btp::NodeWith<TwoLinkCapacities>,
+                           btp::StaticNode<4, 600, 2048, 512, 16, 64, 1536, 8, 4, 128, 0, 2> >::value,
+              "restating two members changes exactly those two");
+
+void test_config_check_compiles_for_good_configs() {
+    // The checking constructor is picked for a subclass passed by its own
+    // type; it builds the same node as the NodeConfig& one.
+    SealedLink link;
+    link.source_id = kSenderId;
+    link.boot_id = kSenderBoot;
+    link.transport = kEspNowTransport;
+    btp::StaticNode<> node(link);
+    CHECK(node.begin());
+    btp::check_node_config<SealedLink>();  // also callable on its own
+}
+
 int main() {
+    test_config_check_compiles_for_good_configs();
+    test_has_command_set_after_construction_is_wired_by_begin();
+    test_bare_node_has_command_needs_a_cache();
+    test_handler_interfaces_round_trip();
     test_begin();
     test_reconfigure_before_begin();
     test_cleartext_roundtrip();
