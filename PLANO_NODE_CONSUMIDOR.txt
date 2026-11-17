@@ -1,0 +1,387 @@
+PLANO -- btp::Node como objeto unico do consumidor + cache de manifest
+=====================================================================
+Criado: 2026-09-25
+Repos: BTP (lib), TraceView, bally_OS (so a etapa E5)
+Base: BTP 2.47.0 (branch feature/node-multi-link)
+
+VISAO GERAL
+-----------
+Hoje o btp::Node esta completo do lado PRODUTOR (robo: serve_catalog,
+publish, SubscriptionTable, comandos, STATUS). Do lado CONSUMIDOR ele
+cobre so HELLO e COMMAND. O TraceView contorna o Node e monta frame na
+mao (header + ChannelSeal + BtpSession::sendFrame) em 6 lugares:
+
+  componente TraceView       o que faz por fora do Node
+  -------------------------  ------------------------------------------
+  ManifestClient             MANIFEST_REQUEST/DATA, varios sources
+  SubscriptionManager        SUBSCRIBE/UNSUBSCRIBE/renovacao/STATUS
+  ClockSync                  COMMAND_REQUEST (set_clock)
+  HubBinder                  COMMAND_REQUEST (bind de filho no dongle)
+  BtpBackend::keepalive      MANIFEST_REQUEST "sentinela" so p/ gerar trafego
+  BtpBackend::sessionClose   SESSION_CLOSE na mao
+  BtpBackend::terminal       TERMINAL_IN na mao
+
+E o receive e duplo: BtpSession -> ProtocolRouter (caminho principal)
+e, em paralelo, uma copia "sombra" p/ m_node->receive().
+
+Objetivo: o Node vira o unico ponto de entrada/saida BTP do consumidor.
+Quem usa a lib (TraceView, dongle, terceiros) nao monta header, nao sela,
+nao correlaciona request/result na mao. Junto, entra o cache de manifest
+plugavel (hook no NodeConfig, desligado por padrao).
+
+Fica FORA do Node (fronteira do library.md 16.11, mantida):
+  - framing (COBS/serial/BLE) -> BtpSession continua so framing;
+  - politica de roteamento de hub (repassar frame p/ filho);
+  - agregacao N widgets -> 1 SUBSCRIBE (o Node ganha as primitivas,
+    o refcount continua no app);
+  - derivacao de chave (corpo do seal/open);
+  - ONDE o cache e gravado (so o hook e da lib).
+
+Versionamento: tudo aqui e MINOR (fio inalterado). E1+E2 = 2.48.0,
+E3 = 2.49.0.
+
+
+ETAPA E1 -- Consumidor de manifest multi-source (BTP 2.48.0)
+------------------------------------------------------------
+OBJETIVO
+  O Node entrega cada MANIFEST_DATA de qualquer source ao app, em vez
+  de so alimentar um Catalog unico (learn_catalog, que faz clear() a
+  cada resposta e por isso nao serve para hub).
+
+PASSOS
+  1. Callback novo (padrao on_sample/on_terminal):
+       using NodeManifestFn = void (*)(void* ctx, const NodeManifest& m);
+       void Node::on_manifest(NodeManifestFn fn, void* ctx) noexcept;
+     NodeManifest carrega:
+       - header      : ManifestHeader da resposta que CHEGOU (boot_id,
+                       source_info, uuid, revision sempre frescos);
+       - payload     : ByteView do payload que chegou;
+       - topics      : ByteView de onde ler os topicos (= payload numa
+                       resposta completa; = blob do cache num NOT_MODIFIED);
+       - from_cache  : bool;
+       - link        : LinkRef de onde veio.
+     So para status SUCCESS. Falha (NOT_FOUND/STALE_TARGET_BOOT/...)
+     vai num evento separado: NodeRx::ManifestRejected + manifest_outcome()
+     com (source_id, status, error_code), p/ o app limpar cooldown.
+  2. receive() com on_manifest setado: consome o MANIFEST_DATA
+     (NodeRx::ManifestHandled) em vez de devolver NodeRx::Complete.
+     learn_catalog continua funcionando igual e pode coexistir.
+  3. Nao interceptar o que o Node nao pediu? NAO: MANIFEST_DATA nao
+     solicitado (announce_catalog, request reference zero) tambem e
+     entregue -- e valido pela spec.
+
+CRITERIOS DE ACEITE
+  - Enumeracao target=0 de um hub com N robos -> N chamadas de
+    on_manifest, nenhuma apaga a outra.
+  - Codigo de produtor existente (bally_OS) compila sem mudanca.
+
+
+ETAPA E2 -- Cache de manifest plugavel (BTP 2.48.0)
+---------------------------------------------------
+OBJETIVO
+  O app decide ONDE guardar (arquivo, NVS, SD, nada); a lib decide
+  QUANDO ler/gravar e como usar NOT_MODIFIED. Sem override = desligado,
+  comportamento identico ao de hoje.
+
+PASSOS
+  1. Hooks no NodeConfig (mesmo padrao has_seal()/seal()):
+       virtual bool has_manifest_cache() const noexcept { return false; }
+       virtual bool manifest_load(uint32_t source_id,
+                                  uint32_t* revision, uint8_t uuid[16],
+                                  uint8_t* buf, size_t cap,
+                                  size_t* len) noexcept;
+       virtual void manifest_store(uint32_t source_id, uint32_t revision,
+                                   const uint8_t uuid[16],
+                                   const uint8_t* payload,
+                                   size_t len) noexcept;
+       virtual void manifest_evict(uint32_t source_id) noexcept;
+     O valor guardado e o PAYLOAD CRU do MANIFEST_DATA completo (o
+     formato de fio ja e a serializacao; nada de formato novo).
+  2. request_manifest_cached(target_source_id, target_boot_id):
+     chama manifest_load e preenche known_config_revision (0 se miss).
+     request_manifest() atual fica intacto.
+     target 0 (enumeracao) nao usa cache -- known_config_revision e por
+     alvo na spec; o app deve preferir requests direcionados quando ja
+     sabe quem existe (ex.: lista de peers do hub).
+  3. Recebimento, com cache ligado:
+     - completo SUCCESS -> manifest_store -> on_manifest(from_cache=0);
+     - NOT_MODIFIED     -> manifest_load  -> on_manifest(from_cache=1,
+                           header = resposta nova, topics = cache);
+     - NOT_MODIFIED e load falhou (cache apagado no meio) ->
+                           manifest_evict + re-request revision 0;
+     - uuid da resposta != uuid do cache -> manifest_evict + re-request
+                           revision 0 (outro aparelho, mesmo source_id).
+  4. learn_catalog + cache: Catalog::ingest() num NOT_MODIFIED hoje
+     "mantem o que tem" -- mas apos reiniciar o consumidor o Catalog
+     esta vazio. Com cache, o Node faz ingest do blob do cache nesse
+     caso. (Bug latente que o cache expoe; corrigir aqui.)
+  5. Buffer: manifest_load escreve no scratch_buffer_ do Node (ja
+     dimensionado p/ MANIFEST_DATA no StaticNode). Sem scratch ->
+     cache tratado como desligado.
+  6. Node::connected_peer_uuid(uint8_t out[16]) -- ja decodificado no
+     HELLO_RESULT, so nao exposto.
+
+CRITERIOS DE ACEITE
+  - Consumidor com cache em memoria: 2a sessao com mesma revision
+    recebe NOT_MODIFIED e on_manifest(from_cache=1) com topicos certos
+    e boot_id novo.
+  - Revision diferente -> resposta completa, cache regravado.
+  - uuid trocado -> evict + re-request automatico.
+
+
+ETAPA E3 -- Resto do consumidor dentro do Node (BTP 2.49.0)
+-----------------------------------------------------------
+OBJETIVO
+  Fechar os outros contornos do TraceView, para o Node ser o unico
+  objeto. Cada item e independente; ordem sugerida abaixo.
+
+PASSOS
+  1. Keepalive de verdade. Hoje o TraceView manda um MANIFEST_REQUEST
+     p/ um source inexistente (ou boot_id errado, no TCP/BLE direto)
+     so para gerar resposta e alimentar o watchdog. O Node ganha
+     enable_keepalive(period_ms): no tick(), sem trafego enviado ha
+     period_ms e com sessao ativa, manda o "ping" que a spec permite.
+     >> DECISAO: a spec nao tem PING dedicado. Opcoes:
+        (a) formalizar o truque atual dentro do Node (MANIFEST_REQUEST
+            p/ o proprio peer com boot_id errado -> STALE_TARGET_BOOT);
+        (b) adicionar um PING/PONG CONTROL na spec (MINOR, object_id novo,
+            exige firmware atualizado nos dois lados).
+        Recomendo (a) agora, (b) quando houver outra mudanca de spec.
+  2. SESSION_CLOSE: BtpBackend::requestSessionClose -> Node::disconnect()
+     (ja existe). So migracao no TraceView, nada na lib.
+  3. TERMINAL_IN: Node::send_terminal(bytes) com chunking p/ o limite
+     negociado (hoje o TraceView corta em 1 KB na mao). Selagem via
+     cfg.seal como todo o resto.
+  4. Comandos: CommandClient do Node ja suporta varios slots. Verificar
+     se o TraceView habilita >= 3 slots (comando do usuario + ClockSync
+     + HubBinder simultaneos) e migrar ClockSync/HubBinder p/
+     node.command() + command_outcome(). Nada na lib, provavelmente.
+  5. Assinaturas: SubscriptionClient ganha
+       bool resubscribe(uint32_t local_id, uint32_t rate_millihz, ...);
+     (SUBSCRIBE com a mesma sessao+topico substitui atomicamente,
+     commands.md 4). E a unica coisa que faltava p/ o SubscriptionManager
+     do TraceView usar o Node -- o refcount de widgets continua no app.
+     Mais: entrega de STATUS recebido ao app (on_status(fn, ctx)).
+  6. Receive unico: com 1-5 prontos, o Node vira o caminho PRINCIPAL.
+     BtpSession fica so framing; ProtocolRouter passa a ser alimentado
+     pelo que o Node devolve como NodeRx::Complete (telemetria, log).
+     O repasse de frame cru p/ filhos de hub continua como esta.
+
+CRITERIOS DE ACEITE
+  - TraceView sem nenhum btp::Header montado a mao fora de testes.
+  - ChannelSeal usado so dentro de BtpBackend::seal()/open().
+
+
+ETAPA T1 -- TraceView: ManifestStore + ManifestClient via Node
+--------------------------------------------------------------
+DEPENDE: E1, E2
+PASSOS
+  1. ManifestStore (instancia unica no app, compartilhada por todos os
+     BtpBackend): grava em AppDataLocation/manifests/<source_id hex>.bin
+     (payload cru) + indice JSON (source_id, uuid, revision, source_name,
+     lastSeen). BtpBackend implementa os hooks do NodeConfig
+     delegando p/ ele.
+  2. Settings: "Cache de manifest" liga/desliga + botao "Limpar cache".
+  3. ManifestClient vira camada fina:
+     - envia por m_node->request_manifest_cached();
+     - recebe por on_manifest (tira a assinatura do ProtocolRouter p/
+       nao processar em dobro);
+     - parse dos topicos continua (le de NodeManifest.topics);
+     - some a identidade privada e o ChannelSeal proprio;
+     - mantem cooldown do onUnknownSchema e os sinais Qt.
+  4. Pre-popular o TelemetryCatalog a partir do cache assim que o
+     sourceId do device e conhecido (antes de conectar) -> combos de
+     topico dos widgets funcionam offline.
+  5. Dongle/serial: trocar requestFullCatalog() por requests
+     direcionados por peer da lista hub.peers; enumeracao completa so
+     como fallback enquanto a lista ainda nao chegou.
+
+
+ETAPA T2 -- TraceView: migrar o resto p/ o Node
+-----------------------------------------------
+DEPENDE: E3 (item a item)
+  Keepalive, SESSION_CLOSE, TERMINAL_IN, ClockSync, HubBinder,
+  SubscriptionManager, e por ultimo o receive unico (E3.6).
+
+
+ETAPA T3 -- TraceView: mesmo dispositivo em canais diferentes
+-------------------------------------------------------------
+DEPENDE: T1
+PASSOS
+  1. DeviceRegistry: agrupa DeviceConnections pelo uuid/source_id
+     identificado (HELLO_RESULT no direto, MANIFEST_DATA no hub). O
+     ManifestStore ja e o indice.
+  2. Juntar dois links como o MESMO aparelho so depois que a sessao
+     selada com a chave E funcionou nos dois (uuid = MAC+constante,
+     nao e segredo; o AEAD e que autentica).
+  3. refreshWidgetSubscription: se o link preferido do widget nao esta
+     Live, usa outro link Live do mesmo source_id (prioridade
+     configuravel, ex. TCP > BLE > Hub > Serial). Assina em UM link
+     por vez. Disparar o refresh quando o estado de qualquer link muda.
+  4. (Depois, junto com adicao automatica) modelo 1 device -> N links
+     no .tvproj / DevicesGrid / DeviceConfigDialog; senha no device.
+
+
+ETAPA E5 -- bally_OS: config_revision automatico
+------------------------------------------------
+DEPENDE: E2 (ou junto)
+  1. Lib: Catalog::set_config_revision_auto() = hash estavel (CRC32/
+     FNV) dos registros de topico/campo/acao codificados. Nunca 0.
+  2. bally_OS ManifestCatalog.cpp:23 troca kConfigRevision fixo pela
+     chamada acima. Sem isso, um topico alterado sem bump manual faz o
+     cache servir schema velho.
+  3. Dongle: nada obrigatorio (ManifestCache dele ja responde
+     NOT_MODIFIED). Migrar p/ o Node fica p/ depois.
+
+
+ORDEM
+-----
+  E1+E2+E5.1 (BTP 2.48.0) -> E5.2 (bally_OS) -> T1 -> [validacao com
+  hardware: serial+dongle, TCP, BLE] -> E3 (BTP 2.49.0) -> T2 -> T3
+
+DECISOES (2026-09-25)
+---------------------
+  D1. Testes: o agente compila E escreve/roda testes automatizados
+      (tests/ da lib, ctest do TraceView). So o que exige hardware
+      (dongle, robo, TCP/BLE reais) fica p/ o usuario gravar e testar.
+  D2. Keepalive: formalizar no Node o mecanismo atual (opcao a). Ele ja
+      roda em TODA sessao com HELLO, nao so TCP: serial/dongle (sentinela
+      0xFFFFFFFF -> NOT_FOUND, 5 s) e TCP/BLE direto (proprio peer com
+      boot_id errado -> STALE_TARGET_BOOT). Filho de hub nao precisa
+      (nao tem sessao propria; o keepalive do pai cobre o link).
+      O Node escolhe o alvo sozinho: peer conectado com boot_id+1 se ele
+      serve manifest, sentinela caso contrario.
+  D3. Pular MANIFEST_REQUEST no direto quando HELLO_RESULT.config_revision
+      == cache: CONFIGURAVEL.
+        - lib: flag NodeConfig/Node (ex. set_manifest_skip_on_hello(bool)),
+          default false;
+        - TraceView: opcao em Settings "Confiar no cache quando a revisao
+          do HELLO bater", default DESLIGADA, com texto explicando:
+          RECOMENDADO NAO PULAR -- o NOT_MODIFIED custa ~60 B e traz o
+          source_info atualizado (versao de firmware, particao etc.);
+          pulando, esses dados ficam velhos ate a proxima consulta.
+        - Com o skip ligado, on_manifest(from_cache=1) e entregue com
+          header sintetizado (boot_id do HELLO_RESULT, source_info do
+          cache) e um campo source_info_stale=true.
+
+RESULTADO E1 + E2 + E5.1 (2026-09-25) -- BTP 2.48.0, NAO commitado
+------------------------------------------------------------------
+Branch feature/node-multi-link, working tree. Build desktop (g++,
+-Wall -Wextra -Wpedantic -Werror) OK; ctest 20/20 OK, incluindo 10
+testes novos em tests/test_node.cpp.
+
+API nova:
+  - Node::on_manifest(fn, ctx) + NodeManifest {header, payload,
+    topics_payload, from_cache, source_info_stale, link};
+    NodeRx::ManifestHandled / ManifestRejected; manifest_outcome()
+    (target recuperado por correlacao: ring de 8 requests pendentes).
+  - NodeConfig::has_manifest_cache / manifest_load(source_id, ByteView*)
+    / manifest_store(source_id, ManifestHeader, payload) / manifest_evict.
+    manifest_load devolve uma VIEW (sem buffer extra); o Node valida
+    (header SUCCESS completo, mesmo source, raw_records exato) e evicta
+    lixo.
+  - Node::request_manifest_cached(target, boot); set_manifest_skip_on_hello
+    (default false); Node::connected_peer_uuid();
+    SessionInitiator::peer_uuid().
+  - Catalog::set_config_revision_auto() / content_revision() (FNV-1a,
+    nunca 0, sem source_info). set_config_revision() e ingest() desligam
+    o modo auto.
+Correcoes que vieram junto:
+  - rejeicao (NOT_FOUND/STALE_TARGET_BOOT) nao esvazia mais o learn
+    catalog;
+  - learn_catalog + cache: NOT_MODIFIED num consumidor reiniciado
+    preenche o catalogo com o blob do cache.
+Docs: library.md 16.4 (3 subsecoes novas), CHANGELOG 2.48.
+Pendente: build xtensa (dir build/ quebrado, sem build.ninja) -- fica
+coberto pelo build do bally_OS na E5.2. bally_OS: alem do
+ManifestCatalog.cpp:23, os HelloBuilder().config_revision(kConfigRevision)
+em BallyRobot.cpp:833/845 precisam passar catalog.config_revision().
+  (atualizacao: BTP commitado localmente -- 435950d 2.48.0, 2f4f030
+  seal_manifest_request, 175dba3 docs; sem tag, sem push.)
+
+RESULTADO E5.2 (2026-09-25) -- bally_OS, NAO commitado
+------------------------------------------------------
+kConfigRevision removido. ManifestCatalog::populate() chama
+catalog.set_config_revision_auto(); os dois HelloBuilder (TCP/BLE) em
+BallyRobot.cpp passam node_->catalog().config_revision();
+test_manifest_responder usa node.catalog().config_revision().
+pio test -e native: 88/88. pio run -e esp32-s3: SUCCESS (BTP 2.48 via
+components/btp -> checkout irmao, entao o build xtensa esta coberto).
+Atencao: a revisao anunciada muda de 4 para um hash -- primeira conexao
+depois de gravar baixa o manifesto inteiro uma vez (esperado).
+PENDENTE HARDWARE: gravar o robo.
+
+RESULTADO T1 (2026-09-25) -- TraceView, NAO commitado
+-----------------------------------------------------
+Lib nova: NodeLink::seal_manifest_request(target) (filho de hub pede em
+claro: quem responde e o cache do dongle, sem chave E).
+TraceView:
+  - lib/protocol/manifeststore.{h,cpp}: 1 arquivo por source_id em
+    AppDataLocation/manifests/<ID>.btpm (payload cru, QSaveFile), singleton
+    compartilhado por todos os BtpBackend; enabled/skipOnHello.
+  - ManifestClient reescrito sobre btp::Node: pede por
+    request_manifest[_cached], recebe por on_manifest; sem identidade
+    propria, sem ChannelSeal, sem ProtocolRouter. primeFromCache(source)
+    registra schemas (sem boot) antes de conectar.
+  - BtpBackend: hooks de cache -> ManifestStore; accept_cleartext libera
+    MANIFEST_DATA/SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT do hub no filho com
+    chave; seal_manifest_request = (nao e filho); NodeRx::ManifestRejected
+    -> onManifestRejected; sessao direta TCP/BLE pede requestCatalogFor
+    (alvo = robo, com cache) em vez de enumeracao; setHubEndpoint chama
+    primeFromCache.
+  - Console (serial/dongle) CONTINUA com enumeracao target=0 (passo 5 do
+    T1 adiado: nao sei se o dongle responde MANIFEST_REQUEST direcionado a
+    ele mesmo, e o catalogo do console pode ter consumidores de schemas de
+    robo -- precisa de hardware para validar).
+  - Settings > Connections > "Manifest cache": liga/desliga (default on),
+    "confiar sem perguntar quando a revisao bater (TCP/BLE)" (default off,
+    com aviso de nao recomendado), botao "Clear cache (N device(s))".
+  - CMakeLists: GIT_TAG v2.48.0 (tag ainda NAO existe no GitHub -- o build
+    local usa FETCHCONTENT_SOURCE_DIR_BTP=C:/git/BTP; CI quebra ate
+    empurrar a BTP + tag).
+Build OK; ctest 53/53; test_manifestclient 24/24 (fixture novo sobre
+StaticNode real + 4 testes de cache/identidade).
+Pendente:
+  - traducoes (.ts) das strings novas de Settings;
+  - commit: mainwindow.cpp, lib/CMakeLists.txt, tests/CMakeLists.txt
+    estao misturados com trabalho do usuario em andamento;
+  - HARDWARE: (1) filho de hub: catalogo chega; 2a conexao manda
+    known_rev != 0 e recebe NOT_MODIFIED; (2) TCP/BLE direto idem;
+    (3) topicos de um filho aparecem no editor de widget com o dongle
+    desconectado (cache); (4) Settings: limpar cache -> proxima conexao
+    baixa tudo de novo.
+
+RESULTADO T3 (2026-09-25) -- varias conexoes por dispositivo, NAO commitado
+---------------------------------------------------------------------------
+Pedido do usuario: botao que abre uma tabela para adicionar varias formas
+de conectar no mesmo dispositivo; em loop ele procura ate uma funcionar.
+  - Modelo (devices/device.h): Device ganhou extraLinks (DeviceLink: tipo,
+    porta/baud, usb, host/porta TCP, BLE, hub+source_id, enabled) e
+    activeLink (vivo, nao salvo). Os campos antigos continuam sendo a
+    conexao PRINCIPAL -> projeto antigo abre igual; projeto de 1 link salva
+    identico. effectiveDevice() aplica o link em uso; deviceLinkState() ja
+    julga pelo link em uso.
+  - Loop: DeviceLinkCycler (puro, testado): se o link em uso nao esta Live
+    por 10 s (kAttemptMs), vai pro proximo habilitado+configurado, dando a
+    volta. Sem preempcao (fica no fallback que funciona). Parado quando o
+    usuario desconectou ou o dialogo de config esta aberto.
+  - MainWindow: timer 1 s -> tickDeviceLinkCycles -> switchDeviceLink
+    (recria a DeviceConnection se o tipo muda; senao disconnect+dial).
+    onDeviceUpdated so volta pro principal quando a CONFIG dos links muda
+    (assinatura) -- ele roda a cada connect/disconnect.
+    Corrigido bug antigo: refreshWidgetSubscription comparava deviceId, e
+    apos recriar a conexao reaproveitava handle do backend morto; agora
+    compara o Backend (QPointer). Logica de hub/presenca/BLE uuid usa o
+    link em uso.
+  - UI: DeviceConfigDialog > "Other connections: [Add...]/[N more...]" abre
+    DeviceLinksDialog (tabela: On / Type / Target / Option; Add, Remove,
+    Up, Down). Principal mostrado em cima, read-only. Card mostra
+    "via TCP . ..." quando o dispositivo tem mais de um link.
+  - DevicesGrid: setDeviceActiveLink (nao emite deviceUpdated);
+    childDeviceIds considera links hub alternativos (nao deixa apagar o
+    dongle usado por um link alternativo).
+Build OK; ctest 53/53; test_device +8 testes (20/20). Dialogo conferido
+por sonda offscreen (layout ok).
+Pendente: traducoes; teste com hardware (TCP principal + BLE alternativo:
+derrubar o Wi-Fi do robo -> em ~10 s passa pro BLE e os graficos voltam);
+identidade (avisar se um link responde com outro robo) ainda so no BLE.
